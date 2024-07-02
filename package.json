@@ -2,6 +2,13 @@
   "name": "api-mediator",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "dev": "bun mapper/main.ts",
+    "openapi": "./openapi/start.sh"
+  },
+  "dependencies": {
+    "openai": "^4.52.2"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

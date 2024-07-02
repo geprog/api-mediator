@@ -1,0 +1,67 @@
+openapi: 3.1.0
+info:
+  title: Gitlab Issue API Mock
+  description: ''
+  version: 1.0.0
+servers:
+  - url: /
+    description: ''
+paths:
+  /issues:
+    get:
+      operationId: getIssues
+      tags:
+        - Issue
+      responses:
+        '200':
+          description: An array of all the issues from Gitlab
+          content:
+            application/json:
+              schema:
+                type: array
+                items: 
+                  $ref: '#/components/schemas/Issue'
+      summary: Endpoint for loading issues
+      description: >-
+        Retrieves all the issues from Gitlab that are currently existing.
+      parameters: []
+      deprecated: false
+    post:
+      operationId: createIssue
+      tags:
+        - Issue
+      requestBody: 
+        content: 
+          application/json: 
+            schema: 
+              $ref: '#/components/schemas/Issue'  
+      response:
+        '200':
+          description: An array of all the issues from Gitlab
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+components:
+  schemas:
+    Issue:
+      type: object
+      description: ''
+      deprecated: false
+      properties:
+        id:
+          type: number
+        title:
+          type: string
+        description:
+          type: string
+        closed:
+          type: boolean
+  responses: {}
+  parameters: {}
+  examples: {}
+  requestBodies: {}
+  headers: {}
+  securitySchemes: {}
+security: []
+tags: []
