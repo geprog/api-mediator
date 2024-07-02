@@ -30,11 +30,33 @@ paths:
       operationId: createIssue
       tags:
         - Issue
+      summary: Endpoint for creating a new issue
+      description: >-
+        Creating a new issue by providing all attributes
       requestBody: 
         content: 
           application/json: 
             schema: 
               $ref: '#/components/schemas/Issue'  
+      response:
+        '200':
+          description: The just created issue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+    patch:
+      operationId: updateIssue
+      tags:
+        - Issue
+      summary: Endpoint for updating an existing issue
+      description: >-
+        Update an existing issue by providing all attributes including the unchanged ones.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Issue'
       response:
         '200':
           description: An array of all the issues from Gitlab
