@@ -7,14 +7,14 @@ servers:
   - url: /
     description: ''
 paths:
-  /issues:
+  /issue:
     get:
-      operationId: getIssues
+      operationId: loadAllIssues
       tags:
         - Issue
       responses:
         '200':
-          description: An array of all the issues from Gitlab
+          description: An array of all Github issues
           content:
             application/json:
               schema:
@@ -23,18 +23,40 @@ paths:
                   $ref: '#/components/schemas/Issue'
       summary: Endpoint for loading issues
       description: >-
-        Retrieves all the issues from Gitlab that are currently existing.
+        Retrieves all the issues that are currently existing.
       parameters: []
       deprecated: false
     post:
       operationId: createIssue
       tags:
         - Issue
+      summary: Endpoint for creating a new issue
+      description: >-
+        Creating a new issue by providing all attributes
       requestBody: 
         content: 
           application/json: 
             schema: 
               $ref: '#/components/schemas/Issue'  
+      response:
+        '200':
+          description: The just created issue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+    patch:
+      operationId: updateIssue
+      tags:
+        - Issue
+      summary: Endpoint for updating an existing issue
+      description: >-
+        Update an existing issue by providing all attributes including the unchanged ones.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Issue'
       response:
         '200':
           description: An array of all the issues from Gitlab
@@ -51,9 +73,9 @@ components:
       properties:
         id:
           type: number
-        title:
+        name:
           type: string
-        description:
+        body:
           type: string
         closed:
           type: boolean
