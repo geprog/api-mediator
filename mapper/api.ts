@@ -6,8 +6,7 @@ export async function parseOpenAPISpec(
   baseUrl: string,
 ): Promise<Api> {
   try {
-    const apiSpecContent = await Bun.file(apiSpecPath).text();
-    let apiSpec = await OpenAPIParser.validate(apiSpecContent);
+    let apiSpec = await OpenAPIParser.validate(apiSpecPath);
     console.log(
       'Parsed openapi spec of API name: %s, Version: %s',
       apiSpec.info.title,
