@@ -29,11 +29,11 @@ export type Field = {
 
 type MappingPart = {
   api: Api;
-  getAll: string;
-  getOne: string;
-  create: string;
-  update: string;
-  delete: string;
+  getAll?: Endpoint;
+  getOne?: Endpoint;
+  create?: Endpoint;
+  update?: Endpoint;
+  delete?: Endpoint;
   fieldMapping: Record<string, string>;
 };
 
