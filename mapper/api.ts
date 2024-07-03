@@ -15,7 +15,7 @@ function isNotReferenceObject(
 export async function parseOpenAPISpec(
   apiSpecPath: string,
   baseUrl: string,
-  parameters: Api['parameters'] = [],
+  parameterSubstitutions: Api['parameterSubstitutions'] = [],
 ): Promise<Api> {
   try {
     let apiSpec = await OpenAPIParser.validate(apiSpecPath);
@@ -90,8 +90,8 @@ export async function parseOpenAPISpec(
       name: apiSpec.info.title,
       baseUrl,
       accessToken: '',
+      parameterSubstitutions,
       endpoints,
-      parameters,
       schemas: [],
     };
     return api;

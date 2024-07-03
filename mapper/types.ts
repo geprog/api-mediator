@@ -2,7 +2,7 @@ export type Api = {
   name: string;
   baseUrl: string;
   accessToken: string;
-  parameters: {
+  parameterSubstitutions: {
     name: string;
     value: string;
   }[];
