@@ -28,6 +28,8 @@ export type Field = {
 }
 
 export type Mapping = {
+    sourceAPI: Api;
+    targetAPI: Api;
     source: Endpoint;
     target: Endpoint;
     /**

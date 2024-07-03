@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
-type Issue = {
+type GitlabIssue = {
   id: number;
   title: string;
   description: string;
@@ -47,11 +47,11 @@ gitlab.put('/issues', async ({ req, notFound, json }) => {
   return json(updatedIssues);
 });
 
-async function updateGitlabIssues(issues: Issue[]): Promise<void> {
+async function updateGitlabIssues(issues: GitlabIssue[]): Promise<void> {
   await Bun.write(await getFile(), JSON.stringify(issues, undefined, 2));
 }
 
-async function getGitlabIssues(): Promise<Issue[]> {
+async function getGitlabIssues(): Promise<GitlabIssue[]> {
   const file = await getFile();
   const issues = await file.json();
 
