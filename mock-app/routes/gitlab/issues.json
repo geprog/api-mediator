@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "id": 0,
+    "title": "string",
+    "description": "string",
+    "closed": true
+  },
+  {
+    "id": 1,
+    "title": "string",
+    "description": "string",
+    "closed": true
+  }
+]
