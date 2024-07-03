@@ -1,0 +1,706 @@
+{
+  "organization": {
+    "gitea": {
+      "getAll": "GET /orgs",
+      "getOne": "GET /orgs/{org}",
+      "create": "POST /orgs",
+      "update": "PATCH /orgs/{org}",
+      "delete": "DELETE /orgs/{org}"
+    },
+    "github": {
+      "getAll": "GET /organizations",
+      "getOne": "GET /orgs/{org}",
+      "create": "",
+      "update": "PATCH /orgs/{org}",
+      "delete": "DELETE /orgs/{org}"
+    }
+  },
+  "repositories": {
+    "gitea": {
+      "getAll": "GET /repos/search",
+      "getOne": "GET /repos/{owner}/{repo}",
+      "create": "POST /org/{org}/repos",
+      "update": "PATCH /repos/{owner}/{repo}",
+      "delete": "DELETE /repos/{owner}/{repo}"
+    },
+    "github": {
+      "getAll": "GET /search/repositories",
+      "getOne": "GET /repos/{owner}/{repo}",
+      "create": "POST /user/repos",
+      "update": "PATCH /repos/{owner}/{repo}",
+      "delete": "DELETE /repos/{owner}/{repo}"
+    }
+  },
+  "issues": {
+    "gitea": {
+      "getAll": "GET /repos/issues/search",
+      "getOne": "GET /repos/{owner}/{repo}/issues/{index}",
+      "create": "POST /repos/{owner}/{repo}/issues",
+      "update": "PATCH /repos/{owner}/{repo}/issues/{index}",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /issues",
+      "getOne": "GET /repos/{owner}/{repo}/issues/{issue_number}",
+      "create": "POST /repos/{owner}/{repo}/issues",
+      "update": "PATCH /repos/{owner}/{repo}/issues/{issue_number}",
+      "delete": ""
+    }
+  },
+  "labels": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/labels",
+      "getOne": "GET /repos/{owner}/{repo}/labels/{id}",
+      "create": "POST /repos/{owner}/{repo}/labels",
+      "update": "PATCH /repos/{owner}/{repo}/labels/{id}",
+      "delete": "DELETE /repos/{owner}/{repo}/labels/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/labels",
+      "getOne": "GET /repos/{owner}/{repo}/labels/{name}",
+      "create": "POST /repos/{owner}/{repo}/labels",
+      "update": "PATCH /repos/{owner}/{repo}/labels/{name}",
+      "delete": "DELETE /repos/{owner}/{repo}/labels/{name}"
+    }
+  },
+  "milestones": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/milestones",
+      "getOne": "GET /repos/{owner}/{repo}/milestones/{id}",
+      "create": "POST /repos/{owner}/{repo}/milestones",
+      "update": "PATCH /repos/{owner}/{repo}/milestones/{id}",
+      "delete": "DELETE /repos/{owner}/{repo}/milestones/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/milestones",
+      "getOne": "GET /repos/{owner}/{repo}/milestones/{milestone_number}",
+      "create": "POST /repos/{owner}/{repo}/milestones",
+      "update": "PATCH /repos/{owner}/{repo}/milestones/{milestone_number}",
+      "delete": "DELETE /repos/{owner}/{repo}/milestones/{milestone_number}"
+    }
+  },
+  "teams": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/teams",
+      "getOne": "GET /teams/{id}",
+      "create": "POST /orgs/{org}/teams",
+      "update": "PATCH /teams/{id}",
+      "delete": "DELETE /teams/{id}"
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/teams",
+      "getOne": "GET /teams/{team_id}",
+      "create": "POST /orgs/{org}/teams",
+      "update": "PATCH /teams/{team_id}",
+      "delete": "DELETE /teams/{team_id}"
+    }
+  },
+  "activitypub": {
+    "gitea": {
+      "getAll": "",
+      "getOne": "GET /activitypub/user-id/{user-id}",
+      "create": "POST /activitypub/user-id/{user-id}/inbox",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "gitignore": {
+    "gitea": {
+      "getAll": "GET /gitignore/templates",
+      "getOne": "GET /gitignore/templates/{name}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /gitignore/templates",
+      "getOne": "GET /gitignore/templates/{name}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "licenses": {
+    "gitea": {
+      "getAll": "GET /licenses",
+      "getOne": "GET /licenses/{name}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /licenses",
+      "getOne": "GET /licenses/{license}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "markdown": {
+    "gitea": {
+      "getAll": "",
+      "getOne": "",
+      "create": "POST /markdown/raw",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "POST /markdown/raw",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "notifications": {
+    "gitea": {
+      "getAll": "GET /notifications",
+      "getOne": "GET /notifications/threads/{id}",
+      "create": "",
+      "update": "PUT /notifications",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /notifications",
+      "getOne": "GET /notifications/threads/{thread_id}",
+      "create": "",
+      "update": "PUT /notifications",
+      "delete": ""
+    }
+  },
+  "orgsHooks": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/hooks",
+      "getOne": "GET /orgs/{org}/hooks/{id}",
+      "create": "POST /orgs/{org}/hooks",
+      "update": "PATCH /orgs/{org}/hooks/{id}",
+      "delete": "DELETE /orgs/{org}/hooks/{id}"
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/hooks",
+      "getOne": "GET /orgs/{org}/hooks/{hook_id}",
+      "create": "POST /orgs/{org}/hooks",
+      "update": "PATCH /orgs/{org}/hooks/{hook_id}",
+      "delete": "DELETE /orgs/{org}/hooks/{hook_id}"
+    }
+  },
+  "orgsMemberships": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/members",
+      "getOne": "GET /orgs/{org}/members/{username}",
+      "create": "",
+      "update": "",
+      "delete": "DELETE /orgs/{org}/members/{username}"
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/members",
+      "getOne": "GET /orgs/{org}/members/{username}",
+      "create": "",
+      "update": "PUT /orgs/{org}/memberships/{username}",
+      "delete": "DELETE /orgs/{org}/members/{username}"
+    }
+  },
+  "orgsSecrets": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/actions/secrets",
+      "getOne": "",
+      "create": "",
+      "update": "PUT /orgs/{org}/actions/secrets/{secretname}",
+      "delete": "DELETE /orgs/{org}/actions/secrets/{secretname}"
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/actions/secrets",
+      "getOne": "GET /orgs/{org}/actions/secrets/{secret_name}",
+      "create": "",
+      "update": "PUT /orgs/{org}/actions/secrets/{secret_name}",
+      "delete": "DELETE /orgs/{org}/actions/secrets/{secret_name}"
+    }
+  },
+  "packages": {
+    "gitea": {
+      "getAll": "GET /packages/{owner}",
+      "getOne": "GET /packages/{owner}/{type}/{name}/{version}",
+      "create": "",
+      "update": "",
+      "delete": "DELETE /packages/{owner}/{type}/{name}/{version}"
+    },
+    "github": {
+      "getAll": "GET /user/packages",
+      "getOne": "GET /user/packages/{package_type}/{package_name}",
+      "create": "",
+      "update": "",
+      "delete": "DELETE /user/packages/{package_type}/{package_name}"
+    }
+  },
+  "issue_comments": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/comments",
+      "getOne": "GET /repos/{owner}/{repo}/issues/comments/{id}",
+      "create": "POST /repos/{owner}/{repo}/issues/{index}/comments",
+      "update": "PATCH /repos/{owner}/{repo}/issues/comments/{id}",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/comments/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/comments",
+      "getOne": "GET /repos/{owner}/{repo}/issues/comments/{comment_id}",
+      "create": "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+      "update": "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}"
+    }
+  },
+  "releases": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/releases",
+      "getOne": "GET /repos/{owner}/{repo}/releases/{id}",
+      "create": "POST /repos/{owner}/{repo}/releases",
+      "update": "PATCH /repos/{owner}/{repo}/releases/{id}",
+      "delete": "DELETE /repos/{owner}/{repo}/releases/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/releases",
+      "getOne": "GET /repos/{owner}/{repo}/releases/{release_id}",
+      "create": "POST /repos/{owner}/{repo}/releases",
+      "update": "PATCH /repos/{owner}/{repo}/releases/{release_id}",
+      "delete": "DELETE /repos/{owner}/{repo}/releases/{release_id}"
+    }
+  },
+  "userEmails": {
+    "gitea": {
+      "getAll": "GET /user/emails",
+      "getOne": "",
+      "create": "POST /user/emails",
+      "update": "",
+      "delete": "DELETE /user/emails"
+    },
+    "github": {
+      "getAll": "GET /user/emails",
+      "getOne": "",
+      "create": "POST /user/emails",
+      "update": "",
+      "delete": "DELETE /user/emails"
+    }
+  },
+  "userFollowers": {
+    "gitea": {
+      "getAll": "GET /user/followers",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /user/followers",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "organization_labels": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/labels",
+      "getOne": "GET /orgs/{org}/labels/{id}",
+      "create": "POST /orgs/{org}/labels",
+      "update": "PATCH /orgs/{org}/labels/{id}",
+      "delete": "DELETE /orgs/{org}/labels/{id}"
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "variables": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/variables",
+      "getOne": "GET /repos/{owner}/{repo}/actions/variables/{variablename}",
+      "create": "POST /repos/{owner}/{repo}/actions/variables/{variablename}",
+      "update": "PUT /repos/{owner}/{repo}/actions/variables/{variablename}",
+      "delete": "DELETE /repos/{owner}/{repo}/actions/variables/{variablename}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/variables",
+      "getOne": "GET /repos/{owner}/{repo}/actions/variables/{name}",
+      "create": "POST /repos/{owner}/{repo}/actions/variables",
+      "update": "PATCH /repos/{owner}/{repo}/actions/variables/{name}",
+      "delete": "DELETE /repos/{owner}/{repo}/actions/variables/{name}"
+    }
+  },
+  "collaborators": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/collaborators",
+      "getOne": "GET /repos/{owner}/{repo}/collaborators/{collaborator}",
+      "create": "PUT /repos/{owner}/{repo}/collaborators/{collaborator}",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/collaborators/{collaborator}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/collaborators",
+      "getOne": "GET /repos/{owner}/{repo}/collaborators/{username}",
+      "create": "PUT /repos/{owner}/{repo}/collaborators/{username}",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/collaborators/{username}"
+    }
+  },
+  "labelTemplates": {
+    "gitea": {
+      "getAll": "GET /label/templates",
+      "getOne": "GET /label/templates/{name}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "orgsRunners": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/actions/runners/registration-token",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/actions/runners",
+      "getOne": "GET /orgs/{org}/actions/runners/{runner_id}",
+      "create": "",
+      "update": "",
+      "delete": "DELETE /orgs/{org}/actions/runners/{runner_id}"
+    }
+  },
+  "orgsVariables": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/actions/variables",
+      "getOne": "GET /orgs/{org}/actions/variables/{variablename}",
+      "create": "POST /orgs/{org}/actions/variables/{variablename}",
+      "update": "PUT /orgs/{org}/actions/variables/{variablename}",
+      "delete": "DELETE /orgs/{org}/actions/variables/{variablename}"
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "orgsAvatar": {
+    "gitea": {
+      "getAll": "",
+      "getOne": "",
+      "create": "POST /orgs/{org}/avatar",
+      "update": "",
+      "delete": "DELETE /orgs/{org}/avatar"
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "orgsRepos": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/repos",
+      "getOne": "",
+      "create": "POST /orgs/{org}/repos",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/repos",
+      "getOne": "",
+      "create": "POST /orgs/{org}/repos",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "reposContents": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/contents",
+      "getOne": "GET /repos/{owner}/{repo}/contents/{filepath}",
+      "create": "POST /repos/{owner}/{repo}/contents/{filepath}",
+      "update": "PUT /repos/{owner}/{repo}/contents/{filepath}",
+      "delete": "DELETE /repos/{owner}/{repo}/contents/{filepath}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/contents/{path}",
+      "getOne": "GET /repos/{owner}/{repo}/contents/{path}",
+      "create": "PUT /repos/{owner}/{repo}/contents/{path}",
+      "update": "PUT /repos/{owner}/{repo}/contents/{path}",
+      "delete": "DELETE /repos/{owner}/{repo}/contents/{path}"
+    }
+  },
+  "reposForks": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/forks",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/forks",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/forks",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/forks",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "reposCommitsStatus": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/commits/{ref}/statuses",
+      "getOne": "GET /repos/{owner}/{repo}/commits/{ref}/status",
+      "create": "POST /repos/{owner}/{repo}/statuses/{sha}",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/commits/{ref}/statuses",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/statuses/{sha}",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "reposPulls": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/pulls",
+      "getOne": "GET /repos/{owner}/{repo}/pulls/{index}",
+      "create": "POST /repos/{owner}/{repo}/pulls",
+      "update": "PATCH /repos/{owner}/{repo}/pulls/{index}",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/pulls",
+      "getOne": "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+      "create": "POST /repos/{owner}/{repo}/pulls",
+      "update": "PATCH /repos/{owner}/{repo}/pulls/{pull_number}",
+      "delete": ""
+    }
+  },
+  "reposKeys": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/keys",
+      "getOne": "GET /repos/{owner}/{repo}/keys/{id}",
+      "create": "POST /repos/{owner}/{repo}/keys",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/keys/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/keys",
+      "getOne": "GET /repos/{owner}/{repo}/keys/{key_id}",
+      "create": "POST /repos/{owner}/{repo}/keys",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/keys/{key_id}"
+    }
+  },
+  "repository_hook": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/hooks",
+      "getOne": "GET /repos/{owner}/{repo}/hooks/{id}",
+      "create": "POST /repos/{owner}/{repo}/hooks",
+      "update": "PATCH /repos/{owner}/{repo}/hooks/{id}",
+      "delete": "DELETE /repos/{owner}/{repo}/hooks/{id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/hooks",
+      "getOne": "GET /repos/{owner}/{repo}/hooks/{hook_id}",
+      "create": "POST /repos/{owner}/{repo}/hooks",
+      "update": "PATCH /repos/{owner}/{repo}/hooks/{hook_id}",
+      "delete": "DELETE /repos/{owner}/{repo}/hooks/{hook_id}"
+    }
+  },
+  "organizationPublicMembers": {
+    "gitea": {
+      "getAll": "GET /orgs/{org}/public_members",
+      "getOne": "GET /orgs/{org}/public_members/{username}",
+      "create": "PUT /orgs/{org}/public_members/{username}",
+      "update": "",
+      "delete": "DELETE /orgs/{org}/public_members/{username}"
+    },
+    "github": {
+      "getAll": "GET /orgs/{org}/public_members",
+      "getOne": "GET /orgs/{org}/public_members/{username}",
+      "create": "PUT /orgs/{org}/public_members/{username}",
+      "update": "",
+      "delete": "DELETE /orgs/{org}/public_members/{username}"
+    }
+  },
+  "reactionsForIssueComment": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/comments/{id}/reactions",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/issues/comments/{id}/reactions",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/comments/{id}/reactions"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions/{reaction_id}"
+    }
+  },
+  "issueLabels": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/{index}/labels",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/issues/{index}/labels",
+      "update": "PUT /repos/{owner}/{repo}/issues/{index}/labels",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/{index}/labels"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/issues/{issue_number}/labels",
+      "getOne": "",
+      "create": "POST /repos/{owner}/{repo}/issues/{issue_number}/labels",
+      "update": "PUT /repos/{owner}/{repo}/issues/{issue_number}/labels",
+      "delete": "DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels"
+    }
+  },
+  "secrets": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/secrets",
+      "getOne": "",
+      "create": "PUT /repos/{owner}/{repo}/actions/secrets/{secretname}",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/actions/secrets/{secretname}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/secrets",
+      "getOne": "GET /repos/{owner}/{repo}/actions/secrets/{secret_name}",
+      "create": "PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}"
+    }
+  },
+  "tags": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/tags",
+      "getOne": "GET /repos/{owner}/{repo}/tags/{tag}",
+      "create": "POST /repos/{owner}/{repo}/tags",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/tags/{tag}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/tags",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "workflows": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/tasks",
+      "getOne": "",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/actions/workflows",
+      "getOne": "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}",
+      "create": "",
+      "update": "PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable",
+      "delete": "PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable"
+    }
+  },
+  "repo_branches": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/branches",
+      "getOne": "GET /repos/{owner}/{repo}/branches/{branch}",
+      "create": "POST /repos/{owner}/{repo}/branches",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/branches/{branch}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/branches",
+      "getOne": "GET /repos/{owner}/{repo}/branches/{branch}",
+      "create": "",
+      "update": "",
+      "delete": ""
+    }
+  },
+  "apps": {
+    "gitea": {
+      "getAll": "GET /user/applications/oauth2",
+      "getOne": "GET /user/applications/oauth2/{id}",
+      "create": "POST /user/applications/oauth2",
+      "update": "PATCH /user/applications/oauth2/{id}",
+      "delete": "DELETE /user/applications/oauth2/{id}"
+    },
+    "github": {
+      "getAll": "GET /authorizations",
+      "getOne": "GET /authorizations/{authorization_id}",
+      "create": "POST /authorizations",
+      "update": "PATCH /authorizations/{authorization_id}",
+      "delete": "DELETE /authorizations/{authorization_id}"
+    }
+  },
+  "keys": {
+    "gitea": {
+      "getAll": "GET /user/keys",
+      "getOne": "GET /user/keys/{id}",
+      "create": "POST /user/keys",
+      "update": "",
+      "delete": "DELETE /user/keys/{id}"
+    },
+    "github": {
+      "getAll": "GET /user/keys",
+      "getOne": "GET /user/keys/{key_id}",
+      "create": "POST /user/keys",
+      "update": "",
+      "delete": "DELETE /user/keys/{key_id}"
+    }
+  },
+  "repos/packages/files": {
+    "gitea": {
+      "getAll": "",
+      "getOne": "GET /packages/{owner}/{type}/{name}/{version}/files",
+      "create": "",
+      "update": "",
+      "delete": ""
+    },
+    "github": {
+      "getAll": "",
+      "getOne": "GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/{archive_format}",
+      "create": "",
+      "update": "",
+      "delete": "DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id}"
+    }
+  },
+  "repos/releases/assets": {
+    "gitea": {
+      "getAll": "GET /repos/{owner}/{repo}/releases/{id}/assets",
+      "getOne": "GET /repos/{owner}/{repo}/releases/{id}/assets/{attachment_id}",
+      "create": "POST /repos/{owner}/{repo}/releases/{id}/assets",
+      "update": "PATCH /repos/{owner}/{repo}/releases/{id}/assets/{attachment_id}",
+      "delete": "DELETE /repos/{owner}/{repo}/releases/{id}/assets/{attachment_id}"
+    },
+    "github": {
+      "getAll": "GET /repos/{owner}/{repo}/releases/{release_id}/assets",
+      "getOne": "GET /repos/{owner}/{repo}/releases/assets/{asset_id}",
+      "create": "POST /repos/{owner}/{repo}/releases/{release_id}/assets",
+      "update": "PATCH /repos/{owner}/{repo}/releases/assets/{asset_id}",
+      "delete": "DELETE /repos/{owner}/{repo}/releases/assets/{asset_id}"
+    }
+  }
+}
