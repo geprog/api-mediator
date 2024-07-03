@@ -1,6 +1,17 @@
 import OpenAPIParser from '@readme/openapi-parser';
 import type { Api, Endpoint } from './types';
 
+import { OpenAPIV3, OpenAPIV2 } from 'openapi-types';
+
+function isNotReferenceObject(
+  parameter:
+    | OpenAPIV3.ReferenceObject
+    | OpenAPIV3.ParameterObject
+    | OpenAPIV2.Parameter,
+): parameter is OpenAPIV3.ParameterObject {
+  return !('$ref' in parameter);
+}
+
 export async function parseOpenAPISpec(
   apiSpecPath: string,
   baseUrl: string,
@@ -21,33 +32,54 @@ export async function parseOpenAPISpec(
       const spec = specs[path];
       if (typeof spec === 'object') {
         if (!!spec.get) {
-          const { operationId, description } = spec.get;
+          const { operationId, parameters, description } = spec.get;
           endpoints.push({
             method: 'get',
             name: operationId || '',
             path,
+            parameters: (parameters || [])
+              .filter(isNotReferenceObject)
+              .filter((param) => param.required && param.in === 'path')
+              .map((param) => ({
+                name: param.name,
+                description: param.description,
+              })),
             responseSchema: { name: '', fields: [] },
             description,
             parameters: []
           });
         }
         if (!!spec.post) {
-          const { operationId, description } = spec.post;
+          const { operationId, parameters, description } = spec.post;
           endpoints.push({
             method: 'post',
             name: operationId || '',
             path,
+            parameters: (parameters || [])
+              .filter(isNotReferenceObject)
+              .filter((param) => param.required && param.in === 'path')
+              .map((param) => ({
+                name: param.name,
+                description: param.description,
+              })),
             responseSchema: { name: '', fields: [] },
             description,
             parameters: []
           });
         }
         if (!!spec.put) {
-          const { operationId, description } = spec.put;
+          const { operationId, parameters, description } = spec.put;
           endpoints.push({
             method: 'put',
             name: operationId || '',
             path,
+            parameters: (parameters || [])
+              .filter(isNotReferenceObject)
+              .filter((param) => param.required && param.in === 'path')
+              .map((param) => ({
+                name: param.name,
+                description: param.description,
+              })),
             responseSchema: { name: '', fields: [] },
             description,
             parameters: []

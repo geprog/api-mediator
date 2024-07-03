@@ -24,7 +24,7 @@ export type Schema = {
 export type Field = {
   name: string;
   description?: string;
-  type: string | Schema;
+  //   type: string | Schema;
 };
 
 type MappingPart = {
