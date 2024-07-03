@@ -4,8 +4,8 @@ info:
   description: ''
   version: 1.0.0
 servers:
-  - url: /
-    description: ''
+  - url: http://localhost:7878/gitlab
+    description: 'Localhost dev environment'
 paths:
   /issues:
     get:
@@ -45,7 +45,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Issue'
-    patch:
+    put:
       operationId: updateIssue
       tags:
         - Issue
