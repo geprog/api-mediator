@@ -1,3 +1,5 @@
+import type { OpenAPI } from 'openapi-types';
+
 export type Api = {
   name: string;
   baseUrl: string;
@@ -8,6 +10,7 @@ export type Api = {
   }[];
   endpoints: Endpoint[];
   schemas: Schema[];
+  rawApiSpec: OpenAPI.Document;
 };
 
 export type Endpoint = {

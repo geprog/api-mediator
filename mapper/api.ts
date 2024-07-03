@@ -93,6 +93,7 @@ export async function parseOpenAPISpec(
       parameterSubstitutions,
       endpoints,
       schemas: [],
+      rawApiSpec: apiSpec,
     };
     return api;
   } catch (err) {
