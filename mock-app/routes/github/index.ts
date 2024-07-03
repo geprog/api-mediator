@@ -2,36 +2,36 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 
 const github = new Hono();
-type GithubIssue =  {
+type GithubIssue = {
   id: number;
   name: string;
   body: string;
   closed: boolean;
 };
-github.get('/issues', async ({ json }) => {
+github.get('/issue', async ({ json }) => {
   const response = await getGithubIssues();
   return json(response);
 });
 
-github.post('/issues', async ({ req, notFound }) => {
+github.post('/issue', async ({ req, json }) => {
   const issue = await req.json();
   const issues = await getGithubIssues();
 
   if (issues.findIndex(({ id }) => id === issue.id) !== -1) {
-    throw new HTTPException(404, {message: 'not Found'});
+    throw new HTTPException(404, { message: 'id already occupied' });
   }
-  updateGithubIssues([...issues, issue]);
-  return issue;
+  await updateGithubIssues([...issues, issue]);
+  return json(issue);
 });
 
-github.put('/issues', async ({ req, notFound, json }) => {
+github.put('/issue', async ({ req, notFound, json }) => {
   const issue = await req.json();
   const issues = await getGithubIssues();
 
   const index = issues.findIndex(({ id }) => id === issue.id);
 
   if (index === -1) {
-    throw new HTTPException(404, {message: 'not Found'});
+    throw new HTTPException(404, { message: 'not Found' });
   }
   await updateGithubIssues([
     ...issues.slice(0, index),
@@ -39,23 +39,29 @@ github.put('/issues', async ({ req, notFound, json }) => {
     ...issues.slice(index + 1),
   ]);
 
-  const updatedIsuues = await getGithubIssues();
+  const updatedIssues = await getGithubIssues();
 
-  return json(updatedIsuues);
+  return json(updatedIssues);
 });
 
 async function updateGithubIssues(issues: GithubIssue[]): Promise<void> {
-  await Bun.write(
-    `${import.meta.dir}/issues.json`,
-    JSON.stringify(issues, undefined, 2),
-  );
+  await Bun.write(await getFile(), JSON.stringify(issues, undefined, 2));
 }
 
 async function getGithubIssues(): Promise<GithubIssue[]> {
-  const file = Bun.file(`${import.meta.dir}/issues.json`);
+  const file = await getFile();
   const issues = await file.json();
 
   return issues;
+}
+
+async function getFile() {
+  const file = Bun.file(`${import.meta.dir}/issues.json`);
+  if (!(await file.exists())) {
+    await Bun.write(file, '[]');
+    return await getFile();
+  }
+  return file;
 }
 
 export default github;

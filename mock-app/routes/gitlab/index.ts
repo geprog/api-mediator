@@ -42,22 +42,29 @@ gitlab.put('/issues', async ({ req, notFound, json }) => {
     ...issues.slice(index + 1),
   ]);
 
-  const updatedIsuues = await getGitlabIssues();
+  const updatedIssues = await getGitlabIssues();
 
-  return json(updatedIsuues);
+  return json(updatedIssues);
 });
 
 async function updateGitlabIssues(issues: Issue[]): Promise<void> {
-  await Bun.write(
-    `${import.meta.dir}/issues.json`,
-    JSON.stringify(issues, undefined, 2),
-  );
+  await Bun.write(await getFile(), JSON.stringify(issues, undefined, 2));
 }
 
 async function getGitlabIssues(): Promise<Issue[]> {
-  const file = Bun.file(`${import.meta.dir}/issues.json`);
+  const file = await getFile();
   const issues = await file.json();
 
   return issues;
 }
+
+async function getFile() {
+  const file = Bun.file(`${import.meta.dir}/issues.json`);
+  if (!(await file.exists())) {
+    await Bun.write(file, '[]');
+    return await getFile();
+  }
+  return file;
+}
+
 export default gitlab;
