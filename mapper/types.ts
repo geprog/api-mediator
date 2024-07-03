@@ -2,6 +2,10 @@ export type Api = {
   name: string;
   baseUrl: string;
   accessToken: string;
+  parameters: {
+    name: string;
+    value: string;
+  }[];
   endpoints: Endpoint[];
   schemas: Schema[];
 };
@@ -40,4 +44,16 @@ type MappingPart = {
 export type Mapping = {
   name: string;
   parts: MappingPart[];
+};
+
+export type SuggestedMapping = {
+  [key: string]: {
+    [app: string]: {
+      getAll: string;
+      getOne: string;
+      create: string;
+      update: string;
+      delete: string;
+    };
+  };
 };

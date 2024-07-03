@@ -15,6 +15,7 @@ function isNotReferenceObject(
 export async function parseOpenAPISpec(
   apiSpecPath: string,
   baseUrl: string,
+  parameters: Api['parameters'] = [],
 ): Promise<Api> {
   try {
     let apiSpec = await OpenAPIParser.validate(apiSpecPath);
@@ -46,7 +47,6 @@ export async function parseOpenAPISpec(
               })),
             responseSchema: { name: '', fields: [] },
             description,
-            parameters: []
           });
         }
         if (!!spec.post) {
@@ -64,7 +64,6 @@ export async function parseOpenAPISpec(
               })),
             responseSchema: { name: '', fields: [] },
             description,
-            parameters: []
           });
         }
         if (!!spec.put) {
@@ -82,7 +81,6 @@ export async function parseOpenAPISpec(
               })),
             responseSchema: { name: '', fields: [] },
             description,
-            parameters: []
           });
         }
       }
@@ -93,6 +91,7 @@ export async function parseOpenAPISpec(
       baseUrl,
       accessToken: '',
       endpoints,
+      parameters,
       schemas: [],
     };
     return api;
