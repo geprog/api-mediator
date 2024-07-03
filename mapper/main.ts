@@ -20,7 +20,12 @@ async function main() {
       path: '/issue',
       method: 'GET',
     },
-    target: {
+    targetUpdate: {
+      name: 'gitlab-post',
+      path: '/issues',
+      method: 'PUT',
+    },
+    targetSave: {
       name: 'gitlab-post',
       path: '/issues',
       method: 'POST',
@@ -63,15 +68,31 @@ async function main() {
       console.log('mapped to targetItem ', targetItem);
 
       // 3. execute endpoint at target
-      const response = await fetch(
-        `${mapping.targetAPI.baseUrl}${mapping.target.path}`,
+
+      // 3.1. try updating
+      const updating = await fetch(
+        `${mapping.targetAPI.baseUrl}${mapping.targetUpdate.path}`,
         {
-          method: mapping.target.method,
+          method: mapping.targetUpdate.method,
           body: JSON.stringify(targetItem),
           headers: { 'Content-Type': 'application/json' },
         },
       );
-      console.log('saved item ', await response.json());
+      
+      // 3.2. save if not existing
+      if (!updating.ok) {
+        const response = await fetch(
+          `${mapping.targetAPI.baseUrl}${mapping.targetSave.path}`,
+          {
+            method: mapping.targetSave.method,
+            body: JSON.stringify(targetItem),
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+        console.log('created new target item ', await response.json());
+      } else {
+        console.log('updated target item ', await updating.json());
+      }
     }
   }, 5000);
 }
