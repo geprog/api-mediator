@@ -3,11 +3,11 @@ import { generateMapping } from './generate_mapping';
 
 async function main() {
   const githubApi = await parseOpenAPISpec(
-    '../openapi/specs/github.yaml',
+    `${import.meta.dir}/../openapi/specs/github.yaml`,
     'http://localhost:8787/github',
   );
   const gitlabApi = await parseOpenAPISpec(
-    '../openapi/specs/gitlab.yaml',
+    `${import.meta.dir}/../openapi/specs/gitlab.yaml`,
     'http://localhost:8787/gitlab',
   );
 
