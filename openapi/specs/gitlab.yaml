@@ -38,7 +38,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Issue'
-      response:
+      responses:
         '200':
           description: The just created issue
           content:
@@ -57,7 +57,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Issue'
-      response:
+      responses:
         '200':
           description: An array of all the issues from Gitlab
           content:

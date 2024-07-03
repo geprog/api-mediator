@@ -19,7 +19,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: 
+                items:
                   $ref: '#/components/schemas/Issue'
       summary: Endpoint for loading issues
       description: >-
@@ -33,12 +33,12 @@ paths:
       summary: Endpoint for creating a new issue
       description: >-
         Creating a new issue by providing all attributes
-      requestBody: 
-        content: 
-          application/json: 
-            schema: 
-              $ref: '#/components/schemas/Issue'  
-      response:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Issue'
+      responses:
         '200':
           description: The just created issue
           content:
@@ -57,7 +57,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/Issue'
-      response:
+      responses:
         '200':
           description: An array of all the issues from Gitlab
           content:
