@@ -6,7 +6,7 @@ import { serve } from 'bun';
 const app = new Hono();
 
 app.get('/', (c) => {
-  return c.text('Hello World!')
+  return c.text('Hello World!');
 });
 
 app.route('/github', github);
