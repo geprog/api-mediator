@@ -1,0 +1,200 @@
+openapi: 3.0.3
+info:
+  title: GitLab API
+  description: API specification for GitLab issues endpoints
+  version: 1.0.0
+servers:
+  - url: https://gitlab.example.com/api/v4
+    description: GitLab API server
+paths:
+  /projects/{id}/issues:
+    get:
+      summary: List project issues
+      description: Get a list of all issues for a project.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The ID of the project
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [opened, closed, all]
+          description: Return opened, closed, or all issues
+        - name: labels
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Comma-separated list of label names
+        - name: milestone
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The milestone title
+      responses:
+        '200':
+          description: A list of issues
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Issue'
+    post:
+      summary: Create a new project issue
+      description: Create a new issue for a project.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The ID of the project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewIssue'
+      responses:
+        '201':
+          description: Issue created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+  /projects/{id}/issues/{issue_iid}:
+    get:
+      summary: Get a single project issue
+      description: Get a single issue for a project.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The ID of the project
+        - name: issue_iid
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The internal ID of the issue
+      responses:
+        '200':
+          description: The issue details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+    put:
+      summary: Update an existing project issue
+      description: Update an existing issue for a project.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The ID of the project
+        - name: issue_iid
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The internal ID of the issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateIssue'
+      responses:
+        '200':
+          description: Issue updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+components:
+  schemas:
+    Issue:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The ID of the issue
+        iid:
+          type: integer
+          description: The internal ID of the issue
+        project_id:
+          type: integer
+          description: The ID of the project
+        title:
+          type: string
+          description: The title of the issue
+        description:
+          type: string
+          description: The description of the issue
+        state:
+          type: string
+          description: The state of the issue
+        labels:
+          type: array
+          items:
+            type: string
+          description: The labels of the issue
+        milestone:
+          type: string
+          description: The milestone of the issue
+        created_at:
+          type: string
+          format: date-time
+          description: When the issue was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the issue was last updated
+    NewIssue:
+      type: object
+      properties:
+        title:
+          type: string
+          description: The title of the issue
+        description:
+          type: string
+          description: The description of the issue
+        labels:
+          type: array
+          items:
+            type: string
+          description: The labels of the issue
+        milestone:
+          type: string
+          description: The milestone of the issue
+    UpdateIssue:
+      type: object
+      properties:
+        title:
+          type: string
+          description: The title of the issue
+        description:
+          type: string
+          description: The description of the issue
+        state_event:
+          type: string
+          description: The state event of the issue (close, reopen)
+        labels:
+          type: array
+          items:
+            type: string
+          description: The labels of the issue
+        milestone:
+          type: string
+          description: The milestone of the issue

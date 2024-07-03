@@ -4,15 +4,19 @@
   "type": "module",
   "scripts": {
     "dev": "bun mapper/main.ts",
+    "mock": "bun run --hot mock-app/index.ts",
     "openapi": "./openapi/start.sh"
-  },
-  "dependencies": {
-    "openai": "^4.52.2"
   },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@readme/openapi-parser": "^2.6.0",
+    "openai": "^4.52.2",
+    "yaml": "^2.4.5",
+    "hono": "^4.4.10"
   }
 }
