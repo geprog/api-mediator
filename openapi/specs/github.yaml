@@ -4,7 +4,7 @@ info:
   description: ''
   version: 1.0.0
 servers:
-  - url: http://localhost:7878/github
+  - url: http://localhost:8787/github
     description: 'Localhost dev environment'
 paths:
   /issue:
