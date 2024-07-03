@@ -11,14 +11,14 @@ export type Endpoint = {
     description?: string;
     path: string;
     method: string;
-    parameters: Schema;
+    // parameters: Schema;
     responseSchema: Schema;
 }
 
 export type Schema = {
     name: string;
     description?: string;
-    fields: Field[]
+    fields: Field[];
 }
 
 export type Field = {
