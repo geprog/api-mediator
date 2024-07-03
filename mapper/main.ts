@@ -1,5 +1,5 @@
 import { parseOpenAPISpec } from './api';
-import { generateMapping } from './generate_mapping';
+import type { Mapping } from './types';
 
 async function main() {
   const githubApi = await parseOpenAPISpec(
@@ -12,39 +12,45 @@ async function main() {
   );
 
   // await generateMapping(); // githubApi, gitlabApi);
-  const mapping = {
-    sourceAPI: githubApi,
-    targetAPI: gitlabApi,
-    source: {
-      name: 'github-get',
-      path: '/issue',
-      method: 'GET',
+  const mapping: Mapping = {
+    name: 'issues',
+    parts: [{
+      api: githubApi,
+      getAll: githubApi.endpoints.find((ep) => ep.path === '/issue' && ep.method === 'get'),
+      create: githubApi.endpoints.find((ep) => ep.path === '/issue' && ep.method === 'post'),
+      update: githubApi.endpoints.find((ep) => ep.path === '/issue' && ep.method === 'put'),
+      fieldMapping: {
+        id: 'id',
+        name: 'title',
+        body: 'description',
+        closed: 'closed',
+      },
     },
-    targetUpdate: {
-      name: 'gitlab-post',
-      path: '/issues',
-      method: 'PUT',
-    },
-    targetSave: {
-      name: 'gitlab-post',
-      path: '/issues',
-      method: 'POST',
-    },
-    mapping: {
-      id: 'id',
-      name: 'title',
-      body: 'description',
-      closed: 'closed',
-    },
+  {
+    api: gitlabApi,
+      getAll: gitlabApi.endpoints.find((ep) => ep.path === '/issues' && ep.method === 'get'),
+      create: gitlabApi.endpoints.find((ep) => ep.path === '/issues' && ep.method === 'post'),
+      update: gitlabApi.endpoints.find((ep) => ep.path === '/issues' && ep.method === 'put'),
+      fieldMapping: {
+        id: 'id',
+        title: 'name',
+        description: 'body',
+        closed: 'closed',
+      },
+  }]
+    
   };
 
   setInterval(async () => {
     // sync the data
     // 1. fetch endpoint from source
+    if (!mapping.parts[0].getAll || !mapping.parts[1].create|| !mapping.parts[1].update) {
+      return;
+    }
     const sourceResponse = await fetch(
-      `${mapping.sourceAPI.baseUrl}${mapping.source.path}`,
+      `${mapping.parts[0].api.baseUrl}${mapping.parts[0].getAll.path}`,
       {
-        method: mapping.source.method,
+        method: mapping.parts[0].getAll.method,
       },
     );
     const sourceItems = (await sourceResponse.json()) as Record<
@@ -56,7 +62,7 @@ async function main() {
     // 2. map properties
     for (const sourceItem of sourceItems) {
       console.log('handling sourceItem ', sourceItem);
-      const targetItem = Object.entries(mapping.mapping).reduce<
+      const targetItem = Object.entries(mapping.parts[0].fieldMapping).reduce<
         Record<string, unknown>
       >(
         (item, [sourceProp, targetProp]) => ({
@@ -68,12 +74,11 @@ async function main() {
       console.log('mapped to targetItem ', targetItem);
 
       // 3. execute endpoint at target
-
       // 3.1. try updating
       const updating = await fetch(
-        `${mapping.targetAPI.baseUrl}${mapping.targetUpdate.path}`,
+        `${mapping.parts[1].api.baseUrl}${mapping.parts[1].update.path}`,
         {
-          method: mapping.targetUpdate.method,
+          method: mapping.parts[1].update.method,
           body: JSON.stringify(targetItem),
           headers: { 'Content-Type': 'application/json' },
         },
@@ -82,9 +87,9 @@ async function main() {
       // 3.2. save if not existing
       if (!updating.ok) {
         const response = await fetch(
-          `${mapping.targetAPI.baseUrl}${mapping.targetSave.path}`,
+          `${mapping.parts[1].api.baseUrl}${mapping.parts[1].create.path}`,
           {
-            method: mapping.targetSave.method,
+            method: mapping.parts[1].create.method,
             body: JSON.stringify(targetItem),
             headers: { 'Content-Type': 'application/json' },
           },
