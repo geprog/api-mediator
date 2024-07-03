@@ -1,43 +1,43 @@
 export type Api = {
-    name: string;
-    baseUrl: string;
-    accessToken: string;
-    endpoints: Endpoint[];
-    schemas: Schema[];
-}
+  name: string;
+  baseUrl: string;
+  accessToken: string;
+  endpoints: Endpoint[];
+  schemas: Schema[];
+};
 
 export type Endpoint = {
-    name: string;
-    description?: string;
-    path: string;
-    method: string;
-    // parameters: Schema;
-    responseSchema: Schema;
-}
+  name: string;
+  description?: string;
+  path: string;
+  method: string;
+  parameters: Field[];
+  responseSchema: Schema;
+};
 
 export type Schema = {
-    name: string;
-    description?: string;
-    fields: Field[];
-}
+  name: string;
+  description?: string;
+  fields: Field[];
+};
 
 export type Field = {
-    name: string;
-    description?: string;
-    type: string | Schema;
-}
+  name: string;
+  description?: string;
+  type: string | Schema;
+};
+
+type MappingPart = {
+  api: Api;
+  getAll: string;
+  getOne: string;
+  create: string;
+  update: string;
+  delete: string;
+  fieldMapping: Record<string, string>;
+};
 
 export type Mapping = {
-    sourceAPI: Api;
-    targetAPI: Api;
-    source: Endpoint;
-    target: Endpoint;
-    /**
-     * {
-     *      title: 'title',
-     *      body: 'description',
-     *      author: 'creator',
-     * }
-     */
-    mapping: Record<string, string>;
-}
+  name: string;
+  parts: MappingPart[];
+};
