@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 
 type Issue = {
   id: number;
@@ -13,14 +14,17 @@ gitlab.get('/issues', async ({ json }) => {
   return json(response);
 });
 
-gitlab.post('/issues', async ({ req, notFound }) => {
+gitlab.post('/issues', async ({ req, json }) => {
   const issue = await req.json();
   const issues = await getGitlabIssues();
 
-  if (issues.findIndex(({ id }) => id === issue.id) === -1) {
-    return notFound();
+  if (issues.findIndex(({ id }) => id === issue.id) !== -1) {
+    console.log();
+    throw new HTTPException();
   }
   updateGitlabIssues([...issues, issue]);
+
+  return json(issue);
 });
 
 gitlab.put('/issues', async ({ req, notFound, json }) => {
