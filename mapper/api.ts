@@ -28,6 +28,7 @@ export async function parseOpenAPISpec(
             path,
             responseSchema: { name: '', fields: [] },
             description,
+            parameters: []
           });
         }
         if (!!spec.post) {
@@ -38,6 +39,7 @@ export async function parseOpenAPISpec(
             path,
             responseSchema: { name: '', fields: [] },
             description,
+            parameters: []
           });
         }
         if (!!spec.put) {
@@ -48,6 +50,7 @@ export async function parseOpenAPISpec(
             path,
             responseSchema: { name: '', fields: [] },
             description,
+            parameters: []
           });
         }
       }
