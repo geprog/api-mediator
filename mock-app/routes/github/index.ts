@@ -17,6 +17,9 @@ github.post('/issue', async ({ req, json }) => {
   const issue = await req.json();
   const issues = await getGithubIssues();
 
+  // assign always fresh id
+  issue.id = crypto.randomUUID();
+
   if (issues.findIndex(({ id }) => id === issue.id) !== -1) {
     throw new HTTPException(404, { message: 'id already occupied' });
   }

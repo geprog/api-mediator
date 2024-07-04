@@ -87,6 +87,7 @@ export async function parseOpenAPISpec(
     });
 
     const api: Api = {
+      id: crypto.randomUUID(),
       name: apiSpec.info.title,
       baseUrl,
       accessToken: '',
@@ -100,4 +101,26 @@ export async function parseOpenAPISpec(
     console.error(err);
     throw err;
   }
+}
+
+export async function doFetch(
+  api: Api,
+  endpoint: Endpoint,
+  parameterSubstitutions: Record<string, unknown>,
+  body?: Record<string, unknown>,
+) {
+  const path = endpoint.parameters.reduce(
+    (path, parameter) =>
+      path.replace(
+        `{${parameter.name}}`,
+        `${parameterSubstitutions[parameter.name]}`,
+      ),
+    endpoint.path,
+  );
+  const response = await fetch(`${api.baseUrl}${path}`, {
+    method: endpoint.method,
+    body: body ? JSON.stringify(body) : undefined,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+  });
+  return await response.json();
 }

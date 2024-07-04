@@ -18,6 +18,9 @@ gitlab.post('/issues', async ({ req, json }) => {
   const issue = await req.json();
   const issues = await getGitlabIssues();
 
+  // assign always fresh id
+  issue.id = crypto.randomUUID();
+
   if (issues.findIndex(({ id }) => id === issue.id) !== -1) {
     console.log();
     throw new HTTPException();

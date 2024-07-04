@@ -1,6 +1,7 @@
 import type { OpenAPI } from 'openapi-types';
 
 export type Api = {
+  id: string;
   name: string;
   baseUrl: string;
   accessToken: string;
@@ -34,7 +35,7 @@ export type Field = {
   //   type: string | Schema;
 };
 
-type MappingPart = {
+export type MappingPart = {
   api: Api;
   getAll?: Endpoint;
   getOne?: Endpoint;
@@ -45,6 +46,7 @@ type MappingPart = {
 };
 
 export type Mapping = {
+  id: string;
   name: string;
   parts: MappingPart[];
 };
