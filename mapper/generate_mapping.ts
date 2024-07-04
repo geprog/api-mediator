@@ -4,7 +4,8 @@
  */
 
 // intermediate steps: try mapping, feed errors back to model and generate new mapping
-import { openai, sendPrompt } from './openai';
+import { sendPrompt } from './openai';
+import { sendPrompt as sendPromptHF } from './huggingface';
 import OpenAPIParser from '@readme/openapi-parser';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 
