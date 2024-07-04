@@ -11,6 +11,25 @@ import { writeFileSync, readFileSync, existsSync } from 'fs';
 // check if mapping-gitea-github.json exists
 const MAPPING_FILE = 'mapping-gitea-github.json';
 
+type Mapping = {
+  [key: string]: {
+    gitea: {
+      getAll: string;
+      getOne: string;
+      create: string;
+      update: string;
+      delete: string;
+    };
+    github: {
+      getAll: string;
+      getOne: string;
+      create: string;
+      update: string;
+      delete: string;
+    };
+  };
+};
+
 if (!existsSync(MAPPING_FILE)) {
   let giteaSpec;
   try {
@@ -78,25 +97,6 @@ if (!existsSync(MAPPING_FILE)) {
     }
   }
   console.log(githubEndpoints);
-
-  type Mapping = {
-    [key: string]: {
-      gitea: {
-        getAll: string;
-        getOne: string;
-        create: string;
-        update: string;
-        delete: string;
-      };
-      github: {
-        getAll: string;
-        getOne: string;
-        create: string;
-        update: string;
-        delete: string;
-      };
-    };
-  };
 
   /**
    * From two lists of strings, generate a mapping according to the prompt
@@ -202,36 +202,31 @@ if (!existsSync(MAPPING_FILE)) {
 
   writeFileSync(MAPPING_FILE, JSON.stringify(mapping, null, 2));
 } else {
-  const mapping = JSON.parse(readFileSync(MAPPING_FILE, 'utf-8'));
+  const mapping: Mapping = JSON.parse(readFileSync(MAPPING_FILE, 'utf-8'));
 
   console.log(mapping);
 
   // TODO: filter irrelevant mappings
+  const filteredMapping = Object.fromEntries(
+    Object.entries(mapping).filter(([entity, endpointMapping]) => {
+      if (
+        endpointMapping.gitea.getAll === '' &&
+        endpointMapping.gitea.getOne === ''
+      ) {
+        return false;
+      }
+      if (
+        endpointMapping.github.create === '' &&
+        endpointMapping.github.update === ''
+      ) {
+        return false;
+      }
+      return true;
+    }),
+  );
+
+  console.log(filteredMapping);
+
   // TODO: get schema mappings for relevant mappings
+  
 }
-
-// const prompt = `generate a mapping from from gitlab issues to github issues in the following json format:
-
-// type Endpoint = {
-//     name: string;
-//     description?: string;
-//     path: string;
-//     method: string;
-// }
-
-// {
-//     source: Endpoint;
-//     target: Endpoint;
-//     mapping: Record<string, string>;
-// }
-// `;
-
-// export async function generateMapping() {
-//   const chatCompletion = await openai.chat.completions.create({
-//     messages: [{ role: 'user', content: prompt }],
-//     model: 'gpt-3.5-turbo',
-//     response_format: { type: 'json_object' }
-//   });
-//   const mapping = JSON.parse(chatCompletion.choices[0].message.content || '{}') as Mapping;
-//   return mapping;
-// }
