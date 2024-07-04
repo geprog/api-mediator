@@ -8,6 +8,7 @@ import { sendPrompt } from './openai';
 import { sendPrompt as sendPromptHF } from './huggingface';
 import OpenAPIParser from '@readme/openapi-parser';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
+import {type OpenAPI} from 'openapi-types'
 
 // check if mapping-gitea-github.json exists
 const MAPPING_FILE = 'mapping-gitea-github.json';
@@ -33,8 +34,9 @@ type Mapping = {
 
 if (!existsSync(MAPPING_FILE)) {
   let giteaSpec;
+  console.log('no mapping file exists');
   try {
-    giteaSpec = await OpenAPIParser.parse('gitea-spec.json');
+    giteaSpec = await OpenAPIParser.parse(`${import.meta.dir}/gitea-spec.json`);
     console.log(
       'API name: %s, Version: %s',
       giteaSpec.info.title,
@@ -45,7 +47,7 @@ if (!existsSync(MAPPING_FILE)) {
   }
   let githubSpec;
   try {
-    githubSpec = await OpenAPIParser.parse('github-spec.yml');
+    githubSpec = await OpenAPIParser.parse(`${import.meta.dir}/github-spec.yml`);
     console.log(
       'API name: %s, Version: %s',
       githubSpec.info.title,
@@ -71,7 +73,7 @@ if (!existsSync(MAPPING_FILE)) {
   // const githubApi = parse(githubSpec);
 
   // get all paths from gitlab and github
-
+ 
   const giteaEndpoints = [];
   const githubEndpoints = [];
 
@@ -159,7 +161,7 @@ if (!existsSync(MAPPING_FILE)) {
   }
 
   function similarStringsPrompt(list1: string[], list2: string[]) {
-    return `given gitlab api paths: ${list1} and github api paths: ${list2} find similar paths between gitlab and github and generate a mapping in the following json format:
+    return `given gitea api paths: ${list1} and github api paths: ${list2} find similar paths between gitea and github and generate a mapping in the following json format:
     {
       source: target,
     }
@@ -191,6 +193,25 @@ if (!existsSync(MAPPING_FILE)) {
     use an empty string for endpoints that not exist in the api
     `;
   }
+
+// Define the fieldMappingPrompt function
+function fieldMappingPrompt(spec1: OpenAPI.Document, spec2: OpenAPI.Document): string {
+  return `given a github spec ${JSON.stringify(spec1)} and a gitea spec ${JSON.stringify(spec2)}, find the mapping between properties (such as issue_id, issue_name etc.) of the Issues of github and gitea in a JSON of { [key]: value } pair so that i can use this to transfer data between the 2 APIs`;
+}
+
+// Update the function that expects these specs
+  async function compareSpecs(spec1: OpenAPI.Document |undefined, spec2: OpenAPI.Document |undefined, promptFunction: (s1: OpenAPI.Document, s2: OpenAPI.Document) => string) {
+  if(spec1 && spec2) {
+    const prompt = promptFunction(spec1, spec2);
+    // Use the prompt as needed
+    const result = await sendPrompt(prompt);
+    const mapping = JSON.parse(result.choices[0].message.content)
+    return mapping;
+  }
+}
+
+const fieldMapping = await compareSpecs(githubSpec, giteaSpec, fieldMappingPrompt);
+console.log('fieldMappings',fieldMapping);
 
   const mapping = await getStringListMapping(
     giteaEndpoints,
