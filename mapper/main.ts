@@ -1,4 +1,5 @@
 import { parseOpenAPISpec } from './api';
+import { generateMapping } from './generate_mapping';
 import sync from './sync';
 import type { Mapping } from './types';
 
@@ -12,7 +13,8 @@ async function main() {
     'http://localhost:8787/gitlab',
   );
 
-  // await generateMapping(); // githubApi, gitlabApi);
+  const {filteredMapping, fieldMapping} = await generateMapping(githubApi, gitlabApi); // githubApi, gitlabApi);
+  console.log(filteredMapping, fieldMapping)
   const mapping: Mapping = {
     id: crypto.randomUUID(),
     name: 'issues',
@@ -20,31 +22,26 @@ async function main() {
       {
         api: githubApi,
         getAll: githubApi.endpoints.find(
-          (ep) => ep.path === '/issue' && ep.method === 'get',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.getAll,
         ),
         create: githubApi.endpoints.find(
-          (ep) => ep.path === '/issue' && ep.method === 'post',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.create,
         ),
         update: githubApi.endpoints.find(
-          (ep) => ep.path === '/issue' && ep.method === 'put',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.update,
         ),
-        fieldMapping: {
-          id: 'id',
-          name: 'title',
-          body: 'description',
-          closed: 'closed',
-        },
+        fieldMapping
       },
       {
         api: gitlabApi,
         getAll: gitlabApi.endpoints.find(
-          (ep) => ep.path === '/issues' && ep.method === 'get',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.getAll,
         ),
         create: gitlabApi.endpoints.find(
-          (ep) => ep.path === '/issues' && ep.method === 'post',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.create,
         ),
         update: gitlabApi.endpoints.find(
-          (ep) => ep.path === '/issues' && ep.method === 'put',
+          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.update,
         ),
         fieldMapping: {
           id: 'id',
