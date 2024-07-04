@@ -228,5 +228,8 @@ if (!existsSync(MAPPING_FILE)) {
   console.log(filteredMapping);
 
   // TODO: get schema mappings for relevant mappings
-  
+  // 1. for each mapping, get the schema for the gitea and github endpoints
+  // 2. extract two lists of schema properties
+  // 3. send those lists into GPT asking for a mapping
+  // 4. add schema mapping to the mapping object
 }
