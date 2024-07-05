@@ -3,8 +3,8 @@ import { doFetch } from '~/server/utils/useApi';
 import { getMappedId, setMappedId } from '~/server/utils/useMappingCache';
 
 export default defineNitroPlugin(async () => {
-  const mappings: Mapping[] = [];
   while (true) {
+    const mappings: Mapping[] = await loadData<Mapping>(FILES.mappings);
     console.log('###### Starting sync round #########');
     for (const mapping of mappings) {
       console.log('==> sync mapping', mapping.name);
