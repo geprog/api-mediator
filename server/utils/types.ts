@@ -34,7 +34,7 @@ export type Field = {
 };
 
 export type MappingPart = {
-  api: Api;
+  api: string;
   getAll?: Endpoint;
   getOne?: Endpoint;
   create?: Endpoint;

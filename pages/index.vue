@@ -15,7 +15,7 @@
     </template>
   </v-network-graph>
   <footer
-    class="flex w-full items-center justify-center border-t border-gray-300 bg-white p-4"
+    class="flex w-full items-center justify-center gap-4 border-t border-gray-300 bg-white p-4"
   >
     <UButton icon="i-heroicons-plus-circle" to="/api/add">New Api</UButton>
     <UButton icon="i-heroicons-plus-circle" to="/mapping/add"
@@ -51,8 +51,8 @@ const edges = computed<vNG.Edges>(() => {
     return {
       ...edges,
       [mapping.id]: {
-        source: mapping.parts[0].api.id,
-        target: mapping.parts[1].api.id,
+        source: mapping.parts[0].api,
+        target: mapping.parts[1].api,
         label: mapping.name,
       },
     };

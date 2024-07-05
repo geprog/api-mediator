@@ -69,14 +69,14 @@
           </div>
         </div>
       </UCard>
+      <UButton
+        @click="addMappings"
+        :disabled="!api1 || !api2 || adding"
+        :loading="adding"
+      >
+        Add selected mappings
+      </UButton>
     </div>
-    <UButton
-      @click="addMappings"
-      :disabled="!api1 || !api2 || adding"
-      :loading="adding"
-    >
-      Add selected mappings
-    </UButton>
   </UCard>
 </template>
 
@@ -161,6 +161,7 @@ async function addMappings() {
     console.error(error);
   }
   adding.value = false;
+  await backToHome();
 }
 
 async function backToHome() {

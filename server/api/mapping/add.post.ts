@@ -33,7 +33,7 @@ function getMappingPart(
   fieldMapping: MappingPart['fieldMapping'],
 ): MappingPart {
   return {
-    api,
+    api: api.id,
     getAll: getEndpoint(api, mapping.getAll),
     getOne: getEndpoint(api, mapping.getOne),
     create: getEndpoint(api, mapping.create),
