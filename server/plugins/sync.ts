@@ -1,8 +1,27 @@
-import { doFetch } from './api';
-import { getMappedId, setMappedId } from './mapping';
-import type { Mapping, MappingPart } from './types';
+import type { Mapping, MappingPart } from '~/server/utils/types';
+import { doFetch } from '~/server/utils/useApi';
+import { getMappedId, setMappedId } from '~/server/utils/useMappingCache';
 
-export default async function sync(
+export default defineNitroPlugin(async () => {
+  const mappings: Mapping[] = [];
+  while (true) {
+    console.log('###### Starting sync round #########');
+    for (const mapping of mappings) {
+      console.log('==> sync mapping', mapping.name);
+      try {
+        await sync(mapping, mapping.parts[0], mapping.parts[1]);
+        await sync(mapping, mapping.parts[1], mapping.parts[0]);
+      } catch (error) {
+        console.error('Error occurred at syncing mapping', mapping.name, error);
+      }
+      console.log('<== mapping synced', mapping.name);
+    }
+    console.log('###### Sync round finished #########');
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+});
+
+async function sync(
   mapping: Mapping,
   source: MappingPart,
   target: MappingPart,

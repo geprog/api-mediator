@@ -1,7 +1,28 @@
+import path from 'node:path';
 import OpenAPIParser from '@readme/openapi-parser';
-import type { Api, Endpoint } from './types';
+import type { OpenAPIV2, OpenAPIV3 } from 'openapi-types';
+import type { Api } from '~/server/utils/types';
+import { FILES, loadData } from '~/server/utils/useFileStorage';
 
-import { OpenAPIV3, OpenAPIV2 } from 'openapi-types';
+export default defineEventHandler(async (event) => {
+  const data = await readBody<{ baseUrl: string; openApiSpec: string }>(event);
+  console.log(data);
+
+  const apiId = crypto.randomUUID();
+
+  const config = useRuntimeConfig();
+  const localOpenApiSpecFile = path.join(
+    config.dataPath,
+    'openapi-specs',
+    `${apiId}`,
+  );
+  await Bun.write(Bun.file(localOpenApiSpecFile), data.openApiSpec);
+  const api = await parseOpenAPISpec(apiId, localOpenApiSpecFile, data.baseUrl);
+
+  const apis = await loadData<Api>(FILES.apis);
+  await setData(FILES.apis, [...apis, api]);
+  return api;
+});
 
 function isNotReferenceObject(
   parameter:
@@ -39,6 +60,7 @@ function parseOperationObject(
 }
 
 export async function parseOpenAPISpec(
+  id: string,
   apiSpecPath: string,
   baseUrl: string,
   parameterSubstitutions: Api['parameterSubstitutions'] = [],
@@ -56,17 +78,6 @@ export async function parseOpenAPISpec(
     const endpoints: Endpoint[] = [];
 
     Object.keys(specs).forEach((path) => {
-      if (
-        path.startsWith('/admin/') ||
-        path.startsWith('/enterprises/') ||
-        path.startsWith('/enterprise/') ||
-        path.startsWith('/notifications/') ||
-        path.startsWith('/labels/') ||
-        path.startsWith('/gists/') ||
-        path.startsWith('/orgs/')
-      ) {
-        return;
-      }
       const spec = specs[path];
       if (typeof spec === 'object') {
         if (spec.get) {
@@ -88,7 +99,7 @@ export async function parseOpenAPISpec(
     });
 
     const api: Api = {
-      id: crypto.randomUUID(),
+      id,
       name: apiSpec.info.title,
       baseUrl,
       accessToken: '',
@@ -102,35 +113,4 @@ export async function parseOpenAPISpec(
     console.error(err);
     throw err;
   }
-}
-
-export async function doFetch(
-  api: Api,
-  endpoint: Endpoint,
-  parameterSubstitutions: Record<string, unknown>,
-  body?: Record<string, unknown>,
-) {
-  const path = endpoint.parameters.reduce(
-    (path, parameter) =>
-      path.replace(
-        `{${parameter.name}}`,
-        `${parameterSubstitutions[parameter.name]}`,
-      ),
-    endpoint.path,
-  );
-  const response = await fetch(`${api.baseUrl}${path}`, {
-    method: endpoint.method,
-    body: body ? JSON.stringify(body) : undefined,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-  });
-  return await response.json();
-}
-
-export function getEndpoint(
-  api: Api,
-  endpointIdentifier: string,
-): Endpoint | undefined {
-  return api.endpoints.find(
-    (ep) => `${ep.method.toUpperCase()} ${ep.path}` === endpointIdentifier,
-  );
 }

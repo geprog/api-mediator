@@ -1,4 +1,5 @@
 import type { Api, Mapping } from './types';
+import { FILES, loadData, setData } from './useFileStorage';
 
 type MappingCache = {
   mappingId: string;
@@ -72,21 +73,9 @@ async function setMappingCache(
 }
 
 async function getMappingCaches() {
-  const file = await getMappingCacheFile();
-  const cache = (await file.json()) as MappingCache[];
-  return cache;
+  return await loadData<MappingCache>(FILES.mappingCache);
 }
 
 async function setMappingCaches(mappingCaches: MappingCache[]) {
-  const file = Bun.file(`${import.meta.dir}/mapping-cache.json`);
-  await Bun.write(file, JSON.stringify(mappingCaches, undefined, 2));
-}
-
-async function getMappingCacheFile() {
-  const file = Bun.file(`${import.meta.dir}/mapping-cache.json`);
-  if (!(await file.exists())) {
-    await Bun.write(file, '[]');
-    return await getMappingCacheFile();
-  }
-  return file;
+  await setData(FILES.mappingCache, mappingCaches);
 }
