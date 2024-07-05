@@ -25,14 +25,23 @@
       <div class="flex gap-4">
         <div class="flex w-1/2 flex-col gap-4">
           <div>{{ api1 ? api1.name : api1Id }}</div>
+          <div class="flex gap-4 justify-center">
+            <UButton @click="selectAllEndpoints1(true)">Select all</UButton>
+            <UButton @click="selectAllEndpoints1(false)">Deselect all</UButton>
+          </div>
           <UCheckbox
             v-for="endpoint of endpoints1"
             v-model="selectedEndpoints1[endpoint]"
             :label="endpoint"
           />
         </div>
+        <div class="border-l"></div>
         <div class="flex w-1/2 flex-col gap-4">
           <div>{{ api2 ? api2.name : api2Id }}</div>
+          <div class="flex gap-4 justify-center">
+            <UButton @click="selectAllEndpoints2(true)">Select all</UButton>
+            <UButton @click="selectAllEndpoints2(false)">Deselect all</UButton>
+          </div>
           <UCheckbox
             v-for="endpoint of endpoints2"
             v-model="selectedEndpoints2[endpoint]"
@@ -104,13 +113,37 @@ const api2 = computed(() => {
 
 const { data: endpoints1 } = await useFetch(
   () => `/api/api/${api1Id.value}/endpoints`,
+  { default: () => [] },
 );
 const { data: endpoints2 } = await useFetch(
   () => `/api/api/${api2Id.value}/endpoints`,
+  { default: () => [] },
 );
 
 const selectedEndpoints1 = ref<Record<string, boolean>>({});
 const selectedEndpoints2 = ref<Record<string, boolean>>({});
+
+function selectAllEndpoints(
+  selectedEndpoints: Ref<Record<string, boolean>>,
+  endpoints: Ref<string[]>,
+  selected: boolean,
+) {
+  selectedEndpoints.value = endpoints.value.reduce(
+    (dict, endpoint) => ({
+      ...dict,
+      [endpoint]: selected,
+    }),
+    {},
+  );
+}
+
+function selectAllEndpoints1(selected: boolean) {
+  selectAllEndpoints(selectedEndpoints1, endpoints1, selected);
+}
+
+function selectAllEndpoints2(selected: boolean) {
+  selectAllEndpoints(selectedEndpoints2, endpoints2, selected);
+}
 
 const mappings = ref<EndpointMappings>({});
 const generating = ref(false);
