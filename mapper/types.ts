@@ -20,7 +20,8 @@ export type Endpoint = {
   path: string;
   method: string;
   parameters: Field[];
-  responseSchema: Schema;
+  requestBody: string;
+  responseSchema: string;
 };
 
 export type Schema = {
@@ -51,9 +52,16 @@ export type Mapping = {
   parts: MappingPart[];
 };
 
-export type SuggestedMapping = {
-  [key: string]: {
-    [app: string]: {
+export type EndpointMappings = {
+  [category: string]: {
+    api1: {
+      getAll: string;
+      getOne: string;
+      create: string;
+      update: string;
+      delete: string;
+    };
+    api2: {
       getAll: string;
       getOne: string;
       create: string;

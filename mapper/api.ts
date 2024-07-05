@@ -12,13 +12,39 @@ function isNotReferenceObject(
   return !('$ref' in parameter);
 }
 
+function parseOperationObject(
+  path: string,
+  operationObject: OpenAPIV3.OperationObject | OpenAPIV2.OperationObject,
+  method: string,
+): Endpoint {
+  const { operationId, parameters, description, summary } = operationObject;
+  return {
+    method,
+    name: operationId || '',
+    path,
+    parameters: (parameters || [])
+      .filter(isNotReferenceObject)
+      .filter((param) => param.required && param.in === 'path')
+      .map((param) => ({
+        name: param.name,
+        description: param.description,
+      })),
+    requestBody:
+      'requestBody' in operationObject && operationObject.requestBody
+        ? JSON.stringify(operationObject.requestBody)
+        : '',
+    responseSchema: JSON.stringify(operationObject.responses),
+    description: summary || description,
+  };
+}
+
 export async function parseOpenAPISpec(
   apiSpecPath: string,
   baseUrl: string,
   parameterSubstitutions: Api['parameterSubstitutions'] = [],
 ): Promise<Api> {
   try {
-    let apiSpec = await OpenAPIParser.validate(apiSpecPath);
+    let apiSpec = await OpenAPIParser.dereference(apiSpecPath);
     console.log(
       'Parsed openapi spec of API name: %s, Version: %s',
       apiSpec.info.title,
@@ -30,58 +56,33 @@ export async function parseOpenAPISpec(
     const endpoints: Endpoint[] = [];
 
     Object.keys(specs).forEach((path) => {
+      if (
+        path.startsWith('/admin/') ||
+        path.startsWith('/enterprises/') ||
+        path.startsWith('/enterprise/') ||
+        path.startsWith('/notifications/') ||
+        path.startsWith('/labels/') ||
+        path.startsWith('/gists/') ||
+        path.startsWith('/orgs/')
+      ) {
+        return;
+      }
       const spec = specs[path];
       if (typeof spec === 'object') {
-        if (!!spec.get) {
-          const { operationId, parameters, description } = spec.get;
-          endpoints.push({
-            method: 'get',
-            name: operationId || '',
-            path,
-            parameters: (parameters || [])
-              .filter(isNotReferenceObject)
-              .filter((param) => param.required && param.in === 'path')
-              .map((param) => ({
-                name: param.name,
-                description: param.description,
-              })),
-            responseSchema: { name: '', fields: [] },
-            description,
-          });
+        if (spec.get) {
+          endpoints.push(parseOperationObject(path, spec.get, 'get'));
         }
-        if (!!spec.post) {
-          const { operationId, parameters, description } = spec.post;
-          endpoints.push({
-            method: 'post',
-            name: operationId || '',
-            path,
-            parameters: (parameters || [])
-              .filter(isNotReferenceObject)
-              .filter((param) => param.required && param.in === 'path')
-              .map((param) => ({
-                name: param.name,
-                description: param.description,
-              })),
-            responseSchema: { name: '', fields: [] },
-            description,
-          });
+        if (spec.post) {
+          endpoints.push(parseOperationObject(path, spec.post, 'post'));
         }
-        if (!!spec.put) {
-          const { operationId, parameters, description } = spec.put;
-          endpoints.push({
-            method: 'put',
-            name: operationId || '',
-            path,
-            parameters: (parameters || [])
-              .filter(isNotReferenceObject)
-              .filter((param) => param.required && param.in === 'path')
-              .map((param) => ({
-                name: param.name,
-                description: param.description,
-              })),
-            responseSchema: { name: '', fields: [] },
-            description,
-          });
+        if (spec.put) {
+          endpoints.push(parseOperationObject(path, spec.put, 'put'));
+        }
+        if (spec.patch) {
+          endpoints.push(parseOperationObject(path, spec.patch, 'patch'));
+        }
+        if (spec.delete) {
+          endpoints.push(parseOperationObject(path, spec.delete, 'delete'));
         }
       }
     });
@@ -123,4 +124,13 @@ export async function doFetch(
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
   });
   return await response.json();
+}
+
+export function getEndpoint(
+  api: Api,
+  endpointIdentifier: string,
+): Endpoint | undefined {
+  return api.endpoints.find(
+    (ep) => `${ep.method.toUpperCase()} ${ep.path}` === endpointIdentifier,
+  );
 }

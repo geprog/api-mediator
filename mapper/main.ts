@@ -1,63 +1,76 @@
-import { parseOpenAPISpec } from './api';
-import { generateMapping } from './generate_mapping';
+import { getEndpoint, parseOpenAPISpec } from './api';
+import generateEndpointMappings from './generateEndpointMappings';
+import { getFieldMappings } from './generateFieldMapping';
 import sync from './sync';
-import type { Mapping } from './types';
+import type {
+  Api,
+  Endpoint,
+  EndpointMappings,
+  Mapping,
+  MappingPart,
+} from './types';
 
 async function main() {
-  const githubApi = await parseOpenAPISpec(
+  const api1 = await parseOpenAPISpec(
     `${import.meta.dir}/../openapi/specs/github.yaml`,
+    // `${import.meta.dir}/gitea-spec.json`,
     'http://localhost:8787/github',
   );
-  const gitlabApi = await parseOpenAPISpec(
+  const api2 = await parseOpenAPISpec(
     `${import.meta.dir}/../openapi/specs/gitlab.yaml`,
+    // `${import.meta.dir}/github-spec.yml`,
     'http://localhost:8787/gitlab',
   );
 
-  const {filteredMapping, fieldMapping} = await generateMapping(githubApi, gitlabApi); // githubApi, gitlabApi);
-  console.log(filteredMapping, fieldMapping)
-  const mapping: Mapping = {
-    id: crypto.randomUUID(),
-    name: 'issues',
-    parts: [
-      {
-        api: githubApi,
-        getAll: githubApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.getAll,
-        ),
-        create: githubApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.create,
-        ),
-        update: githubApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].github.update,
-        ),
-        fieldMapping
-      },
-      {
-        api: gitlabApi,
-        getAll: gitlabApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.getAll,
-        ),
-        create: gitlabApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.create,
-        ),
-        update: gitlabApi.endpoints.find(
-          (ep) => `${ep.method.toUpperCase} ${ep.path}` === filteredMapping[0].gitea.update,
-        ),
-        fieldMapping: {
-          id: 'id',
-          title: 'name',
-          description: 'body',
-          closed: 'closed',
-        },
-      },
-    ],
-  };
+  const endpointMappings = await generateEndpointMappings(api1, api2);
+  console.log(endpointMappings);
+  const mappings: Mapping[] = [];
+  for (const category of Object.keys(endpointMappings)) {
+    const mapping = endpointMappings[category];
+    const fieldMappings = await getFieldMappings(api1, api2, mapping);
+    mappings.push({
+      id: crypto.randomUUID(),
+      name: category,
+      parts: [
+        getMappingPart(api1, mapping.api1, fieldMappings.api1),
+        getMappingPart(api2, mapping.api2, fieldMappings.api2),
+      ],
+    });
+  }
 
   while (true) {
-    await sync(mapping, mapping.parts[0], mapping.parts[1]);
-    await sync(mapping, mapping.parts[1], mapping.parts[0]);
+    console.log('###### Starting sync round #########');
+    for (const mapping of mappings) {
+      console.log('==> sync mapping', mapping.name);
+      try {
+        await sync(mapping, mapping.parts[0], mapping.parts[1]);
+        await sync(mapping, mapping.parts[1], mapping.parts[0]);
+      } catch (error) {
+        console.error('Error occurred at syncing mapping', mapping.name, error);
+      }
+      console.log('<== mapping synced', mapping.name);
+    }
+    console.log('###### Sync round finished #########');
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 }
 
 main();
+
+// ############ helper functions ################
+
+function getMappingPart(
+  api: Api,
+  mapping: EndpointMappings[string]['api1'],
+  fieldMapping: MappingPart['fieldMapping'],
+): MappingPart {
+  return {
+    api,
+    getAll: getEndpoint(api, mapping.getAll),
+    getOne: getEndpoint(api, mapping.getOne),
+    create: getEndpoint(api, mapping.create),
+    update: getEndpoint(api, mapping.update),
+    delete: getEndpoint(api, mapping.delete),
+    fieldMapping,
+  };
+}
