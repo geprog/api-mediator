@@ -70,7 +70,11 @@
         </div>
       </UCard>
     </div>
-    <UButton @click="addMappings" :disabled="!api1 || !api2">
+    <UButton
+      @click="addMappings"
+      :disabled="!api1 || !api2 || adding"
+      :loading="adding"
+    >
       Add selected mappings
     </UButton>
   </UCard>
@@ -134,22 +138,29 @@ async function generateEndpointMappings() {
 }
 
 const selectedMappings = ref<Record<string, boolean>>({});
-
+const adding = ref(false);
 async function addMappings() {
-  for (const mappingKey of Object.keys(selectedMappings.value)) {
-    if (!selectedMappings.value[mappingKey]) {
-      continue;
+  adding.value = true;
+  try {
+    for (const mappingKey of Object.keys(selectedMappings.value)) {
+      if (!selectedMappings.value[mappingKey]) {
+        continue;
+      }
+      await $fetch('/api/mapping/add', {
+        method: 'POST',
+        body: {
+          api1: api1Id.value,
+          api2: api2Id.value,
+          name: mappingKey,
+          mapping: mappings.value[mappingKey],
+        },
+      });
     }
-    await $fetch('/api/mapping/add', {
-      method: 'POST',
-      body: {
-        api1: api1Id.value,
-        api2: api2Id.value,
-        name: mappingKey,
-        mapping: mappings.value[mappingKey],
-      },
-    });
+  } catch (error) {
+    useToast().add({ title: 'Adding mappings failed', color: 'red' });
+    console.error(error);
   }
+  adding.value = false;
 }
 
 async function backToHome() {

@@ -4,7 +4,16 @@
     :nodes="nodes"
     :edges="edges"
     :configs="configs"
-  />
+  >
+    <template #edge-label="{ edge, ...slotProps }">
+      <v-edge-label
+        :text="edge.label"
+        align="center"
+        vertical-align="above"
+        v-bind="slotProps"
+      />
+    </template>
+  </v-network-graph>
   <footer
     class="flex w-full items-center justify-center border-t border-gray-300 bg-white p-4"
   >
@@ -24,6 +33,9 @@ import {
 } from 'v-network-graph/lib/force-layout';
 
 const { data: apis } = await useFetch('/api/api', { default: () => [] });
+const { data: mappings } = await useFetch('/api/mapping', {
+  default: () => [],
+});
 const nodes = computed<vNG.Nodes>(() => {
   return apis.value.reduce(
     (nodes, api) => ({
@@ -34,7 +46,18 @@ const nodes = computed<vNG.Nodes>(() => {
   );
 });
 
-const edges = {};
+const edges = computed<vNG.Edges>(() => {
+  return mappings.value.reduce((edges, mapping) => {
+    return {
+      ...edges,
+      [mapping.id]: {
+        source: mapping.parts[0].api.id,
+        target: mapping.parts[1].api.id,
+        label: mapping.name,
+      },
+    };
+  }, {});
+});
 
 const configs = vNG.defineConfigs({
   view: {
@@ -45,7 +68,7 @@ const configs = vNG.defineConfigs({
           .id((d: { id: string }) => d.id);
         return d3
           .forceSimulation(nodes)
-          .force('edge', forceLink.distance(60).strength(0.2))
+          .force('edge', forceLink.distance(150).strength(0.2))
           .force('charge', d3.forceManyBody().strength(-120))
           .alphaMin(0.001);
       },

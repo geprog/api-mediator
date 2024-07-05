@@ -6,7 +6,6 @@ import { FILES, loadData } from '~/server/utils/useFileStorage';
 
 export default defineEventHandler(async (event) => {
   const data = await readBody<{ baseUrl: string; openApiSpec: string }>(event);
-  console.log(data);
 
   const apiId = crypto.randomUUID();
 
@@ -106,7 +105,6 @@ export async function parseOpenAPISpec(
       parameterSubstitutions,
       endpoints,
       schemas: [],
-      rawApiSpec: apiSpec,
     };
     return api;
   } catch (err) {
