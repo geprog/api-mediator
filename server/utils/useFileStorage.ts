@@ -2,6 +2,7 @@ import path from 'node:path';
 
 export const FILES = {
   apis: 'apis',
+  mappings: 'mappings',
   mappingCache: 'mapping-cache',
 };
 
