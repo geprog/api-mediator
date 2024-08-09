@@ -1,8 +1,27 @@
-import { doFetch } from './api';
-import { getMappedId, setMappedId } from './mapping';
-import type { Mapping, MappingPart } from './types';
+import type { Api, Mapping, MappingPart } from '~/server/utils/types';
+import { doFetch } from '~/server/utils/useApi';
+import { getMappedId, setMappedId } from '~/server/utils/useMappingCache';
 
-export default async function sync(
+export default defineNitroPlugin(async () => {
+  while (true) {
+    const mappings: Mapping[] = await loadData<Mapping>(FILES.mappings);
+    console.log('###### Starting sync round #########');
+    for (const mapping of mappings) {
+      console.log('==> sync mapping', mapping.name);
+      try {
+        await sync(mapping, mapping.parts[0], mapping.parts[1]);
+        await sync(mapping, mapping.parts[1], mapping.parts[0]);
+      } catch (error) {
+        console.error('Error occurred at syncing mapping', mapping.name, error);
+      }
+      console.log('<== mapping synced', mapping.name);
+    }
+    console.log('###### Sync round finished #########');
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+});
+
+async function sync(
   mapping: Mapping,
   source: MappingPart,
   target: MappingPart,
@@ -10,13 +29,13 @@ export default async function sync(
   if (!source.getAll || !target.create || !target.update) {
     return;
   }
-  console.log(
-    `######## Sync ${source.api.name} => ${target.api.name} #########`,
-  );
+  const sourceApi = (await $fetch(`/api/api/${source.api}`)) as Api;
+  const targetApi = (await $fetch(`/api/api/${target.api}`)) as Api;
+  console.log(`######## Sync ${sourceApi.name} => ${targetApi.name} #########`);
   // sync the data
   // 1. fetch endpoint from source
   const sourceResponse = await fetch(
-    `${source.api.baseUrl}${source.getAll.path}`,
+    `${sourceApi.baseUrl}${source.getAll.path}`,
     {
       method: source.getAll.method,
     },
@@ -33,21 +52,16 @@ export default async function sync(
 
     let baseTargetItem: Record<string, unknown> = {};
     const sourceId = sourceItem.id;
-    const targetId = await getMappedId(
-      mapping,
-      source.api,
-      target.api,
-      sourceId,
-    );
+    const targetId = await getMappedId(mapping, sourceApi, targetApi, sourceId);
     console.log('source item already exists in target', targetId);
     if (targetId) {
       // TODO: generalize parameter substitutions
       if (target.getOne) {
-        baseTargetItem = await doFetch(target.api, target.getOne, {
+        baseTargetItem = await doFetch(targetApi, target.getOne, {
           id: targetId,
         });
       } else if (target.getAll) {
-        const targetItems = await doFetch(target.api, target.getAll, {});
+        const targetItems = await doFetch(targetApi, target.getAll, {});
         baseTargetItem = targetItems.find((item) => item.id === targetId);
         if (!baseTargetItem) {
           console.log(
@@ -82,7 +96,7 @@ export default async function sync(
     if (targetId) {
       // 3.1. update target entity because it was existing before
       const responseData = await doFetch(
-        target.api,
+        targetApi,
         target.update,
         { id: targetId },
         targetItem,
@@ -92,7 +106,7 @@ export default async function sync(
       // 3.2. create if not existing and save id mapping
       const { id, ...targetItemWithoutId } = targetItem;
       const responseData = await doFetch(
-        target.api,
+        targetApi,
         target.create,
         {},
         targetItemWithoutId,
@@ -100,8 +114,8 @@ export default async function sync(
       console.log('created target item ', responseData);
       await setMappedId(
         mapping,
-        source.api,
-        target.api,
+        sourceApi,
+        targetApi,
         sourceId,
         responseData.id,
       );

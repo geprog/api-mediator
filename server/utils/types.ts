@@ -1,5 +1,3 @@
-import type { OpenAPI } from 'openapi-types';
-
 export type Api = {
   id: string;
   name: string;
@@ -11,7 +9,6 @@ export type Api = {
   }[];
   endpoints: Endpoint[];
   schemas: Schema[];
-  rawApiSpec: OpenAPI.Document;
 };
 
 export type Endpoint = {
@@ -20,7 +17,8 @@ export type Endpoint = {
   path: string;
   method: string;
   parameters: Field[];
-  responseSchema: Schema;
+  requestBody: string;
+  responseSchema: string;
 };
 
 export type Schema = {
@@ -36,7 +34,7 @@ export type Field = {
 };
 
 export type MappingPart = {
-  api: Api;
+  api: string;
   getAll?: Endpoint;
   getOne?: Endpoint;
   create?: Endpoint;
@@ -51,9 +49,16 @@ export type Mapping = {
   parts: MappingPart[];
 };
 
-export type SuggestedMapping = {
-  [key: string]: {
-    [app: string]: {
+export type EndpointMappings = {
+  [category: string]: {
+    api1: {
+      getAll: string;
+      getOne: string;
+      create: string;
+      update: string;
+      delete: string;
+    };
+    api2: {
       getAll: string;
       getOne: string;
       create: string;
