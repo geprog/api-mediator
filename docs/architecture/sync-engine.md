@@ -26,7 +26,7 @@ Full step-by-step walkthrough with sequence diagram: [flows/sync-webhook-push.md
 ## Polling pull pipeline
 
 1. Scheduler wakes a `SyncRule` on its configured interval.
-2. Poller calls the source app's changed-since operation using the stored `cursor`, if the API supports delta queries; otherwise it does a full fetch and diffs against the last-seen snapshot by content hash.
+2. Poller calls the source app's changed-since operation using the stored `cursor`, if the app declares `capabilities.supportsDeltaQuery`; otherwise it does a full fetch and diffs against the last-seen snapshot by content hash.
 3. Each changed record goes through the same Loop Prevention → Transformation → Outbound Call pipeline as webhook push.
 4. `SyncRule.cursor` and `lastRunAt` are advanced; a `SyncEvent` is recorded per changed record.
 
@@ -34,7 +34,7 @@ Full step-by-step walkthrough with sequence diagram: [flows/sync-polling-pull.md
 
 ## Loop prevention
 
-Bidirectional mappings create a real risk: App A changes → synced to App B → App B's own webhook/poll detects that change → synced back to App A → infinite ping-pong.
+Bidirectional sync — two paired one-way `ApprovedMapping`s / `SyncRule`s, see [data-model.md](data-model.md) — creates a real risk: App A changes → synced to App B by the A→B `SyncRule` → App B's own webhook/poll detects that change → the B→A `SyncRule` syncs it back to App A → infinite ping-pong.
 
 Prevention mechanism:
 
@@ -48,10 +48,10 @@ Every outbound write carries a deterministic `idempotencyKey` — a hash of the 
 
 ## Conflict handling
 
-A conflict is detected when both sides of a mapped field have changed since the last successful sync (the mediator keeps a last-synced snapshot hash per mapped field to detect this).
+A conflict is detected when both sides of a mapped field have changed since the last successful sync. The mediator tracks this via `SyncFieldState` (see [data-model.md](data-model.md)) — one row per mapped field pair per record, storing the last-reconciled value hash. Critically, `SyncFieldState` is keyed by the *field pairing*, not by a single `SyncRule`: a bidirectional pair (two `SyncRule`s, one per direction) shares the same state, so a conflict is detected correctly regardless of which direction wrote last. When either direction's pipeline is about to write, it compares the incoming value against `SyncFieldState.lastSyncedValueHash`; if the *other* app's side has also changed since that hash was recorded, it's a conflict.
 
-- **Default policy: last-write-wins by source timestamp.** The side with the more recent change timestamp/version wins. The event is still recorded with `SyncEvent.status = conflict` in the Audit Log, so nothing is silently lost from the record even though it's auto-resolved.
-- A `FieldMapping` can be flagged `manual-resolve` in its `transformConfig` to override this default and force the conflict to surface in the UI instead of auto-resolving — useful for fields where auto-resolution would be unacceptable.
+- **Default policy: last-write-wins by source timestamp.** The side with the more recent change timestamp/version wins. This relies on the two apps' reported timestamps being meaningfully comparable, which cannot be assumed across independently-operated external systems with unsynchronized clocks. To keep this from silently picking the wrong side on clock skew: if the two candidate timestamps are within a configurable epsilon (e.g. a few seconds) of each other, timestamp comparison is treated as inconclusive and the mediator falls back to the order in which it *observed* the two changes (webhook arrival / poll detection order) as the tiebreaker, rather than trusting sub-epsilon timestamp differences from two unrelated clocks. Either way, the event is still recorded with `SyncEvent.status = conflict` in the Audit Log, so nothing is silently lost from the record even though it's auto-resolved.
+- A `FieldMapping` can set its `conflictPolicy` field to `manual-resolve` (see [data-model.md](data-model.md) — this is a sibling field to `transformConfig`, not a value inside it) to override this default and force the conflict to surface in the UI instead of auto-resolving — useful for fields where auto-resolution would be unacceptable. Since `conflictPolicy` lives on `FieldMapping`, it's only meaningful for `FieldMapping`s that belong to a peer-peer `ApprovedMapping`; it has no effect on consumer-provider `FieldMapping`s, which the Adapter Engine never reconciles against a prior state.
 
 ## Ordering and consistency
 

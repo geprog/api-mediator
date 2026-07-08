@@ -77,4 +77,4 @@ Single-tenant, self-hosted: one mediator instance manages one organization's lan
 
 ## Scale assumption
 
-The landscape is expected to be small (on the order of 15-20 registered apps). This directly shapes the Mapping Engine design: it calls the LLM once per candidate resource pair rather than adding a pre-filtering stage (see [mapping-engine.md](mapping-engine.md)) — a deliberate simplicity choice that should be revisited if the landscape grows substantially larger.
+The landscape is expected to be small (on the order of 15-20 registered apps), **each with a modest number of resource groups**. This directly shapes the Mapping Engine design: it calls the LLM once per candidate *resource* pair rather than adding a pre-filtering stage (see [mapping-engine.md](mapping-engine.md)) — a deliberate simplicity choice. App count alone doesn't bound the actual LLM call volume; a landscape with few apps that each expose very many resource groups can still produce a large number of candidate pairs. The assumption should be revisited if either the app count or the typical per-app resource count grows substantially.

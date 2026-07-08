@@ -7,9 +7,9 @@ Executed by the [Adapter/Gateway Engine](../architecture/adapter-engine.md) when
 1. An inbound HTTP request hits the Adapter Server Runtime at the path bound to a consumer operation.
 2. The Auth Gateway validates the caller's mediator-issued adapter token (see [architecture/security.md](../architecture/security.md)).
 3. The Request Router matches the operation to its `AdapterEndpoint`.
-4. The Resolution Planner loads the endpoint's persisted `AdapterBinding`(s) (primary/fallback/supplement) and their `ApprovedMapping`s, re-validating that none are `stale`.
+4. The Resolution Planner loads the endpoint's persisted `AdapterBinding`(s) (primary/fallback/supplement) and their `ApprovedMapping`s, re-validating that none are `stale` — a stale binding fails as a distinct `mapping-stale` error rather than a generic upstream error (see [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
 5. The Transformation Executor maps the inbound request's params/body to each backend's expected shape.
-6. The Outbound Call Executor calls the backend app(s) — in parallel when bindings are independent, sequentially when one backend's output feeds another's input.
+6. The Outbound Call Executor calls the backend app(s) grouped by `executionOrder` — bindings sharing an order run in parallel; a binding with `dependsOnBindingId` set runs only once that binding's response is available and receives it as input.
 7. The Transformation Executor maps each backend response back to the consumer's schema.
 8. The Response Aggregator merges/aggregates results per the endpoint's `aggregationStrategy` (`single` / `fanout-merge` / `collection-union` / `fanout-first-success`), applying the configured error/partial-failure semantics.
 9. The response is validated against the consumer OpenAPI response schema and returned; the response cache is updated if `cacheTtl` is set.

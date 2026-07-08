@@ -58,3 +58,5 @@ Grafana alerting rules on top of the same metrics, covering conditions such as:
 - A `SyncRule` has had no successful run past N× its expected interval (stuck poller or dead webhook subscription).
 - An `AdapterEndpoint`'s error rate crosses a threshold.
 - The mapping review queue is growing unbounded (proposals are not being reviewed fast enough).
+- A candidate pair's mapping analysis has hit its retry ceiling and been marked `failed` (see [mapping-engine.md](mapping-engine.md)) — surfaced distinctly from a normal low-confidence proposal so it doesn't get lost in the review queue.
+- **Any `AdapterBinding` transitions to `stale`** — alerted at a tighter threshold (e.g. immediately, vs. the `SyncRule` staleness alert which can tolerate more delay) since a stale binding is an active, externally-visible failure for a live caller right now, not a paused background job (see the asymmetry noted in [extensibility.md](extensibility.md) and [adapter-engine.md](adapter-engine.md)).

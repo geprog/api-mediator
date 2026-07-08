@@ -17,12 +17,14 @@ This decomposition is what both the Mapping Engine and the Spec Registry's IR (s
 
 ## Candidate pair selection
 
-- Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions.
+- Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions — i.e. an A↔B peer pair produces **two** separate candidate analyses (A→B and B→A), each its own `MappingProposal`. Approving both independently is what yields a bidirectional sync pair (see [data-model.md](data-model.md)); there is no single "bidirectional" analysis run.
 - Every `CONSUMER` spec vs. every active `PROVIDER` spec (direction: consumer needs ← provider offers).
 
 ## Matching approach: direct LLM reasoning, no pre-filter stage
 
-Given the landscape scale assumption (~15-20 apps, see [overview.md](overview.md)), the number of candidate resource pairs stays small enough that the engine calls the LLM once per candidate resource pair directly — there is no embedding/keyword pre-filter stage shortlisting pairs before the LLM runs. This is a deliberate simplicity choice: it removes an entire component (and a similarity-threshold tuning knob) at a scale where LLM cost/latency is not a concern. If the landscape grows well beyond this scale, a pre-filter stage should be reconsidered.
+The "~15-20 apps" scale assumption (see [overview.md](overview.md)) bounds the number of *apps*, not the number of LLM calls directly — the actual cost driver is the number of candidate **resource** pairs, i.e. apps × resource-groups-per-app on each side. The no-pre-filter simplicity choice below is valid at the assumed scale only as long as per-app resource counts stay modest (low tens); a landscape of 15-20 apps that each expose hundreds of resource groups would blow past the assumption's intent even though the app count is unchanged. This resource-count dimension should be tracked alongside app count when deciding whether the assumption still holds.
+
+Given that assumption, the number of candidate resource pairs stays small enough that the engine calls the LLM once per candidate resource pair directly — there is no embedding/keyword pre-filter stage shortlisting pairs before the LLM runs. This is a deliberate simplicity choice: it removes an entire component (and a similarity-threshold tuning knob) at a scale where LLM cost/latency is not a concern. If the landscape grows well beyond this scale — in app count or in per-app resource count — a pre-filter stage should be reconsidered.
 
 For each candidate resource pair, the Mapping Engine builds a prompt containing both resources' operations and schemas and asks the LLM to produce operation- and field-level correspondences.
 
@@ -33,7 +35,12 @@ The Mapping Engine requests (and validates) a fixed structured output from the L
 ```
 MappingSuggestionSet {
   operationMappings: [
-    { sourceOperationId, targetOperationId, confidence, rationale }
+    {
+      sourceOperationId, targetOperationId,
+      confidence, rationale,
+      ambiguousAlternatives: [{ targetOperationId, confidence }],
+      unmapped: bool
+    }
   ],
   fieldMappings: [
     {
@@ -48,7 +55,9 @@ MappingSuggestionSet {
 }
 ```
 
-This is validated against a fixed JSON schema before being persisted as a `MappingProposal` + `MappingProposalItem`s (see [data-model.md](data-model.md)). Malformed output triggers a corrective retry — the core mapping logic never trusts free-text LLM output directly; only validated structured output becomes a `MappingProposalItem`.
+`ambiguousAlternatives` and `unmapped` are structurally identical on both `operationMappings` and `fieldMappings` — an operation can have more than one plausible match (e.g. two similarly-named endpoints) exactly as a field can, so the schema doesn't special-case operations to a narrower shape. Both map onto the single `MappingProposalItem` entity regardless of `kind` (see [data-model.md](data-model.md)).
+
+This is validated against a fixed JSON schema before being persisted as a `MappingProposal` + `MappingProposalItem`s (see [data-model.md](data-model.md)). Malformed output triggers a corrective retry (re-prompting with the validation error) — the core mapping logic never trusts free-text LLM output directly; only validated structured output becomes a `MappingProposalItem`. Retries are capped (e.g. 3 attempts per candidate pair); if the provider still can't produce valid output, that pair's analysis is marked `failed` rather than retried indefinitely, is surfaced in the review UI as needing attention, and emits a dedicated failure metric (see [observability.md](observability.md)) rather than silently consuming LLM budget in a retry loop.
 
 ## Confidence & ambiguity
 

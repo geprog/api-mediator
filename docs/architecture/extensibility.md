@@ -13,6 +13,8 @@ Registered apps evolve their APIs over time. The mediator must react to a new `A
 
 This lifecycle applies identically whether the changed spec is a `PROVIDER` spec (affecting sync `SyncRule`s) or a `CONSUMER` spec (affecting `AdapterBinding`s) — both are driven by the same `SpecDiff` → stale-marking → targeted re-review path.
 
+**The mechanism is identical, but the operational impact of going `stale` is not.** A stale `SyncRule` pauses a background job silently — nothing external notices until someone checks the graph or a Grafana alert fires. A stale `AdapterBinding`, by contrast, is externally visible the moment a live caller hits that operation: see *Stale bindings at request time* in [adapter-engine.md](adapter-engine.md) for the distinct `mapping-stale` failure this produces. Treat "delta-review model applies identically" as a statement about *how staleness is computed and scoped*, not about *how urgently a human needs to act on it* — adapter staleness should generally be reviewed faster than sync staleness, since it directly breaks a live consumer in the meantime.
+
 ## Beyond REST/OpenAPI
 
 The initial version is scoped to REST APIs described by OpenAPI (see [overview.md](overview.md)). The architecture keeps this replaceable through two seams, so that adding a future protocol does not require rewriting the mapping/sync/adapter core:
