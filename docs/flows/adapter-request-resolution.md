@@ -8,9 +8,9 @@ Executed by the [Adapter/Gateway Engine](../architecture/adapter-engine.md) when
 2. The Auth Gateway validates the caller's mediator-issued adapter token (see [architecture/security.md](../architecture/security.md)).
 3. The Request Router matches the operation to its `AdapterEndpoint`.
 4. The Resolution Planner loads the endpoint's persisted `AdapterBinding`(s) (primary/fallback/supplement) and their `ApprovedMapping`s, re-validating that none are `stale` — a stale binding fails as a distinct `mapping-stale` error rather than a generic upstream error (see [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
-5. The Transformation Executor maps the inbound request's params/body to each backend's expected shape.
+5. The Transformation Executor maps the inbound request to each backend's expected shape via the mapping's **request-phase** `FieldMapping`s (body fields) and its `OperationMapping`'s `ParameterMapping`s (path/query/header inputs) — see [architecture/data-model.md](../architecture/data-model.md).
 6. The Outbound Call Executor calls the backend app(s) grouped by `executionOrder` — bindings sharing an order run in parallel; a binding with `dependsOnBindingId` set runs only once that binding's response is available and receives it as input.
-7. The Transformation Executor maps each backend response back to the consumer's schema.
+7. The Transformation Executor maps each backend response back to the consumer's schema via the mapping's **response-phase** `FieldMapping`s — an independent approved transform set, never an inversion of the request phase.
 8. The Response Aggregator merges/aggregates results per the endpoint's `aggregationStrategy` (`single` / `fanout-merge` / `collection-union` / `fanout-first-success`), applying the configured error/partial-failure semantics.
 9. The response is validated against the consumer OpenAPI response schema and returned; the response cache is updated if `cacheTtl` is set. A validation failure fails the request with a distinct `mediator-transform-error` — a mediator-side mapping defect, never returned as if it were valid data (see error semantics in [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
 

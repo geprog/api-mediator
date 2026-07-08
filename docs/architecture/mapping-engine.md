@@ -18,7 +18,7 @@ This decomposition is what both the Mapping Engine and the Spec Registry's IR (s
 ## Candidate pair selection
 
 - Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions — i.e. an A↔B peer pair produces **two** separate candidate analyses (A→B and B→A), each its own `MappingProposal`. Approving both independently is what yields a bidirectional sync pair (see [data-model.md](data-model.md)); there is no single "bidirectional" analysis run.
-- Every `CONSUMER` spec vs. every active `PROVIDER` spec (direction: consumer needs ← provider offers).
+- Every `CONSUMER` spec vs. every *other* app's active `PROVIDER` spec — **one analysis per pair**, always with the consumer spec as `sourceSpec` and the provider spec as `targetSpec`. There is no reverse-direction analysis: the mediator hosts the consumer's wished-for API as a *virtual provider* and never calls the consumer itself (see [adapter-engine.md](adapter-engine.md)). What would otherwise need a second direction is covered *inside* the single proposal by the request/response **phases** of its field suggestions (see the structured formats below). An app's `CONSUMER` spec is never paired with the same app's own `PROVIDER` spec — serving an app's wishes from itself would be a no-op; the two roles are registered and analyzed independently.
 
 This enumerates the *spec* pairs. Which *resource* pairs within a spec pair get a full analysis is decided by the stage-1 shortlist below — computed once per unordered spec pair and shared by both directional analyses.
 
@@ -75,18 +75,30 @@ MappingSuggestionSet {
   fieldMappings: [
     {
       sourceField, targetField,
+      phase: "request" | "response",   // consumer-provider pairs only; absent on peer-peer
       transform: "rename" | "coerce" | "aggregate" | "expression",
       transformDetail,
-      identityCandidate: bool,
+      identityCandidate: bool,         // peer-peer pairs only
       confidence, rationale,
       ambiguousAlternatives: [{ targetField, confidence }],
+      unmapped: bool
+    }
+  ],
+  parameterMappings: [                 // consumer-provider pairs only
+    {
+      sourceOperationId, targetOperationId,
+      sourceParam, targetParam,
+      transform, transformDetail,      // optional
+      confidence, rationale,
       unmapped: bool
     }
   ]
 }
 ```
 
-`ambiguousAlternatives` and `unmapped` are structurally identical on both `operationMappings` and `fieldMappings` — an operation can have more than one plausible match (e.g. two similarly-named endpoints) exactly as a field can, so the schema doesn't special-case operations to a narrower shape. Both map onto the single `MappingProposalItem` entity regardless of `kind` (see [data-model.md](data-model.md)).
+`ambiguousAlternatives` and `unmapped` are structurally identical across `operationMappings`, `fieldMappings`, and `parameterMappings` — an operation can have more than one plausible match (e.g. two similarly-named endpoints) exactly as a field can, so the schema doesn't special-case operations to a narrower shape. All three map onto the single `MappingProposalItem` entity regardless of `kind` (see [data-model.md](data-model.md)).
+
+For **consumer-provider** pairs, every field-level suggestion additionally carries a `phase`: `request` (consumer request field in → backend request field out) or `response` (backend response field in → consumer response field out), and `parameterMappings` cover the operation inputs that aren't resource fields — path/query/header parameters — scoped per operation pair. The two phases are independent transform sets over the same resource pair: a non-invertible transform in one phase (`fullName = firstName + " " + lastName`) has its own independently-proposed counterpart in the other phase, or none — the same no-inversion reasoning that makes bidirectional sync two one-way mappings (see [data-model.md](data-model.md)), applied inside one mapping because the adapter needs both halves to serve a single round trip. Both phases and the parameter mappings come out of the *same single detail call*: the prompt already contains both resources in full, so this adds output structure, not extra calls. Peer-peer suggestion sets carry neither `phase` nor `parameterMappings` — a peer-peer mapping has a single data direction, and the sync pipeline fills target operation parameters (the path id of an update, say) from the `RecordLink`, not from a mapping.
 
 For **peer-peer** pairs, the provider is additionally asked to flag at most one field pairing per resource pair as `identityCandidate: true` — the business-level key (email, SKU, order number, …) whose values are expected to identify the *same record* in both apps. This is a suggestion only: it pre-selects the identity choice in the review UI, but `FieldMapping.isIdentityKey` is set exclusively by explicit reviewer confirmation (see [flows/mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)), because a wrong identity key makes the Sync Engine silently merge unrelated records — the worst failure mode it has (see *Identity correlation* in [sync-engine.md](sync-engine.md)). Consumer-provider pairs skip this: the adapter never correlates records across apps.
 

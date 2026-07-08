@@ -20,7 +20,7 @@ One-line definitions of every entity and term used across this documentation. Se
 - **RegisteredApp** — an application in the landscape; may carry a `PROVIDER` spec, a `CONSUMER` spec, or both.
 - **ApiSpec** — an OpenAPI document registered for an app, in a given role, parsed into an IR.
 - **PROVIDER spec** — an OpenAPI spec describing an API the app actually exposes.
-- **CONSUMER spec** — an OpenAPI spec describing what an app needs/expects from the landscape, to be served by a live [Adapter Engine](architecture/adapter-engine.md) endpoint.
+- **CONSUMER spec** — an OpenAPI spec describing what an app needs/expects from the landscape, to be served by a live [Adapter Engine](architecture/adapter-engine.md) endpoint. Never called by the mediator; if the same software also exposes an API, that is a separate, independent `PROVIDER` registration on the same app.
 - **IR (Intermediate Representation)** — the normalized, protocol-agnostic form (resources → operations → schemas) that a spec is decomposed into; everything downstream (mapping, sync, adapter) reasons over the IR, not the raw OpenAPI document.
 - **Credential** — encrypted per-app auth material (API key, OAuth2, basic auth, webhook secret).
 - **Spec Adapter** — the conversion layer that turns any protocol description (OpenAPI today; a future GraphQL SDL/AsyncAPI/gRPC proto) into the shared IR; the seam a future non-REST protocol plugs into.
@@ -32,16 +32,18 @@ One-line definitions of every entity and term used across this documentation. Se
 - **Shortlist pass (stage 1)** — one summary-level LLM call per *unordered* spec pair that shortlists plausibly-corresponding resource pairs; deliberately recall-biased, reused by both directional analyses.
 - **Detail pass (stage 2)** — the full per-resource-pair LLM call producing operation/field correspondences; runs only on shortlisted pairs.
 - **ResourceShortlist** — the validated structured output of the shortlist pass (candidate resource pairs with confidence + rationale), persisted on the `MappingProposal` as `shortlistResult` and reviewable via the manual "analyze anyway" escape hatch.
-- **MappingProposal** — the output of one Mapping Engine run over one *directional* pair of specs (`sourceSpecId → targetSpecId`); a peer pair A↔B is always two separate proposals, one per direction.
+- **MappingProposal** — the output of one Mapping Engine run over one *directional* pair of specs (`sourceSpecId → targetSpecId`); a peer pair A↔B is always two separate proposals, one per direction. A consumer-provider pair is a *single* proposal (consumer as source) whose field items cover both request and response phases.
 - **MappingProposalItem** — a single candidate operation- or field-level correspondence within a proposal.
 - **confidenceScore** — 0-1 score on a proposal item indicating how certain the Mapping Engine is.
 - **ambiguousAlternatives** — alternative plausible targets, surfaced when the top match isn't clearly best; applies to operation-kind and field-kind items alike.
 - **unmapped** — flag on a proposal item meaning no counterpart was found for that source element; the item has no `targetRef`.
 - **reviewRequired** — flag set on low-confidence items, driving their priority in the review UI.
-- **ApprovedMapping** — a human-reviewed, approved mapping; the only thing the Sync Engine and Adapter Engine act on. Always one-directional; two of them, cross-linked, represent a bidirectional sync relationship (see `counterpartMappingId`).
-- **counterpartMappingId** — the field on `ApprovedMapping` linking it to the reverse-direction `ApprovedMapping` between the same two spec lineages (version-agnostic), when both have been approved.
-- **FieldMapping** — one approved field-level correspondence, with its transform (rename/coerce/aggregate/expression).
+- **ApprovedMapping** — a human-reviewed, approved mapping; the only thing the Sync Engine and Adapter Engine act on. No transform in it ever runs in reverse: peer-peer mappings are one-directional (two of them, cross-linked, represent a bidirectional sync relationship — see `counterpartMappingId`); consumer-provider mappings run consumer → provider and carry separate request- and response-phase transform sets for the adapter round trip.
+- **counterpartMappingId** — the field on `ApprovedMapping` linking it to the reverse-direction `ApprovedMapping` between the same two spec lineages (version-agnostic), when both have been approved. Peer-peer only — consumer-provider mappings have no reverse direction.
+- **FieldMapping** — one approved field-level correspondence, with its transform (rename/coerce/aggregate/expression); on consumer-provider mappings each row carries a `phase` (request/response).
+- **phase** (`request` | `response`) — which half of the adapter round trip a consumer-provider `FieldMapping` transforms: `request` (consumer → backend) or `response` (backend → consumer). The two phases are independent transform sets, proposed and reviewed together, never inverses of each other.
 - **OperationMapping** — one approved operation-level correspondence under an `ApprovedMapping`, carrying an `action` (create/read/update/delete); how the executing engines know which target operation to call.
+- **ParameterMapping** — one approved operation-input correspondence (path/query/header parameter) under a consumer-provider `ApprovedMapping`, scoped to its `OperationMapping`; how the adapter fills a backend operation's parameters from the consumer's request. Peer-peer mappings have none — sync fills target parameters from the `RecordLink`.
 - **action** — the CRUD classification on an `OperationMapping`, heuristically derived from the target IR and correctable at review; the Sync Engine selects the target operation whose action matches the change type it is propagating.
 - **identity key** (`isIdentityKey`) — the one confirmed `FieldMapping` per mapped resource pair whose values identify the same record in both apps; human-confirmed at review, required before a `SyncRule` can be enabled.
 - **identityCandidate** — the Mapping Engine's suggested identity key on a field-level proposal item; a suggestion only, never auto-confirmed.
@@ -71,6 +73,7 @@ One-line definitions of every entity and term used across this documentation. Se
 ## Adapter
 
 - **Adapter/Gateway Engine** — hosts a live server implementing a `CONSUMER` spec, resolving requests on demand against real backend apps.
+- **Virtual provider** — how to read a generated adapter server: the mediator hosts the consumer's wished-for API as if it were a registered provider app, wired to the real backends via approved mappings; the mediator never calls the consumer itself.
 - **Adapter Server Runtime** — the live server process itself, hosting the generated endpoints for a `CONSUMER` spec.
 - **Auth Gateway** — validates a caller's mediator-issued adapter token in front of the Adapter Server Runtime.
 - **Request Router** — matches an inbound request to its `AdapterEndpoint`.

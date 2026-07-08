@@ -28,7 +28,7 @@ Both capabilities are built on the same core idea: a **mapping** between two Ope
 Two design points recur throughout the rest of this documentation:
 
 - **The Sync Engine and Adapter Engine are both just consumers of `ApprovedMapping` data.** One pushes data proactively; the other resolves requests on demand. They share the same Transformation Executor, Outbound Call Executor, Credential Store access pattern, and Audit Log.
-- **The Mapping Engine is used identically for both capabilities.** The only difference is which spec pairs get analyzed (provider ↔ provider for sync candidates; consumer ↔ provider for adapter candidates) and what the resulting `ApprovedMapping` is later used for.
+- **The Mapping Engine is used identically for both capabilities.** The differences are which spec pairs get analyzed (provider ↔ provider for sync candidates; consumer ↔ provider for adapter candidates) and the shape of the result: a peer-peer mapping carries one data direction (bidirectional sync is two mappings), while a consumer-provider mapping carries request- and response-phase transform sets for the adapter's round trip — the mediator never calls the consumer, so there is no reverse consumer-provider mapping (see [mapping-engine.md](mapping-engine.md) and [data-model.md](data-model.md)).
 
 ## Component diagram
 
