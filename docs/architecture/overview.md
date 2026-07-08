@@ -13,7 +13,7 @@ Both capabilities are built on the same core idea: a **mapping** between two Ope
 
 | Component | Responsibility |
 |---|---|
-| **API/UI Layer** | Entry point for humans: registering apps, reviewing/approving mappings, viewing the landscape graph, viewing monitoring links. Never touches raw credentials directly — always goes through the Credential Store's scoped accessor. |
+| **API/UI Layer** | Entry point for humans: registering apps, reviewing/approving mappings, viewing the landscape graph, viewing monitoring links. Credential material passes through it **write-only** at registration/rotation, straight into the Credential Store; secrets are never returned through this layer (see [security.md](security.md)). |
 | **Spec Registry** | Stores raw OpenAPI documents and a normalized Intermediate Representation (IR: resources → operations → schemas). Owns spec versioning and diffing (see [extensibility.md](extensibility.md)). |
 | **Credential Store** | Envelope-encrypted storage of per-app credentials (API keys, OAuth2 tokens, basic auth, webhook secrets). Exposes only a scoped accessor that decrypts for the duration of a single outbound call — see [security.md](security.md). |
 | **Mapping Engine** | LLM-based, provider-agnostic. Decomposes pairs of specs into a form suitable for LLM reasoning and proposes operation/field-level mappings with confidence scores. See [mapping-engine.md](mapping-engine.md). |
@@ -21,8 +21,8 @@ Both capabilities are built on the same core idea: a **mapping** between two Ope
 | **Sync Engine** | Executes approved peer-to-peer mappings on an ongoing basis, via a Webhook Receiver and/or a Poller. See [sync-engine.md](sync-engine.md). |
 | **Adapter/Gateway Engine** | Hosts live server endpoints for "consumer" specs (what a new app needs), resolving inbound requests on demand against one or more backend apps using approved mappings. See [adapter-engine.md](adapter-engine.md). |
 | **Graph/Overview Service** | Maintains a materialized graph projection of the landscape (nodes = registered apps, edges = sync/adapter relationships) for the always-available overview. See [flows/graph-overview.md](../flows/graph-overview.md). |
-| **Audit/Event Log** | Durable, business-level record of sync events, adapter calls, mapping decisions, and credential accesses. Drives loop prevention and the graph's activity metadata. Distinct from operational telemetry (see [observability.md](observability.md)). |
-| **Event Bus (internal)** | Decouples producers of state changes (`SpecIngested`, `MappingApproved`, sync writes) from the services that react to them (Sync Engine, Adapter Engine, Graph Service, cache invalidation). |
+| **Audit/Event Log** | Durable, business-level record of sync events, adapter calls, mapping decisions, and credential accesses. Drives idempotency deduplication (bounded event-history lookback) and the graph's activity metadata; loop prevention itself runs on `SyncFieldState`/`RecordLink` (see [sync-engine.md](sync-engine.md)). Distinct from operational telemetry (see [observability.md](observability.md)). |
+| **Event Bus (internal)** | Decouples producers of state changes (`SpecIngested`, `MappingApproved`, sync writes) from the services that react to them (Sync Engine, Adapter Engine, Graph Service, cache invalidation). Durable, at-least-once delivery with idempotent consumers (deduplicating by event id); not a source of truth — every event is re-derivable from persisted state, so bus loss degrades timeliness, never correctness. |
 | **Observability / Telemetry** (cross-cutting) | Every component above is instrumented with OpenTelemetry (traces, metrics, logs), exported via a Collector to backing stores that Grafana visualizes. See [observability.md](observability.md). |
 
 Two design points recur throughout the rest of this documentation:
@@ -63,7 +63,7 @@ flowchart TB
 
 ## Key interfaces (informal contracts)
 
-- `SpecRegistry.registerApp(appMeta, credential, specDoc, role) -> RegisteredApp`
+- `SpecRegistry.ingestSpec(appId, specDoc, role) -> ApiSpec` — app registration itself is an API/UI-layer orchestration: create the `RegisteredApp`, submit credential material write-only via `CredentialStore.store(appId, material)`, then ingest each spec document
 - `SpecRegistry.diffSpec(appId, fromVersion, toVersion) -> SpecDiff`
 - `MappingEngine.proposeMappings(sourceSpecRef, targetSpecRef) -> MappingProposal`
 - `LLMMappingProvider.shortlistResourcePairs(shortlistContext) -> ResourceShortlist` — stage 1 of the pluggable AI abstraction: shortlists plausible resource pairs per spec pair (see [mapping-engine.md](mapping-engine.md))

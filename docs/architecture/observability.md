@@ -4,7 +4,7 @@ To maintain and monitor the mediator in operation, every component is instrument
 
 ## Relationship to the Audit/Event Log
 
-The mediator already keeps a durable, business-level **Audit/Event Log** (`SyncEvent`, see [data-model.md](data-model.md)) that other components depend on directly — it drives loop prevention and the landscape graph's activity metadata, and is retained long-term as the permanent record of what happened.
+The mediator already keeps a durable, business-level **Audit/Event Log** (`SyncEvent`, see [data-model.md](data-model.md)) that other components depend on directly — it drives idempotency deduplication and the landscape graph's activity metadata, and is retained long-term as the permanent record of what happened.
 
 OpenTelemetry is a **separate, complementary layer**:
 
@@ -55,11 +55,11 @@ flowchart LR
 
 Grafana alerting rules on top of the same metrics, covering conditions such as:
 
-- A `SyncRule` has had no successful run past N× its expected interval (stuck poller or dead webhook subscription).
+- A `SyncRule` with a polling transport has had no successful run past N× its expected interval (stuck poller). Webhook-only rules get no such alert — their silence is indistinguishable from "no changes" — so their alertable signals are webhook delivery *failures* and, under `webhookSetup = managed`, a periodic subscription-liveness check against the source's subscription API; pairing webhooks with polling (`transport = both`) is what buys real staleness detection.
 - An `AdapterEndpoint`'s error rate crosses a threshold.
 - The mapping review queue is growing unbounded (proposals are not being reviewed fast enough).
 - A mapping analysis has hit its retry ceiling and been marked `failed` (see [mapping-engine.md](mapping-engine.md)) — surfaced distinctly from a normal low-confidence proposal so it doesn't get lost in the review queue. A failed *shortlist* call is alerted more urgently than a failed *detail* call: it leaves the entire spec pair unanalyzed, not just one resource pair.
-- **Any `AdapterBinding` transitions to `stale`** — alerted at a tighter threshold (e.g. immediately, vs. the `SyncRule` staleness alert which can tolerate more delay) since a stale binding is an active, externally-visible failure for a live caller right now, not a paused background job (see the asymmetry noted in [extensibility.md](extensibility.md) and [adapter-engine.md](adapter-engine.md)).
+- **Any active `AdapterBinding`'s `ApprovedMapping` transitions to `stale`** (staleness lives on the mapping — see [data-model.md](data-model.md)) — alerted at a tighter threshold (e.g. immediately, vs. the sync staleness alert which can tolerate more delay) since a stale binding is an active, externally-visible failure for a live caller right now, not a paused background job (see the asymmetry noted in [extensibility.md](extensibility.md) and [adapter-engine.md](adapter-engine.md)).
 - An `AdapterEndpoint` has sat in `composition-required` longer than a threshold — a newly approved binding is waiting on a human composition decision while the endpoint serves its old configuration (see [flows/adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md)).
 - A sync write has been **parked** (dead-letter) after exhausting its retry ceiling (see [sync-engine.md](sync-engine.md)) — needs operator attention unless a later change to the same record supersedes it.
 - Any `mediator-transform-error` occurrence — an aggregated adapter response failed consumer-schema validation, which is a mapping/composition defect to fix, not backend trouble (see [adapter-engine.md](adapter-engine.md)).

@@ -7,9 +7,10 @@ This is the entry point for everything else in the system: an app cannot be sync
 1. The user submits an app registration through the API/UI Layer: a name, a `baseUrl` (optional if this is a consumer-only registration), credential material, and one or more OpenAPI documents, each tagged with a role (`PROVIDER` and/or `CONSUMER`).
 2. The API/UI Layer creates a `RegisteredApp`, stores the `Credential` (encrypted via the Credential Store), and hands each spec document to the Spec Registry.
 3. The Spec Registry parses the document, resolves all `$ref`s, builds the IR (resource groups → operations → schemas), stores it as `ApiSpec` version 1, and emits a `SpecIngested` event on the Event Bus.
-4. A mapping orchestrator (part of the Mapping Engine) picks up `SpecIngested` and decides which spec pairs to analyze:
-   - Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions — sync candidates.
-   - Every `CONSUMER` spec vs. every *other* app's active `PROVIDER` spec — adapter candidates; one analysis per pair with the consumer as source, covering both request and response phases (see [architecture/mapping-engine.md](../architecture/mapping-engine.md)).
+4. A mapping orchestrator (part of the Mapping Engine) picks up `SpecIngested` and enumerates the candidate spec pairs **involving the newly ingested spec** — existing pairs are never re-analyzed by someone else's registration:
+   - a new `PROVIDER` spec vs. every other app's active `PROVIDER` spec, both directions — sync candidates;
+   - a new `PROVIDER` spec vs. every other app's active `CONSUMER` spec — adapter candidates for consumers already in the landscape;
+   - a new `CONSUMER` spec vs. every other app's active `PROVIDER` spec — adapter candidates; one analysis per pair with the consumer as source, covering both request and response phases (see [architecture/mapping-engine.md](../architecture/mapping-engine.md)).
 5. For each candidate spec pair, the Mapping Engine decomposes both specs into resource-level IR and runs the two-stage detection (see [architecture/mapping-engine.md](../architecture/mapping-engine.md)): one `shortlistResourcePairs` call per unordered spec pair over resource *summaries* shortlists the plausibly-corresponding resource pairs, then one `generateMappingProposal` detail call runs per shortlisted resource pair.
 6. The Mapping Engine validates each stage's structured output and persists the result as a `MappingProposal` (including its `shortlistResult`) with its `MappingProposalItem`s (operation- and field-level candidates, each with a confidence score and rationale).
 7. The API/UI Layer is notified that new proposals are ready for review — handed off to [mapping-review-and-approval.md](mapping-review-and-approval.md).
@@ -26,7 +27,8 @@ sequenceDiagram
     participant LLM as LLM Provider
 
     U->>API: Register app (spec, baseUrl, credentials, role)
-    API->>Reg: registerApp(...)
+    API->>API: create RegisteredApp; store credential (write-only, via Credential Store)
+    API->>Reg: ingestSpec(appId, specDoc, role)
     Reg->>Reg: parse + build IR, store ApiSpec v1
     Reg-->>Bus: SpecIngested(specId)
     Bus->>ME: trigger mapping detection

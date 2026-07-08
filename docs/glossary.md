@@ -4,7 +4,7 @@ One-line definitions of every entity and term used across this documentation. Se
 
 ## Core components
 
-- **API/UI Layer** — the entry point for humans: registering apps, reviewing/approving mappings, viewing the graph. Never touches raw credentials directly.
+- **API/UI Layer** — the entry point for humans: registering apps, reviewing/approving mappings, viewing the graph. Credential material passes through it write-only at registration; secrets are never returned.
 - **Spec Registry** — stores raw OpenAPI documents and their parsed IR; owns `ApiSpec` versioning and `SpecDiff` computation.
 - **Credential Store** — envelope-encrypted storage for `Credential`s; the only component that can decrypt one, and only for the duration of a single outbound call (`withCredential`).
 - **Mapping Review/Approval Service** (a.k.a. **Approval Service**) — turns a `MappingProposal` into an `ApprovedMapping` via per-item accept/edit/reject and partial approval.
@@ -51,23 +51,24 @@ One-line definitions of every entity and term used across this documentation. Se
 - **SpecDiff** — the classification of changes (additive/breaking) between two versions of the same `ApiSpec`.
 - **Spec lineage** — the succession of versions of one (app, role) `ApiSpec`; the version-agnostic identity used by `counterpartMappingId` and the re-pinning rule (see [architecture/extensibility.md](architecture/extensibility.md)).
 - **Re-pinning** — the automatic update of an active `ApprovedMapping`'s `sourceSpecId`/`targetSpecId` to a newly ingested spec version when the diff proves the mapping's referenced elements are unchanged; keeps active mappings pointing at active spec versions.
+- **Successor mapping** — the replacement `ApprovedMapping` produced by re-reviewing a `stale` one against the new spec version; adopting it re-points the stale mapping's `SyncRule`s/`AdapterBinding`s in place (state and composition preserved) and marks the stale row `superseded` (see [architecture/extensibility.md](architecture/extensibility.md)).
 
 ## Sync
 
 - **Sync Engine** — executes approved peer-to-peer mappings on an ongoing basis (push and/or pull).
-- **SyncRule** — the ongoing sync configuration instantiated from one (one-directional) peer-peer `ApprovedMapping`.
+- **SyncRule** — the ongoing sync configuration for one mapped resource pair of a (one-directional) peer-peer `ApprovedMapping` — the unit that owns its identity key, backfill, poll cursor, snapshot, and webhook subscription.
 - **Scheduler** — the Sync Engine subcomponent that wakes a `SyncRule` when its polling interval elapses.
 - **Webhook Receiver** — the Sync Engine subcomponent that accepts inbound change notifications from apps.
 - **Poller** — the Sync Engine subcomponent that periodically pulls changes from apps that don't push webhooks.
-- **Loop Prevention** — the mechanism that detects and skips propagating a mediator-originated write back to its own source (prevents infinite sync ping-pong); covers content echoes via the recently-written cache and create/delete echoes via `RecordLink` state.
+- **Loop Prevention** — the mechanism that detects and skips propagating a mediator-originated write back to its own source (prevents infinite sync ping-pong); covers content echoes via per-side reconciled baselines in `SyncFieldState` (with the recently-written cache as fast path) and create/delete echoes via `RecordLink` state.
 - **Identity Resolution** — the pipeline stage that classifies a detected change (create/update/delete) and resolves — or establishes — the record's `RecordLink`.
 - **RecordLink** — the persisted pairing of one record's native id in app A with the same logical record's native id in app B; established by create propagation, identity-key match, or manual linking; tombstoned (not deleted) on deletion.
-- **Tombstone** — the `tombstoned` state of a `RecordLink` after a propagated deletion; recognizes the other side's delete echo and prevents a slower poll cycle from resurrecting the record.
+- **Tombstone** — the `tombstoned` state of a `RecordLink` after either side's record is deleted: reason `propagated-delete` (the mediator's own deletion — recognizes the other side's delete echo) or `observed-delete` (deletion seen but not propagated — the pair is severed). Either prevents a slower poll cycle from resurrecting the record.
 - **Initial backfill** — the one-time reconciliation run when a `SyncRule` is first enabled, before its transports go live; `link-only` (default: link + seed baselines, write nothing) or `push` (source is the initial source of truth).
-- **deletePropagation** — per-`SyncRule` policy for source-side deletions: `ignore` (default; recorded as `skipped-policy`, never silently dropped) or `propagate`.
-- **Idempotency key** — a deterministic identifier per outbound write (hashing mapping, record, payload, *and* prior reconciled state, so value reverts aren't misread as duplicates) used to detect and skip duplicate deliveries within a bounded lookback window.
+- **deletePropagation** — per-`SyncRule` policy for source-side deletions: `ignore` (default; recorded as `skipped-policy` and the link tombstoned `observed-delete`, never silently dropped) or `propagate`.
+- **Idempotency key** — a deterministic identifier per outbound write (hashing the mapping, the source record's native id, the payload, *and* the prior reconciled state — a distinguished *none* marker for creates — so value reverts aren't misread as duplicates) used to detect and skip duplicate deliveries within a bounded lookback window.
 - **Parked (dead-letter) event** — a sync write that exhausted its retry ceiling; recorded, alerted, and skipped past so it doesn't block its record's queue. Superseded by any later successful sync of the same record; manually replayable through the normal pipeline.
-- **SyncFieldState** — the last-reconciled value per mapped field per linked record (`RecordLink`), shared across both directions of a bidirectional pair; what conflict detection compares incoming changes against.
+- **SyncFieldState** — the last-reconciled value per mapped field per linked record (`RecordLink`), hashed **per side** in each side's own canonical representation, plus each side's latest observed hash; shared across both directions of a bidirectional pair. What echo and conflict detection compare against — always same-side, never across the transform.
 - **SyncEvent / AuditLog** — the durable, business-level record of every sync execution, adapter call, mapping decision, and credential access.
 
 ## Adapter
