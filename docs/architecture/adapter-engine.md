@@ -30,6 +30,12 @@ These bindings are **persisted, not re-derived per request** — this favors pre
 
 Write operations constrain this further: a write endpoint is always `single` — see *Write operations* below.
 
+`executionOrder` and `dependsOnBindingId` are similarly strategy-scoped:
+
+- Under the parallel strategies (`fanout-merge`, `collection-union`), equal `executionOrder` means parallel execution. `dependsOnBindingId` is valid under `fanout-merge` only — the "one backend's output feeds another's input" case, e.g. a `supplement` that needs an id from the `primary`'s response — and forces sequencing regardless of order values.
+- Under `fanout-first-success`, `executionOrder` is a **strict total order** over the fallback chain — ties are invalid and rejected at composition, because "try two in parallel and take whichever succeeds first" is a different (unsupported) semantic than fallback. `dependsOnBindingId` does not apply: the bindings are alternatives, not collaborators.
+- Under `single`, neither field is meaningful.
+
 ## Stale bindings at request time
 
 If the Resolution Planner finds that a loaded `AdapterBinding`'s `ApprovedMapping` is `stale` (see [extensibility.md](extensibility.md)), this is treated as a distinct failure mode from a live backend-call failure — it's reported as a `mapping-stale` error, not a generic upstream error, so operators and callers can tell "the backend is unreachable" apart from "this integration needs re-review." It otherwise follows the same primary/fallback/supplement semantics as a call failure below: a stale `primary`/`fanout-first-success` binding fails the request; a stale `supplement` binding degrades gracefully (or fails the whole request in strict mode). Because an `AdapterBinding` failure is externally visible to a live caller — unlike a `SyncRule` going stale, which only pauses an invisible background job (see [extensibility.md](extensibility.md)) — stale adapter bindings warrant a lower alerting threshold than stale sync rules; see [observability.md](observability.md).
@@ -54,7 +60,7 @@ Configured per `AdapterEndpoint`:
 
 - **`single`** — one backend binding, no aggregation.
 - **`fanout-merge`** — combine fields from multiple backends into one consumer object (e.g., profile fields from a CRM merged with entitlement fields from a billing system).
-- **`collection-union`** — merge list results from multiple backends into one consumer list (e.g., "list customers" spanning two systems).
+- **`collection-union`** — merge list results from multiple backends into one consumer list (e.g., "list customers" spanning two systems). Duplicates are collapsed only where the mediator can *know* two rows are the same record: if the contributing backends are peer-synced, existing `RecordLink`s (see [data-model.md](data-model.md)) identify cross-backend duplicates and linked pairs merge into one row (field conflicts resolved by `executionOrder` precedence); alternatively a **dedup key** — a field of the consumer schema — can be configured at composition time (see [flows/adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md)). With neither links nor a key, no dedup is attempted: duplicates are expected, and each row is annotated with its source backend rather than pretending a merge happened.
 - **`fanout-first-success`** — try the `primary` binding, fall back to the next binding on failure.
 
 ## Write operations
@@ -71,10 +77,18 @@ A consumer spec is not read-only — it can declare create/update/delete operati
 - **Primary binding failure** → the request fails with an upstream-error response describing which backend failed.
 - **Supplement binding failure** → the request degrades gracefully: partial data is returned along with a warning/metadata field, unless the endpoint is configured in strict mode, in which case any binding failure fails the whole request.
 - **Stale binding** → see *Stale bindings at request time* above: same primary/fallback/supplement semantics as a call failure, but reported as `mapping-stale` rather than an upstream error.
+- **Disabled backend** → a binding whose backend app has been disabled (see app lifecycle in [extensibility.md](extensibility.md)) follows the same role/strictness semantics as a call failure, reported with a distinct `backend-disabled` cause.
+- **Consumer-schema validation failure** (pipeline step 9) → the aggregated response failed validation against the consumer's OpenAPI response schema. This is a mediator-side mapping/composition defect, not a backend failure, and is reported as a distinct `mediator-transform-error` — the mediator never returns a response that violates the contract the consumer coded against. Occurrences are logged and alerted (see [observability.md](observability.md)): each one is a bug to fix, not an operational blip.
 
 ## Caching
 
-Responses of read operations are cached per `(adapterEndpointId, normalized request params)` with the endpoint's configured `cacheTtl` (default: no caching until composed otherwise). Cache entries are invalidated by the same `SyncEvent`s the Sync Engine already produces for the underlying resources — this reuses sync activity as the cache-invalidation signal rather than building a second, separate change-detection mechanism for the adapter — and by adapter writes to the same backend resource (see *Write operations* above).
+Responses of read operations are cached per `(adapterEndpointId, normalized request params)` with the endpoint's configured `cacheTtl` (default: no caching until composed otherwise). Invalidation has three sources, with honestly different coverage:
+
+- **Sync activity** — the same `SyncEvent`s the Sync Engine already produces for the underlying resources; this reuses sync as the change-detection signal rather than building a second mechanism. It only covers backends that actually participate in peer-peer sync.
+- **Adapter writes** — a successful write through the adapter invalidates entries backed by the same backend resource (see *Write operations* above).
+- **TTL** — the only *guaranteed* bound on staleness. A backend resource that is neither peer-synced nor written through the adapter has **no change-detection signal at all**; for such endpoints the TTL is the entire freshness story, and the composition UI states this when `cacheTtl` is being set (see [flows/adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md)).
+
+Invalidation granularity is deliberately coarse: a change signal for a backend resource drops **all** cached responses of every endpoint bound to that resource, rather than attempting to compute which parameterized queries contain the changed record. Coarse invalidation costs cache hit rate; it never costs correctness.
 
 ## Observability hooks
 

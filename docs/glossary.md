@@ -13,6 +13,7 @@ One-line definitions of every entity and term used across this documentation. Se
 - **MappingApproved** — the event emitted by the Approval Service once an `ApprovedMapping` is created/updated; triggers `SyncRule`/`AdapterBinding` instantiation and the graph update.
 - **Transformation Executor** — applies a mapping's `FieldMapping`s to convert one app's payload shape into another's; shared by the Sync Engine and Adapter Engine.
 - **Outbound Call Executor** — makes the authenticated call to a target/backend app using a credential scoped to that one call; shared by the Sync Engine and Adapter Engine.
+- **Operator / Viewer** — the two authorization roles on the mediator's own API/UI: `operator` may mutate (register apps, approve mappings, compose endpoints, enable rules), `viewer` is read-only. Every mutation records the authenticated identity (see [architecture/security.md](architecture/security.md)).
 
 ## Roles & specs
 
@@ -38,7 +39,7 @@ One-line definitions of every entity and term used across this documentation. Se
 - **unmapped** — flag on a proposal item meaning no counterpart was found for that source element; the item has no `targetRef`.
 - **reviewRequired** — flag set on low-confidence items, driving their priority in the review UI.
 - **ApprovedMapping** — a human-reviewed, approved mapping; the only thing the Sync Engine and Adapter Engine act on. Always one-directional; two of them, cross-linked, represent a bidirectional sync relationship (see `counterpartMappingId`).
-- **counterpartMappingId** — the field on `ApprovedMapping` linking it to the reverse-direction `ApprovedMapping` between the same two specs, when both have been approved.
+- **counterpartMappingId** — the field on `ApprovedMapping` linking it to the reverse-direction `ApprovedMapping` between the same two spec lineages (version-agnostic), when both have been approved.
 - **FieldMapping** — one approved field-level correspondence, with its transform (rename/coerce/aggregate/expression).
 - **OperationMapping** — one approved operation-level correspondence under an `ApprovedMapping`, carrying an `action` (create/read/update/delete); how the executing engines know which target operation to call.
 - **action** — the CRUD classification on an `OperationMapping`, heuristically derived from the target IR and correctable at review; the Sync Engine selects the target operation whose action matches the change type it is propagating.
@@ -46,6 +47,8 @@ One-line definitions of every entity and term used across this documentation. Se
 - **identityCandidate** — the Mapping Engine's suggested identity key on a field-level proposal item; a suggestion only, never auto-confirmed.
 - **LLMMappingProvider** — the pluggable interface the Mapping Engine calls into for both stages (`shortlistResourcePairs` + `generateMappingProposal`); swappable across LLM vendors/models.
 - **SpecDiff** — the classification of changes (additive/breaking) between two versions of the same `ApiSpec`.
+- **Spec lineage** — the succession of versions of one (app, role) `ApiSpec`; the version-agnostic identity used by `counterpartMappingId` and the re-pinning rule (see [architecture/extensibility.md](architecture/extensibility.md)).
+- **Re-pinning** — the automatic update of an active `ApprovedMapping`'s `sourceSpecId`/`targetSpecId` to a newly ingested spec version when the diff proves the mapping's referenced elements are unchanged; keeps active mappings pointing at active spec versions.
 
 ## Sync
 
@@ -60,7 +63,8 @@ One-line definitions of every entity and term used across this documentation. Se
 - **Tombstone** — the `tombstoned` state of a `RecordLink` after a propagated deletion; recognizes the other side's delete echo and prevents a slower poll cycle from resurrecting the record.
 - **Initial backfill** — the one-time reconciliation run when a `SyncRule` is first enabled, before its transports go live; `link-only` (default: link + seed baselines, write nothing) or `push` (source is the initial source of truth).
 - **deletePropagation** — per-`SyncRule` policy for source-side deletions: `ignore` (default; recorded as `skipped-policy`, never silently dropped) or `propagate`.
-- **Idempotency key** — a deterministic identifier per outbound write used to detect and skip duplicate deliveries.
+- **Idempotency key** — a deterministic identifier per outbound write (hashing mapping, record, payload, *and* prior reconciled state, so value reverts aren't misread as duplicates) used to detect and skip duplicate deliveries within a bounded lookback window.
+- **Parked (dead-letter) event** — a sync write that exhausted its retry ceiling; recorded, alerted, and skipped past so it doesn't block its record's queue. Superseded by any later successful sync of the same record; manually replayable through the normal pipeline.
 - **SyncFieldState** — the last-reconciled value per mapped field per linked record (`RecordLink`), shared across both directions of a bidirectional pair; what conflict detection compares incoming changes against.
 - **SyncEvent / AuditLog** — the durable, business-level record of every sync execution, adapter call, mapping decision, and credential access.
 
@@ -79,6 +83,8 @@ One-line definitions of every entity and term used across this documentation. Se
 - **composition-required** — `AdapterEndpoint` status while a newly attached `proposed` binding awaits a composition decision; the endpoint keeps serving its previous active configuration meanwhile.
 - **mapping-stale (error)** — the distinct failure reported when a request resolves to an `AdapterBinding` whose `ApprovedMapping` has been marked `stale`, as opposed to a live backend-call failure.
 - **not-yet-mapped (error)** — the distinct response for a consumer operation that has no approved binding yet; deliberately distinguishable from a 404 and from an upstream failure.
+- **mediator-transform-error** — the distinct failure when an aggregated response fails validation against the consumer's response schema: a mediator-side mapping/composition defect, never returned as if it were valid data.
+- **backend-disabled** — the distinct failure cause when a request resolves to a binding whose backend app has been disabled (see app lifecycle in [architecture/extensibility.md](architecture/extensibility.md)).
 
 ## Landscape overview
 

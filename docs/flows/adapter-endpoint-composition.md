@@ -12,9 +12,10 @@ How approved consumer-provider mappings become live `AdapterEndpoint`s — and w
 4. `composition-required` endpoints surface in the UI (and as a Grafana alert, see [architecture/observability.md](../architecture/observability.md)) for an explicit composition decision. The composer chooses:
    - the `aggregationStrategy` (`single` / `fanout-merge` / `collection-union` / `fanout-first-success`),
    - each binding's `role`, constrained by the role-validity table in [architecture/adapter-engine.md](../architecture/adapter-engine.md),
-   - `executionOrder` / `dependsOnBindingId` for parallel, sequential, or chained execution,
-   - strict vs. degraded partial-failure mode, and `cacheTtl` (default: no caching).
-5. The Adapter Engine validates the composition — role-validity table, and write operations must remain `single` (see *Write operations* in [architecture/adapter-engine.md](../architecture/adapter-engine.md)) — then activates it: `proposed` bindings become `active` and the endpoint returns to `active`.
+   - `executionOrder` / `dependsOnBindingId` for parallel, sequential, or chained execution — strategy-scoped, see the validity rules in [architecture/adapter-engine.md](../architecture/adapter-engine.md),
+   - for `collection-union`: an optional **dedup key** (a consumer-schema field) where cross-backend `RecordLink`s aren't available to collapse duplicates (see *Aggregation strategies* in [architecture/adapter-engine.md](../architecture/adapter-engine.md)),
+   - strict vs. degraded partial-failure mode, and `cacheTtl` (default: no caching). When `cacheTtl` is set, the UI states which invalidation signals cover the backends involved — for a backend that is neither peer-synced nor written through the adapter, TTL is the *only* freshness bound (see *Caching* in [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
+5. The Adapter Engine validates the composition — role-validity table, the `executionOrder`/`dependsOnBindingId` rules (including no order ties under `fanout-first-success`), and write operations must remain `single` (see [architecture/adapter-engine.md](../architecture/adapter-engine.md)) — then activates it: `proposed` bindings become `active` and the endpoint returns to `active`.
 6. The Graph Service upserts the adapter-dependency `GraphEdge`s for the new/changed bindings (see [graph-overview.md](graph-overview.md)).
 
 Consumer operations that have no approved mapping at all are still served by the Adapter Server Runtime, as a distinct `not-yet-mapped` error — visible to the caller, but clearly distinguished from a 404 or an upstream failure (see [architecture/adapter-engine.md](../architecture/adapter-engine.md)).

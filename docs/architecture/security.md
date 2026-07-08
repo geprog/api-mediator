@@ -2,6 +2,15 @@
 
 Even though the deployment model is single-tenant and self-hosted (no multi-tenant isolation required, see [overview.md](overview.md)), credential handling is not simplified to the point of being naive — the mediator holds live credentials to every app in the landscape, making the Credential Store one of its highest-value targets.
 
+## Operator authentication & authorization
+
+The mediator's own API/UI is the most privileged surface in the system: registering apps, approving mappings, composing adapter endpoints, and enabling sync rules are the actions everything else trusts. Access requires an authenticated **operator identity**, via a pluggable authentication provider — the organization's SSO/OIDC in the typical self-hosted deployment, with local accounts as a fallback. Authorization is deliberately minimal, consistent with single-tenancy — two roles, no tenant hierarchy:
+
+- **operator** — may mutate: register/disable/deregister apps, review and approve mappings, compose endpoints, enable/disable sync rules, manage credentials (at the metadata level — raw secrets are still never returned, see below).
+- **viewer** — read-only: landscape graph, proposals, audit log, dashboards.
+
+Every mutating action records the authenticated identity — `approvedBy` on `ApprovedMapping`, the actor on audit entries (see [data-model.md](data-model.md)). Approval accountability is only meaningful if those identities are real, which is why an unauthenticated deployment mode does not exist.
+
 ## Credential storage
 
 - `Credential.encryptedPayload` (see [data-model.md](data-model.md)) uses **envelope encryption**: a per-credential data key, itself encrypted by a master key held by a key-management capability. This is described abstractly — the architecture does not mandate a specific vault product, only the envelope-encryption pattern and the access discipline below.
@@ -9,6 +18,7 @@ Even though the deployment model is single-tenant and self-hosted (no multi-tena
   - Decrypted material is never persisted in logs.
   - Decrypted material is never returned through the API/UI layer.
   - Decrypted material is never held in memory beyond the scope of that one call.
+- OAuth2 token lifecycle is handled entirely *inside* the Credential Store: refresh tokens are stored envelope-encrypted, and the store refreshes access tokens internally (persisting updated tokens re-encrypted) — `withCredential` hands the caller a currently-valid access token, and callers never see or trigger refresh flows themselves. The "never held beyond the scope of one call" rule governs what *callers* may do with secret material; the store's internal lifecycle management is what makes that rule practical for expiring credentials.
 
 ## Least privilege
 
@@ -20,7 +30,15 @@ Each consumer `RegisteredApp` (see [data-model.md](data-model.md)) is issued its
 
 ## Webhook authenticity
 
-Inbound webhooks (see [sync-engine.md](sync-engine.md)) are verified against a per-app `webhookSecret`, itself stored as a `Credential`. Unsigned or invalid-signature webhook requests are rejected before they reach the sync pipeline — they never trigger Loop Prevention, Transformation, or Outbound Call logic.
+Inbound webhooks (see [sync-engine.md](sync-engine.md)) are verified against a per-app `webhookSecret`, itself stored as a `Credential`. Signatures cover a timestamp, and requests older than a configurable tolerance are rejected — replaying a captured webhook payload later fails even with a valid signature. Unsigned, invalid-signature, or stale requests are rejected before they reach the sync pipeline — they never trigger Loop Prevention, Transformation, or Outbound Call logic.
+
+## LLM data boundary
+
+The Mapping Engine sends only specification *metadata* to the configured LLM provider: resource, operation, and schema names, descriptions, types, and reviewer mapping feedback (see [mapping-engine.md](mapping-engine.md)). **Live payload data flowing through the Sync and Adapter Engines is never sent to an LLM** — mapping *detection* (LLM-assisted, metadata only) and mapping *execution* (deterministic transforms over real data) are strictly separated stages. Organizations whose spec descriptions are themselves sensitive can run a self-hosted model behind the same provider interface.
+
+## Transformation expression sandboxing
+
+The `expression` transform on a `FieldMapping` (see [data-model.md](data-model.md)) executes in a sandboxed, non-Turing-complete expression evaluator: no I/O, no network, no loops or recursion, bounded evaluation time and memory — data in, data out. Expressions are human-reviewed at approval like every other mapping element, but the sandbox is the enforcement; review is not the security boundary for LLM-suggested code.
 
 ## Audit logging
 
@@ -30,7 +48,10 @@ Every credential access, outbound call, adapter request, and mapping decision is
 
 | Boundary | Mechanism |
 |---|---|
+| Humans → mediator API/UI | Authenticated operator identity (SSO/OIDC or local accounts); `operator` vs. `viewer` roles; every mutation attributed. |
 | UI/API layer → Credential Store | UI never receives raw credentials; only ever triggers actions that internally use `withCredential`. |
+| Mapping Engine → LLM provider | Spec metadata only — live payload data never leaves the sync/adapter pipeline. |
+| Mapping transforms → runtime | `expression` transforms run in a sandboxed, non-Turing-complete evaluator. |
 | Sync/Adapter engines → registered apps | Scoped, per-call credential access; least privilege by app. |
 | Registered apps → mediator (webhooks) | Signature verification against `webhookSecret`. |
 | New apps → their generated adapter endpoint | Per-app mediator-issued token, validated by the Auth Gateway. |

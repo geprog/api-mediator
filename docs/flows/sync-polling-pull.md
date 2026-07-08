@@ -1,6 +1,6 @@
 # Flow: Data Sync via Polling Pull
 
-Executed by the [Sync Engine](../architecture/sync-engine.md) whenever a source app declares `supportsPolling` on its `SyncRule` (either as its only transport, or as a safety net alongside webhooks).
+Executed by the [Sync Engine](../architecture/sync-engine.md) for every `SyncRule` whose `transport` includes poll — available when the rule's source app declares `supportsPolling` in its `capabilities` (either as its only transport, or as a safety net alongside webhooks).
 
 ## Steps
 

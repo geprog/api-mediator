@@ -10,7 +10,7 @@ An application in the landscape. An app can carry a `PROVIDER` spec (an API it e
 
 - `id`, `name`, `status` (active/disabled)
 - `baseUrl` — optional. Absent for apps that only registered a `CONSUMER` spec, since in that case the mediator itself hosts the reachable endpoint (see [adapter-engine.md](adapter-engine.md)).
-- `capabilities`: `{ supportsWebhooks: bool, supportsPolling: bool, supportsDeltaQuery: bool, defaultPollInterval }` — declared at registration, drives which sync transport(s) apply and whether the Poller can use changed-since queries instead of full-fetch diffing (see [sync-engine.md](sync-engine.md)).
+- `capabilities`: `{ supportsWebhooks: bool, webhookSetup: managed | manual, supportsPolling: bool, supportsDeltaQuery: bool, supportsChangeTimestamps: bool, defaultPollInterval }` — declared at registration. Drives which sync transport(s) apply, how webhook subscriptions get provisioned (`webhookSetup`, meaningful only when `supportsWebhooks` — see [sync-engine.md](sync-engine.md)), whether the Poller can use changed-since queries instead of full-fetch diffing, and whether conflict resolution may compare source change timestamps (`supportsChangeTimestamps`, see [sync-engine.md](sync-engine.md)).
 - `createdAt`
 
 ### ApiSpec
@@ -56,17 +56,17 @@ A single candidate correspondence within a proposal.
 The reviewed, human-approved result — the only thing the Sync Engine and Adapter Engine ever act on. **Always one-directional**: `sourceSpecId → targetSpecId`. There is no "bidirectional" value — see *Bidirectional mappings are two `ApprovedMapping`s* below for how two-way sync is represented.
 
 - `id`
-- `sourceSpecId`, `targetSpecId` — pins the exact `ApiSpec` row (app + role + version) on each side. This is the field that disambiguates an app that carries both a `PROVIDER` and a `CONSUMER` spec, whose versions increment independently — a bare app id + version number cannot tell those apart.
+- `sourceSpecId`, `targetSpecId` — pins the exact `ApiSpec` row (app + role + version) on each side. This is the field that disambiguates an app that carries both a `PROVIDER` and a `CONSUMER` spec, whose versions increment independently — a bare app id + version number cannot tell those apart. Pinning is *maintained* by the spec-update lifecycle: when a new spec version is ingested, active mappings unaffected by the change are mechanically **re-pinned** to the new version, while mappings hit by a breaking change go `stale` and stay pinned to the version they were reviewed against (see [extensibility.md](extensibility.md)). Invariant: an `active` mapping always points at the currently active `ApiSpec` version.
 - `sourceAppId`, `targetAppId` — denormalized from the specs above, for query convenience only; `sourceSpecId`/`targetSpecId` are the source of truth.
-- `counterpartMappingId` — optional, nullable. Set when the reverse-direction `ApprovedMapping` between the same two specs has also been approved; the two rows point at each other. This is how "bidirectional sync" is represented: as a pairing of two independently-proposed, independently-reviewed, independently-transformed one-way mappings, not as a single entity with an inherently reversible transform (see the modeling note below on why).
-- `approvedBy`, `approvedAt`
+- `counterpartMappingId` — optional, nullable. Set when the reverse-direction `ApprovedMapping` between the same two **spec lineages** (app + role, version-agnostic — see [extensibility.md](extensibility.md)) has also been approved; the two rows point at each other. Lineage identity, not exact version identity, is what makes the link stable while the two specs' versions advance independently under re-pinning. This is how "bidirectional sync" is represented: as a pairing of two independently-proposed, independently-reviewed, independently-transformed one-way mappings, not as a single entity with an inherently reversible transform (see the modeling note below on why).
+- `approvedBy`, `approvedAt` — the *most recent* approval action; the full history of partial approvals and edits lives in the Audit Log's `mapping-decision` events (see [security.md](security.md)), so incremental approval doesn't need history fields here.
 - `status` (active / suspended / stale — `stale` is set by the breaking-change flow, see [extensibility.md](extensibility.md))
 - has many `FieldMapping` and many `OperationMapping`
 
 ### FieldMapping
 
 - `id`, `mappingId`, `sourcePath`, `targetPath` — resource-qualified IR paths
-- `transform` (rename / coerce / aggregate / expression), `transformConfig`
+- `transform` (rename / coerce / aggregate / expression), `transformConfig` — `expression` executes in a sandboxed, non-Turing-complete evaluator (see [security.md](security.md))
 - `isIdentityKey` (bool) — marks this field pair as the **identity key** of its resource pair: the business-level field (e.g. email, SKU, external reference number) whose values identify the *same record* in both apps. Exactly one confirmed identity `FieldMapping` per mapped resource pair is required before a `SyncRule` over that resource can be enabled — see *Identity correlation* in [sync-engine.md](sync-engine.md). Suggested by the Mapping Engine (`identityCandidate`, see [mapping-engine.md](mapping-engine.md)) but only ever set by explicit reviewer confirmation. Like `conflictPolicy` below, it is only meaningful on peer-peer mappings — the Adapter Engine transforms individual requests/responses and never correlates records across apps.
 - optional `conflictPolicy` override (`manual-resolve`, see [sync-engine.md](sync-engine.md)) — **meaningful only when `mappingId` refers to a peer-peer (sync-driving) `ApprovedMapping`**; a consumer-provider `ApprovedMapping` has no notion of "conflict" (the Adapter Engine resolves live, there is nothing to reconcile against), so this field is unused on those rows. Same conditionally-meaningful shape as `RegisteredApp.baseUrl` (see the modeling notes below).
 
@@ -92,6 +92,7 @@ Instantiated only for peer-to-peer `ApprovedMapping`s (both sides `PROVIDER` spe
 - `deletePropagation` (`ignore` | `propagate`, default `ignore`) — whether a detected source-side deletion is propagated to the target. Deletion is the one destructive operation the mediator can perform against an app, so it is opt-in per rule; ignored deletions are still recorded (`SyncEvent.status = skipped-policy`), never silently dropped. See *Change types* in [sync-engine.md](sync-engine.md).
 - `backfillMode` (`link-only` | `push`), `backfillStatus` (`pending` | `running` | `completed` | `skipped`) — the one-time initial reconciliation performed before the rule's transports go live; see *Initial backfill* in [sync-engine.md](sync-engine.md).
 - `status` (enabled/disabled), `lastRunAt`, `lastEventAt`, `cursor` (for delta polling) — a rule cannot be enabled until its `ApprovedMapping` has a confirmed identity `FieldMapping` per mapped resource pair **and** its backfill has completed or been explicitly skipped.
+- `lastSnapshotRef` — reference to the per-record content-hash snapshot (record native id → hash) from the last complete full fetch; what the Poller diffs against when the source app doesn't support delta queries (see [sync-engine.md](sync-engine.md)).
 
 ### AdapterEndpoint
 
@@ -108,7 +109,7 @@ Instantiated only for consumer-provider `ApprovedMapping`s. One per `CONSUMER`-s
 - `id`, `adapterEndpointId`, `backendAppId`, `backendOperationId`, `approvedMappingId` — `backendOperationId` is chosen from the approved `OperationMapping`s of `approvedMappingId`, not free-form
 - `role` (primary / fallback / supplement) — which roles are meaningful depends on the parent `AdapterEndpoint.aggregationStrategy`; see the role-validity table in [adapter-engine.md](adapter-engine.md).
 - `status` (`active` | `proposed` | `disabled`) — `proposed` means the binding was attached by a mapping approval but has not yet been composed into the endpoint's active configuration (see [flows/adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md)).
-- `executionOrder` (int, default 0), `dependsOnBindingId` (optional) — bindings with the same `executionOrder` run in parallel; a binding with `dependsOnBindingId` set runs only after that binding completes and receives its response as input (the "one backend's output feeds another's input" case, see [adapter-engine.md](adapter-engine.md)).
+- `executionOrder` (int, default 0), `dependsOnBindingId` (optional) — bindings with the same `executionOrder` run in parallel; a binding with `dependsOnBindingId` set runs only after that binding completes and receives its response as input (the "one backend's output feeds another's input" case). Both fields are strategy-scoped: under `fanout-first-success` the order is a strict total order (ties are invalid) and `dependsOnBindingId` doesn't apply — see the validity rules in [adapter-engine.md](adapter-engine.md).
 
 ### RecordLink
 
@@ -128,7 +129,8 @@ Tracks the last-reconciled value of one mapped field for one linked record — t
 - `id`
 - `recordLinkId` — the cross-app record identity this state applies to; the link carries both apps' native ids (see `RecordLink` above)
 - `appAFieldPath`, `appBFieldPath` — the unordered field pairing this state tracks (the apps themselves are given by the `RecordLink`)
-- `lastSyncedValueHash`, `lastSyncedAt` — absent when initial backfill found the two sides already divergent for this field; the first subsequent change is then a conflict by construction (see *Initial backfill* in [sync-engine.md](sync-engine.md))
+- `lastSyncedValueHash`, `lastSyncedAt` — the last-reconciled value, hashed from the target's **canonical stored representation** (taken from the write response body, or a follow-up read when the API doesn't return the stored resource) so target-side normalization doesn't defeat echo detection (see *Loop prevention* in [sync-engine.md](sync-engine.md)). Absent when initial backfill found the two sides already divergent for this field; the first subsequent change is then a conflict by construction (see *Initial backfill* in [sync-engine.md](sync-engine.md))
+- `sideAObservedHash`, `sideBObservedHash` (each with an `observedAt`) — the latest value hash the mediator has *observed* on each side, updated from every webhook, poll result, and write response that touches the field; conflict detection compares these against `lastSyncedValueHash` to decide whether a side has drifted since the last reconcile (see [sync-engine.md](sync-engine.md))
 - `lastWrittenByMappingId` — the `ApprovedMapping` (direction) that produced the last write, for audit/debugging
 
 ### GraphEdge (materialized projection)

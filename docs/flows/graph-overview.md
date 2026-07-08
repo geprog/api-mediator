@@ -6,8 +6,8 @@ The user must always be able to see a graph of all registered apps and their con
 
 1. The UI requests the graph, optionally filtered (by app, by status, by connection type).
 2. The Graph Service returns:
-   - **Nodes**: every `RegisteredApp`, plus a virtual node per `AdapterEndpoint` for consumer-only apps (apps with no `baseUrl` of their own — see [architecture/data-model.md](../architecture/data-model.md)).
-   - **Edges**: `GraphEdge`s derived from `ApprovedMapping`-instantiated `SyncRule`s and `AdapterBinding`s, each carrying `type` (sync / adapter-dependency), `transport`, `status`, and last-activity metadata sourced from `SyncEvent`/audit summaries.
+   - **Nodes**: every `RegisteredApp` — including consumer-only apps, which are ordinary `RegisteredApp`s whose reachable endpoint happens to be mediator-hosted (see [architecture/data-model.md](../architecture/data-model.md)). There are no per-endpoint nodes: an app's adapter endpoints are detail on its edges, not nodes of their own.
+   - **Edges**: `GraphEdge`s derived from `ApprovedMapping`-instantiated `SyncRule`s and `AdapterBinding`s, each carrying `type` (sync / adapter-dependency), `transport`, `status`, and last-activity metadata sourced from `SyncEvent`/audit summaries. Adapter-dependency edges run consumer app → backend app, one edge per (consumer, backend) app pair, aggregating that pair's `AdapterBinding`s; per-operation detail lives in the edge's `metadata`.
 3. The Graph Service assembles `{ nodes, edges }` and returns it to the UI for rendering.
 
 ## Materialized projection

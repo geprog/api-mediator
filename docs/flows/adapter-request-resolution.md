@@ -12,7 +12,7 @@ Executed by the [Adapter/Gateway Engine](../architecture/adapter-engine.md) when
 6. The Outbound Call Executor calls the backend app(s) grouped by `executionOrder` — bindings sharing an order run in parallel; a binding with `dependsOnBindingId` set runs only once that binding's response is available and receives it as input.
 7. The Transformation Executor maps each backend response back to the consumer's schema.
 8. The Response Aggregator merges/aggregates results per the endpoint's `aggregationStrategy` (`single` / `fanout-merge` / `collection-union` / `fanout-first-success`), applying the configured error/partial-failure semantics.
-9. The response is validated against the consumer OpenAPI response schema and returned; the response cache is updated if `cacheTtl` is set.
+9. The response is validated against the consumer OpenAPI response schema and returned; the response cache is updated if `cacheTtl` is set. A validation failure fails the request with a distinct `mediator-transform-error` — a mediator-side mapping defect, never returned as if it were valid data (see error semantics in [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
 
 ## Sequence diagram
 

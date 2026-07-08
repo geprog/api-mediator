@@ -1,6 +1,6 @@
 # Flow: Data Sync via Webhook Push
 
-Executed by the [Sync Engine](../architecture/sync-engine.md) whenever a source app declares `supportsWebhooks` on its `SyncRule`.
+Executed by the [Sync Engine](../architecture/sync-engine.md) for every `SyncRule` whose `transport` includes webhook — available when the rule's source app declares `supportsWebhooks` in its `capabilities` (see [architecture/data-model.md](../architecture/data-model.md)).
 
 ## Steps
 
