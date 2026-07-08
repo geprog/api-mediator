@@ -27,7 +27,10 @@ One-line definitions of every entity and term used across this documentation. Se
 
 ## Mapping
 
-- **Mapping Engine** — the LLM-based, provider-agnostic component that proposes mappings between two specs.
+- **Mapping Engine** — the LLM-based, provider-agnostic component that proposes mappings between two specs, in two stages (shortlist, then detail).
+- **Shortlist pass (stage 1)** — one summary-level LLM call per *unordered* spec pair that shortlists plausibly-corresponding resource pairs; deliberately recall-biased, reused by both directional analyses.
+- **Detail pass (stage 2)** — the full per-resource-pair LLM call producing operation/field correspondences; runs only on shortlisted pairs.
+- **ResourceShortlist** — the validated structured output of the shortlist pass (candidate resource pairs with confidence + rationale), persisted on the `MappingProposal` as `shortlistResult` and reviewable via the manual "analyze anyway" escape hatch.
 - **MappingProposal** — the output of one Mapping Engine run over one *directional* pair of specs (`sourceSpecId → targetSpecId`); a peer pair A↔B is always two separate proposals, one per direction.
 - **MappingProposalItem** — a single candidate operation- or field-level correspondence within a proposal.
 - **confidenceScore** — 0-1 score on a proposal item indicating how certain the Mapping Engine is.
@@ -41,7 +44,7 @@ One-line definitions of every entity and term used across this documentation. Se
 - **action** — the CRUD classification on an `OperationMapping`, heuristically derived from the target IR and correctable at review; the Sync Engine selects the target operation whose action matches the change type it is propagating.
 - **identity key** (`isIdentityKey`) — the one confirmed `FieldMapping` per mapped resource pair whose values identify the same record in both apps; human-confirmed at review, required before a `SyncRule` can be enabled.
 - **identityCandidate** — the Mapping Engine's suggested identity key on a field-level proposal item; a suggestion only, never auto-confirmed.
-- **LLMMappingProvider** — the pluggable interface the Mapping Engine calls into; swappable across LLM vendors/models.
+- **LLMMappingProvider** — the pluggable interface the Mapping Engine calls into for both stages (`shortlistResourcePairs` + `generateMappingProposal`); swappable across LLM vendors/models.
 - **SpecDiff** — the classification of changes (additive/breaking) between two versions of the same `ApiSpec`.
 
 ## Sync

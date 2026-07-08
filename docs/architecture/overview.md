@@ -66,7 +66,8 @@ flowchart TB
 - `SpecRegistry.registerApp(appMeta, credential, specDoc, role) -> RegisteredApp`
 - `SpecRegistry.diffSpec(appId, fromVersion, toVersion) -> SpecDiff`
 - `MappingEngine.proposeMappings(sourceSpecRef, targetSpecRef) -> MappingProposal`
-- `LLMMappingProvider.generateMappingProposal(promptContext) -> MappingSuggestionSet` — the pluggable AI abstraction (see [mapping-engine.md](mapping-engine.md))
+- `LLMMappingProvider.shortlistResourcePairs(shortlistContext) -> ResourceShortlist` — stage 1 of the pluggable AI abstraction: shortlists plausible resource pairs per spec pair (see [mapping-engine.md](mapping-engine.md))
+- `LLMMappingProvider.generateMappingProposal(promptContext) -> MappingSuggestionSet` — stage 2: full detail analysis per shortlisted resource pair (see [mapping-engine.md](mapping-engine.md))
 - `ApprovalService.updateItem(proposalId, itemId, edits)`, `.approve(proposalId, selection)`, `.reject(proposalId, itemIds)` — emits `MappingApproved(ApprovedMapping)`
 - `CredentialStore.withCredential(appId, fn)` — the only way to use a credential; raw secrets never leave this scope
 - `GraphService.getGraph(filter) -> { nodes, edges }`
@@ -77,4 +78,4 @@ Single-tenant, self-hosted: one mediator instance manages one organization's lan
 
 ## Scale assumption
 
-The landscape is expected to be small (on the order of 15-20 registered apps), **each with a modest number of resource groups**. This directly shapes the Mapping Engine design: it calls the LLM once per candidate *resource* pair rather than adding a pre-filtering stage (see [mapping-engine.md](mapping-engine.md)) — a deliberate simplicity choice. App count alone doesn't bound the actual LLM call volume; a landscape with few apps that each expose very many resource groups can still produce a large number of candidate pairs. The assumption should be revisited if either the app count or the typical per-app resource count grows substantially.
+The landscape is expected to be small (on the order of 15-20 registered apps), **each with a modest number of resource groups**. Even at this scale, exhaustive per-resource-pair analysis would explode in the wrong dimension: ~20 apps × ~10 resource groups each is a cross-product of tens of thousands of candidate resource pairs. The Mapping Engine therefore detects in two stages — a cheap summary-level *shortlist* call per spec pair, then a full *detail* call only for the resource pairs shortlisted as plausible (see [mapping-engine.md](mapping-engine.md)). That brings a full landscape pass to roughly a thousand LLM calls and, just as importantly, keeps the human review queue proportional to genuine correspondences rather than to the cross-product. The assumption still has limits: shortlist cost grows quadratically with app count (one call per spec pair), and very large per-spec resource counts grow the summary prompt itself — either growing substantially is the trigger to revisit (e.g. batching shortlist calls, or adding a non-LLM pre-filter in front of stage 1).

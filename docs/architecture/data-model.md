@@ -32,7 +32,8 @@ An application in the landscape. An app can carry a `PROVIDER` spec (an API it e
 The output of one Mapping Engine run over a pair of specs.
 
 - `id`, `sourceSpecId`, `targetSpecId`
-- `generatedBy`: `{ providerId, model, promptVersion }` — which LLM provider/config produced this, for reproducibility
+- `generatedBy`: `{ providerId, model, promptVersion }` — which LLM provider/config produced this, for reproducibility; `promptVersion` covers both stage prompts (shortlist + detail, see [mapping-engine.md](mapping-engine.md))
+- `shortlistResult` — the validated stage-1 `ResourceShortlist` this proposal was scoped by: the candidate resource pairs, plus the resources with no shortlisted counterpart. Persisted for review transparency and the manual "analyze this resource pair anyway" escape hatch (see [mapping-engine.md](mapping-engine.md)); computed once per unordered spec pair and shared by both directional proposals.
 - `status` (pending / partially_approved / approved / rejected)
 - `createdAt`
 - has many `MappingProposalItem`

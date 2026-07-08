@@ -10,8 +10,8 @@ This is the entry point for everything else in the system: an app cannot be sync
 4. A mapping orchestrator (part of the Mapping Engine) picks up `SpecIngested` and decides which spec pairs to analyze:
    - Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions — sync candidates.
    - Every `CONSUMER` spec vs. every active `PROVIDER` spec — adapter candidates.
-5. For each candidate pair, the Mapping Engine decomposes both specs into resource-level IR chunks and invokes the pluggable `LLMMappingProvider` once per candidate resource pair (no pre-filter stage, given the small landscape scale — see [architecture/mapping-engine.md](../architecture/mapping-engine.md)).
-6. The Mapping Engine validates the LLM's structured output and persists it as a `MappingProposal` with its `MappingProposalItem`s (operation- and field-level candidates, each with a confidence score and rationale).
+5. For each candidate spec pair, the Mapping Engine decomposes both specs into resource-level IR and runs the two-stage detection (see [architecture/mapping-engine.md](../architecture/mapping-engine.md)): one `shortlistResourcePairs` call per unordered spec pair over resource *summaries* shortlists the plausibly-corresponding resource pairs, then one `generateMappingProposal` detail call runs per shortlisted resource pair.
+6. The Mapping Engine validates each stage's structured output and persists the result as a `MappingProposal` (including its `shortlistResult`) with its `MappingProposalItem`s (operation- and field-level candidates, each with a confidence score and rationale).
 7. The API/UI Layer is notified that new proposals are ready for review — handed off to [mapping-review-and-approval.md](mapping-review-and-approval.md).
 
 ## Sequence diagram
@@ -31,13 +31,16 @@ sequenceDiagram
     Reg-->>Bus: SpecIngested(specId)
     Bus->>ME: trigger mapping detection
     ME->>Reg: fetch candidate spec pairs (IR)
-    ME->>LLM: generateMappingProposal(promptContext) [per candidate resource pair]
+    ME->>LLM: shortlistResourcePairs(summaries) [per unordered spec pair]
+    LLM-->>ME: ResourceShortlist
+    ME->>LLM: generateMappingProposal(promptContext) [per shortlisted resource pair]
     LLM-->>ME: MappingSuggestionSet
-    ME->>ME: validate + persist MappingProposal + items
+    ME->>ME: validate + persist MappingProposal (incl. shortlistResult) + items
     ME-->>API: notify "proposals ready"
 ```
 
 ## Notes
 
+- Resources for which stage 1 shortlisted no counterpart are surfaced in the review UI with a manual "analyze this resource pair anyway" action — the escape hatch for a shortlist miss (see [mapping-review-and-approval.md](mapping-review-and-approval.md) and [architecture/mapping-engine.md](../architecture/mapping-engine.md)).
 - Registering a consumer-only app (a `CONSUMER` spec with no `baseUrl`) triggers the same flow — the resulting `MappingProposal`s are what later become `AdapterBinding`s once approved (see [architecture/adapter-engine.md](../architecture/adapter-engine.md)).
 - This same flow (steps 3–6) runs again, scoped to just the new elements, whenever an already-registered app's spec is updated — see [architecture/extensibility.md](../architecture/extensibility.md).

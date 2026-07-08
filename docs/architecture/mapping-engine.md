@@ -20,17 +20,47 @@ This decomposition is what both the Mapping Engine and the Spec Registry's IR (s
 - Every `PROVIDER` spec vs. every other active `PROVIDER` spec, both directions — i.e. an A↔B peer pair produces **two** separate candidate analyses (A→B and B→A), each its own `MappingProposal`. Approving both independently is what yields a bidirectional sync pair (see [data-model.md](data-model.md)); there is no single "bidirectional" analysis run.
 - Every `CONSUMER` spec vs. every active `PROVIDER` spec (direction: consumer needs ← provider offers).
 
-## Matching approach: direct LLM reasoning, no pre-filter stage
+This enumerates the *spec* pairs. Which *resource* pairs within a spec pair get a full analysis is decided by the stage-1 shortlist below — computed once per unordered spec pair and shared by both directional analyses.
 
-The "~15-20 apps" scale assumption (see [overview.md](overview.md)) bounds the number of *apps*, not the number of LLM calls directly — the actual cost driver is the number of candidate **resource** pairs, i.e. apps × resource-groups-per-app on each side. The no-pre-filter simplicity choice below is valid at the assumed scale only as long as per-app resource counts stay modest (low tens); a landscape of 15-20 apps that each expose hundreds of resource groups would blow past the assumption's intent even though the app count is unchanged. This resource-count dimension should be tracked alongside app count when deciding whether the assumption still holds.
+## Matching approach: two-stage — shortlist, then detail
 
-Given that assumption, the number of candidate resource pairs stays small enough that the engine calls the LLM once per candidate resource pair directly — there is no embedding/keyword pre-filter stage shortlisting pairs before the LLM runs. This is a deliberate simplicity choice: it removes an entire component (and a similarity-threshold tuning knob) at a scale where LLM cost/latency is not a concern. If the landscape grows well beyond this scale — in app count or in per-app resource count — a pre-filter stage should be reconsidered.
+The "~15-20 apps" scale assumption (see [overview.md](overview.md)) bounds the number of *apps*, but the naive cost driver would be the number of candidate **resource** pairs — the full cross-product of resource groups on each side. At the assumed scale (20 apps × ~10 resource groups each) that cross-product is ~38,000 detail analyses for a full landscape pass — and the overwhelming majority are obviously unrelated pairs (an `Invoices` resource vs. a `TicketComments` resource) that don't need a full operation/field analysis to dismiss. The engine therefore matches in two stages, using the same LLM for both rather than introducing a separate embedding/keyword pre-filter component (and its similarity-threshold tuning knob):
 
-For each candidate resource pair, the Mapping Engine builds a prompt containing both resources' operations and schemas and asks the LLM to produce operation- and field-level correspondences.
+### Stage 1 — shortlist pass (one call per spec pair)
 
-## Structured proposal format
+One call per **unordered** spec pair, containing only resource-level *summaries* of both specs — resource name, description, operation summaries, top-level field list; the same lightweight summary form the decomposition above already produces for cross-resource references. The LLM returns a `ResourceShortlist` (see the structured formats below): the resource pairs that plausibly correspond, each with confidence and rationale. Resource *correspondence* is direction-agnostic — whether `Customers` ↔ `Contacts` correspond doesn't depend on sync direction; only the transforms do, and those belong to stage 2 — so one shortlist is computed per unordered pair and reused by both directional detail analyses.
 
-The Mapping Engine requests (and validates) a fixed structured output from the LLM:
+The shortlist prompt is deliberately **recall-biased**: when in doubt, include the pair. A false positive costs one wasted detail call; a false negative means a real mapping is never proposed at all — the one failure mode this design adds over exhaustive matching. The second mitigation for that failure mode is the manual escape hatch below.
+
+### Stage 2 — detail pass (one call per shortlisted resource pair)
+
+For each **shortlisted** resource pair, the engine builds a prompt containing both resources' full operations and schemas and asks the LLM to produce operation- and field-level correspondences — the `MappingSuggestionSet` below, with validation, corrective retries, and per-pair failure marking. This stage is exactly what a single-stage design would run; the shortlist only decides *which* pairs reach it.
+
+### What this costs, honestly
+
+At the assumed scale (20 apps × 10 resource groups, all peers): ~190 shortlist calls (unordered spec pairs) plus a detail call per genuinely-corresponding resource pair per direction — typically a handful per spec pair, ~760 landscape-wide — for a total of roughly **1,000 LLM calls**, versus ~38,000 for the exhaustive cross-product. Registering one new app costs ~19 shortlist + ~80 detail calls instead of ~3,800. Token volume drops similarly: full resource content is sent only for plausible pairs, instead of every resource being re-sent once per counterpart resource (~10× duplication at this scale); summaries are sent once per spec pair.
+
+The shortlist also bounds the *human* cost, which exhaustive matching would quietly make quadratic: reviewers see proposal items only for plausible resource pairs, not for the whole cross-product.
+
+### Escape hatch: the shortlist is reviewable, not silent
+
+The persisted stage-1 result (`MappingProposal.shortlistResult`, see [data-model.md](data-model.md)) includes the resources for which **no** counterpart was shortlisted, and the review UI surfaces them the same way `unmapped` items are surfaced (see [flows/mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)). A reviewer can trigger a detail analysis for any resource pair manually — the correction path when the recall-biased shortlist still misses a real correspondence. How often this is needed is the design's key health signal (see [observability.md](observability.md)): frequent manual additions mean stage-1 recall is too low.
+
+## Structured proposal formats
+
+The Mapping Engine requests (and validates) a fixed structured output from the LLM at each stage.
+
+Stage 1 returns a `ResourceShortlist`:
+
+```
+ResourceShortlist {
+  candidatePairs: [
+    { sourceResource, targetResource, confidence, rationale }
+  ]
+}
+```
+
+Stage 2 returns a `MappingSuggestionSet` per shortlisted resource pair:
 
 ```
 MappingSuggestionSet {
@@ -60,7 +90,7 @@ MappingSuggestionSet {
 
 For **peer-peer** pairs, the provider is additionally asked to flag at most one field pairing per resource pair as `identityCandidate: true` — the business-level key (email, SKU, order number, …) whose values are expected to identify the *same record* in both apps. This is a suggestion only: it pre-selects the identity choice in the review UI, but `FieldMapping.isIdentityKey` is set exclusively by explicit reviewer confirmation (see [flows/mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)), because a wrong identity key makes the Sync Engine silently merge unrelated records — the worst failure mode it has (see *Identity correlation* in [sync-engine.md](sync-engine.md)). Consumer-provider pairs skip this: the adapter never correlates records across apps.
 
-This is validated against a fixed JSON schema before being persisted as a `MappingProposal` + `MappingProposalItem`s (see [data-model.md](data-model.md)). Malformed output triggers a corrective retry (re-prompting with the validation error) — the core mapping logic never trusts free-text LLM output directly; only validated structured output becomes a `MappingProposalItem`. Retries are capped (e.g. 3 attempts per candidate pair); if the provider still can't produce valid output, that pair's analysis is marked `failed` rather than retried indefinitely, is surfaced in the review UI as needing attention, and emits a dedicated failure metric (see [observability.md](observability.md)) rather than silently consuming LLM budget in a retry loop.
+Both stages' outputs are validated against fixed JSON schemas before anything is persisted (the shortlist as `MappingProposal.shortlistResult`, suggestions as `MappingProposalItem`s — see [data-model.md](data-model.md)). Malformed output triggers a corrective retry (re-prompting with the validation error) — the core mapping logic never trusts free-text LLM output directly; only validated structured output is persisted. Retries are capped (e.g. 3 attempts per call); at the ceiling, the two stages fail with very different blast radii: a failed **detail** call marks that one resource pair's analysis `failed`, while a failed **shortlist** call leaves the *entire spec pair* unanalyzed — alerted more urgently for exactly that reason (see [observability.md](observability.md)). Either failure is surfaced in the review UI as needing attention rather than silently consuming LLM budget in a retry loop.
 
 ## Confidence & ambiguity
 
@@ -73,7 +103,13 @@ This is validated against a fixed JSON schema before being persisted as a `Mappi
 
 ```
 interface LLMMappingProvider {
-  generateMappingProposal(context: MappingPromptContext): MappingSuggestionSet
+  shortlistResourcePairs(context: ShortlistPromptContext): ResourceShortlist   // stage 1
+  generateMappingProposal(context: MappingPromptContext): MappingSuggestionSet // stage 2
+}
+
+ShortlistPromptContext = {
+  sourceSpecSummaryIR, targetSpecSummaryIR,   // resource-level summaries only
+  promptVersion
 }
 
 MappingPromptContext = {
@@ -90,9 +126,9 @@ MappingPromptContext = {
 ## Re-mapping on spec change
 
 1. A new `ApiSpec` version is ingested by the Spec Registry, which diffs old vs. new IR and produces a `SpecDiff`, classifying each change as additive or breaking.
-2. **Additive** changes (new operation, new field): the Mapping Engine runs an incremental analysis scoped only to the new elements, producing a small delta `MappingProposal` for review. Existing `ApprovedMapping`s are untouched and stay active.
+2. **Additive** changes (new operation, new field): the Mapping Engine runs an incremental analysis scoped only to the new elements, producing a small delta `MappingProposal` for review. The staging follows the granularity of the change: a new *resource group* gets one scoped shortlist call (its summary vs. the counterpart spec's summaries) followed by detail calls for any shortlisted pairs; a new field or operation inside an already-shortlisted resource skips stage 1 entirely and goes straight to a scoped detail call. Existing `ApprovedMapping`s are untouched and stay active.
 3. **Breaking** changes (removed/renamed/retyped field or operation): only the `ApprovedMapping`/`SyncRule`/`AdapterBinding` records that reference the changed elements are marked `stale` and paused — a delta-review model. Everything else for that app (mappings unaffected by the change) keeps running uninterrupted. See [extensibility.md](extensibility.md) for the full lifecycle.
 
 ## Observability hooks
 
-Every LLM call (latency, success/failure, token usage) and every proposal's confidence distribution is emitted as OpenTelemetry metrics/traces — see [observability.md](observability.md) for the specific signals and the Grafana dashboard built on top of them.
+Every LLM call (latency, success/failure, token usage — labeled by stage, shortlist vs. detail), the shortlist yield (candidate pairs per spec pair), escape-hatch usage (manually triggered detail analyses), and every proposal's confidence distribution are emitted as OpenTelemetry metrics/traces — see [observability.md](observability.md) for the specific signals and the Grafana dashboard built on top of them.
