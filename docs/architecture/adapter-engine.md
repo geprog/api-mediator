@@ -4,12 +4,16 @@ The Adapter/Gateway Engine stands up a real, live server for a newly introduced 
 
 This is the on-demand counterpart to the [Sync Engine](sync-engine.md): both are consumers of `ApprovedMapping` data, sharing the same Transformation Executor, Outbound Call Executor, Credential Store access pattern, and Audit Log — the Sync Engine pushes proactively, the Adapter Engine resolves on request.
 
-## Binding: decided at approval time, not per request
+## Binding: decided at composition time, not per request
 
-When a consumer-provider `ApprovedMapping` is approved, the Adapter Engine instantiates:
+Bindings are configured once — when mappings are approved and the endpoint is composed — and then only *executed* at request time. When a consumer-provider `ApprovedMapping` is approved, the Adapter Engine derives the affected consumer operations from the mapping's `OperationMapping`s (see [data-model.md](data-model.md)) and, per operation:
 
-- An `AdapterEndpoint` per operation in the consumer spec, with an `aggregationStrategy`.
-- One or more `AdapterBinding`s under it — each binding a backend app + backend operation + the `ApprovedMapping` that maps between them, with a `role` (primary/fallback/supplement) and an `executionOrder`/`dependsOnBindingId` (see [data-model.md](data-model.md)) that decides parallel-vs-sequential execution at request time (see the request pipeline below).
+- **First approved binding for an operation** → an `AdapterEndpoint` is created and activated immediately with safe defaults: `aggregationStrategy = single`, the binding as `primary`, no caching, non-strict mode. One backend leaves nothing ambiguous to decide, so no human composition step is needed to start serving.
+- **A further binding for an operation that already has one** → the new binding attaches as `status = proposed` and the endpoint transitions to `composition-required`: how multiple backends combine (merge vs. union vs. fallback, roles, ordering, strictness, caching) is a business decision the mediator never guesses. The endpoint keeps serving its previous active configuration until a human completes composition. Full walkthrough: [flows/adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md).
+
+An `AdapterBinding` is a backend app + backend operation + the `ApprovedMapping` that maps between them — `backendOperationId` chosen from that mapping's approved `OperationMapping`s — with a `role` (primary/fallback/supplement) and an `executionOrder`/`dependsOnBindingId` (see [data-model.md](data-model.md)) that decides parallel-vs-sequential execution at request time (see the request pipeline below).
+
+Consumer operations with no approved mapping yet are still served by the Adapter Server Runtime (the runtime hosts the full consumer spec surface), but return a distinct `not-yet-mapped` error — deliberately distinguishable from both a 404 (wrong path) and an upstream failure, so the consumer team can tell "not wired up yet" apart from "broken".
 
 These bindings are **persisted, not re-derived per request** — this favors predictability and performance over full per-request dynamic replanning. At request time, the Resolution Planner loads the persisted bindings and only re-validates their health (e.g., that the underlying mapping is not `stale`, see [extensibility.md](extensibility.md)); it does not re-plan bindings from scratch on every call.
 
@@ -23,6 +27,8 @@ These bindings are **persisted, not re-derived per request** — this favors pre
 | `fanout-merge` | `primary`, `supplement` | `primary` supplies the base object; `supplement` bindings contribute additional fields. No `fallback` — all configured bindings are called every time. |
 | `collection-union` | `supplement` only (all bindings equivalent contributors) | There is no "primary" list among equals being unioned; every binding contributes rows to the same result set. `fallback` doesn't apply — a failed contributor is dropped from the union, not substituted. |
 | `fanout-first-success` | `primary`, `fallback` | `primary` is tried first; `fallback` bindings are tried in `executionOrder` on failure. No `supplement`. |
+
+Write operations constrain this further: a write endpoint is always `single` — see *Write operations* below.
 
 ## Stale bindings at request time
 
@@ -51,6 +57,15 @@ Configured per `AdapterEndpoint`:
 - **`collection-union`** — merge list results from multiple backends into one consumer list (e.g., "list customers" spanning two systems).
 - **`fanout-first-success`** — try the `primary` binding, fall back to the next binding on failure.
 
+## Write operations
+
+A consumer spec is not read-only — it can declare create/update/delete operations the consumer wants to perform against the landscape. These are supported, with one deliberate restriction: **a write endpoint always uses `aggregationStrategy = single`, with exactly one active binding.** Fanning a write out to multiple backends is a distributed transaction (partial success leaves the landscape inconsistent, with no compensation mechanism), and `fanout-first-success` is unsafe for writes: a primary that timed out may in fact have succeeded, so retrying against a fallback duplicates the side effect. Neither is worth the complexity at this system's scale — a consumer that needs the same data in multiple backends gets it via peer-peer sync *between those backends*, not via a fanned-out adapter write.
+
+- **Idempotency** — write requests get the same deterministic idempotency treatment as sync writes, via the shared Outbound Call Executor: a caller-supplied idempotency key (if the consumer operation declares one) is passed through; otherwise a deterministic key is derived from the request. Duplicate deliveries are deduplicated exactly as in [sync-engine.md](sync-engine.md).
+- **Caching** — write responses are never cached, and a successful write immediately invalidates cached entries for endpoints backed by the same backend resource, complementing the `SyncEvent`-driven invalidation below.
+- **Interplay with sync** — an adapter write to a backend that also participates in peer-peer sync is a *genuine* change from the Sync Engine's perspective: it is deliberately **not** tagged in the loop-prevention cache, so the backend's own webhook/poll picks it up and propagates it to that backend's sync peers like any other edit. Loop-prevention tagging is only for the Sync Engine's own writes, which must not bounce back to their source.
+- **Failure semantics** — strict by definition: any error fails the request with the upstream error surfaced. There is no partial/degraded response for a write.
+
 ## Error and partial-failure semantics
 
 - **Primary binding failure** → the request fails with an upstream-error response describing which backend failed.
@@ -59,7 +74,7 @@ Configured per `AdapterEndpoint`:
 
 ## Caching
 
-Responses are cached per `(adapterEndpointId, normalized request params)` with the endpoint's configured `cacheTtl`. Cache entries are invalidated by the same `SyncEvent`s the Sync Engine already produces for the underlying resources — this reuses sync activity as the cache-invalidation signal rather than building a second, separate change-detection mechanism for the adapter.
+Responses of read operations are cached per `(adapterEndpointId, normalized request params)` with the endpoint's configured `cacheTtl` (default: no caching until composed otherwise). Cache entries are invalidated by the same `SyncEvent`s the Sync Engine already produces for the underlying resources — this reuses sync activity as the cache-invalidation signal rather than building a second, separate change-detection mechanism for the adapter — and by adapter writes to the same backend resource (see *Write operations* above).
 
 ## Observability hooks
 

@@ -37,6 +37,10 @@ One-line definitions of every entity and term used across this documentation. Se
 - **ApprovedMapping** — a human-reviewed, approved mapping; the only thing the Sync Engine and Adapter Engine act on. Always one-directional; two of them, cross-linked, represent a bidirectional sync relationship (see `counterpartMappingId`).
 - **counterpartMappingId** — the field on `ApprovedMapping` linking it to the reverse-direction `ApprovedMapping` between the same two specs, when both have been approved.
 - **FieldMapping** — one approved field-level correspondence, with its transform (rename/coerce/aggregate/expression).
+- **OperationMapping** — one approved operation-level correspondence under an `ApprovedMapping`, carrying an `action` (create/read/update/delete); how the executing engines know which target operation to call.
+- **action** — the CRUD classification on an `OperationMapping`, heuristically derived from the target IR and correctable at review; the Sync Engine selects the target operation whose action matches the change type it is propagating.
+- **identity key** (`isIdentityKey`) — the one confirmed `FieldMapping` per mapped resource pair whose values identify the same record in both apps; human-confirmed at review, required before a `SyncRule` can be enabled.
+- **identityCandidate** — the Mapping Engine's suggested identity key on a field-level proposal item; a suggestion only, never auto-confirmed.
 - **LLMMappingProvider** — the pluggable interface the Mapping Engine calls into; swappable across LLM vendors/models.
 - **SpecDiff** — the classification of changes (additive/breaking) between two versions of the same `ApiSpec`.
 
@@ -47,9 +51,14 @@ One-line definitions of every entity and term used across this documentation. Se
 - **Scheduler** — the Sync Engine subcomponent that wakes a `SyncRule` when its polling interval elapses.
 - **Webhook Receiver** — the Sync Engine subcomponent that accepts inbound change notifications from apps.
 - **Poller** — the Sync Engine subcomponent that periodically pulls changes from apps that don't push webhooks.
-- **Loop Prevention** — the mechanism that detects and skips propagating a mediator-originated write back to its own source (prevents infinite sync ping-pong).
+- **Loop Prevention** — the mechanism that detects and skips propagating a mediator-originated write back to its own source (prevents infinite sync ping-pong); covers content echoes via the recently-written cache and create/delete echoes via `RecordLink` state.
+- **Identity Resolution** — the pipeline stage that classifies a detected change (create/update/delete) and resolves — or establishes — the record's `RecordLink`.
+- **RecordLink** — the persisted pairing of one record's native id in app A with the same logical record's native id in app B; established by create propagation, identity-key match, or manual linking; tombstoned (not deleted) on deletion.
+- **Tombstone** — the `tombstoned` state of a `RecordLink` after a propagated deletion; recognizes the other side's delete echo and prevents a slower poll cycle from resurrecting the record.
+- **Initial backfill** — the one-time reconciliation run when a `SyncRule` is first enabled, before its transports go live; `link-only` (default: link + seed baselines, write nothing) or `push` (source is the initial source of truth).
+- **deletePropagation** — per-`SyncRule` policy for source-side deletions: `ignore` (default; recorded as `skipped-policy`, never silently dropped) or `propagate`.
 - **Idempotency key** — a deterministic identifier per outbound write used to detect and skip duplicate deliveries.
-- **SyncFieldState** — the last-reconciled value per mapped field per record, shared across both directions of a bidirectional pair; what conflict detection compares incoming changes against.
+- **SyncFieldState** — the last-reconciled value per mapped field per linked record (`RecordLink`), shared across both directions of a bidirectional pair; what conflict detection compares incoming changes against.
 - **SyncEvent / AuditLog** — the durable, business-level record of every sync execution, adapter call, mapping decision, and credential access.
 
 ## Adapter
@@ -63,7 +72,10 @@ One-line definitions of every entity and term used across this documentation. Se
 - **AdapterEndpoint** — one operation of a consumer spec, with an aggregation strategy.
 - **AdapterBinding** — a binding from one `AdapterEndpoint` to a specific backend app + operation + `ApprovedMapping`, with a `role` and execution order.
 - **Aggregation strategy** — how an `AdapterEndpoint` combines results from multiple `AdapterBinding`s (`single` / `fanout-merge` / `collection-union` / `fanout-first-success`).
+- **Endpoint composition** — the human decision that combines multiple approved bindings into one serving `AdapterEndpoint` (strategy, roles, execution order, strictness, caching); single-binding endpoints skip it and activate automatically. See [flows/adapter-endpoint-composition.md](flows/adapter-endpoint-composition.md).
+- **composition-required** — `AdapterEndpoint` status while a newly attached `proposed` binding awaits a composition decision; the endpoint keeps serving its previous active configuration meanwhile.
 - **mapping-stale (error)** — the distinct failure reported when a request resolves to an `AdapterBinding` whose `ApprovedMapping` has been marked `stale`, as opposed to a live backend-call failure.
+- **not-yet-mapped (error)** — the distinct response for a consumer operation that has no approved binding yet; deliberately distinguishable from a 404 and from an upstream failure.
 
 ## Landscape overview
 

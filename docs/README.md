@@ -32,6 +32,7 @@ Start with [architecture/overview.md](architecture/overview.md) for the componen
 
 - [app-registration-and-mapping-detection.md](flows/app-registration-and-mapping-detection.md)
 - [mapping-review-and-approval.md](flows/mapping-review-and-approval.md)
+- [adapter-endpoint-composition.md](flows/adapter-endpoint-composition.md)
 - [sync-webhook-push.md](flows/sync-webhook-push.md)
 - [sync-polling-pull.md](flows/sync-polling-pull.md)
 - [adapter-request-resolution.md](flows/adapter-request-resolution.md)

@@ -49,6 +49,7 @@ sequenceDiagram
 
 ## Notes
 
-- Bindings are resolved from persisted state, not re-planned from scratch on every request — see [architecture/adapter-engine.md](../architecture/adapter-engine.md) for why this favors predictability/performance.
+- Bindings are resolved from persisted state, not re-planned from scratch on every request — see [architecture/adapter-engine.md](../architecture/adapter-engine.md) for why this favors predictability/performance. Only `active` bindings participate; an endpoint sitting in `composition-required` keeps serving its previous active configuration, and a consumer operation with no approved binding at all returns a distinct `not-yet-mapped` error (see [adapter-endpoint-composition.md](adapter-endpoint-composition.md)).
+- Write operations follow stricter rules — always a `single` binding, idempotency-key treatment, no caching — see *Write operations* in [architecture/adapter-engine.md](../architecture/adapter-engine.md).
 - A cache hit at step 4/5 (per `(adapterEndpointId, normalized params)`) can short-circuit the backend calls entirely; cache entries are invalidated by the same `SyncEvent`s the Sync Engine produces for the underlying resources.
 - Each inbound request is traced end-to-end (auth → planning → each backend call → transform → aggregation) via OpenTelemetry — see [architecture/observability.md](../architecture/observability.md).

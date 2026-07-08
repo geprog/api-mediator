@@ -47,6 +47,7 @@ MappingSuggestionSet {
       sourceField, targetField,
       transform: "rename" | "coerce" | "aggregate" | "expression",
       transformDetail,
+      identityCandidate: bool,
       confidence, rationale,
       ambiguousAlternatives: [{ targetField, confidence }],
       unmapped: bool
@@ -56,6 +57,8 @@ MappingSuggestionSet {
 ```
 
 `ambiguousAlternatives` and `unmapped` are structurally identical on both `operationMappings` and `fieldMappings` — an operation can have more than one plausible match (e.g. two similarly-named endpoints) exactly as a field can, so the schema doesn't special-case operations to a narrower shape. Both map onto the single `MappingProposalItem` entity regardless of `kind` (see [data-model.md](data-model.md)).
+
+For **peer-peer** pairs, the provider is additionally asked to flag at most one field pairing per resource pair as `identityCandidate: true` — the business-level key (email, SKU, order number, …) whose values are expected to identify the *same record* in both apps. This is a suggestion only: it pre-selects the identity choice in the review UI, but `FieldMapping.isIdentityKey` is set exclusively by explicit reviewer confirmation (see [flows/mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)), because a wrong identity key makes the Sync Engine silently merge unrelated records — the worst failure mode it has (see *Identity correlation* in [sync-engine.md](sync-engine.md)). Consumer-provider pairs skip this: the adapter never correlates records across apps.
 
 This is validated against a fixed JSON schema before being persisted as a `MappingProposal` + `MappingProposalItem`s (see [data-model.md](data-model.md)). Malformed output triggers a corrective retry (re-prompting with the validation error) — the core mapping logic never trusts free-text LLM output directly; only validated structured output becomes a `MappingProposalItem`. Retries are capped (e.g. 3 attempts per candidate pair); if the provider still can't produce valid output, that pair's analysis is marked `failed` rather than retried indefinitely, is surfaced in the review UI as needing attention, and emits a dedicated failure metric (see [observability.md](observability.md)) rather than silently consuming LLM budget in a retry loop.
 
