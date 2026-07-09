@@ -5,6 +5,6 @@
  */
 export { closeDb, createDb, tx } from "./client.js";
 export type { Database, DbTransaction, TransactionScope } from "./client.js";
-export { MissingDatabaseUrlError, resolveDatabaseUrl } from "./env.js";
+export { InvalidDatabaseUrlError, MissingDatabaseUrlError, resolveDatabaseUrl } from "./env.js";
 export { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 export { schemaProbe } from "./schema.js";

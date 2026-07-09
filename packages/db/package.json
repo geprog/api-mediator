@@ -19,6 +19,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@mediator/config": "workspace:*",
     "drizzle-orm": "0.45.2",
     "pg": "8.22.0"
   },

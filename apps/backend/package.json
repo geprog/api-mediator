@@ -1,0 +1,23 @@
+{
+  "name": "@mediator/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --import ./src/otel.ts src/index.ts",
+    "build": "tsc -b tsconfig.build.json",
+    "start": "node --import ./dist/otel.js dist/index.js",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@mediator/config": "workspace:*",
+    "@mediator/db": "workspace:*",
+    "@mediator/telemetry": "workspace:*",
+    "fastify": "5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "tsx": "4.23.0",
+    "vitest": "4.1.10"
+  }
+}
