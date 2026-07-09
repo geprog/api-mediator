@@ -18,6 +18,7 @@ An application in the landscape. An app can carry a `PROVIDER` spec (an API it e
 - `id`, `appId`, `role` (`PROVIDER` | `CONSUMER`)
 - `rawDocument` — the original OpenAPI document
 - `parsedIR` — normalized Intermediate Representation (resources → operations → schemas), see [mapping-engine.md](mapping-engine.md)
+- `analysisExclusions[]` — resource refs the operator has excluded from mapping analysis (default: empty — every resource group is in scope). Settable at registration and editable any time; carried forward when a new spec version is ingested, like `ResourceBinding`s (a ref that no longer resolves is dropped). **Analysis-only semantics**: excluded resources are omitted from shortlist prompts and receive no detail calls, but existing proposals and `ApprovedMapping`s over them are unaffected; removing an exclusion triggers a scoped incremental analysis — see *Scoping down* in [mapping-engine.md](mapping-engine.md).
 - `version` (monotonic integer), `contentHash`, `status` (active/superseded)
 - `createdAt`
 

@@ -25,7 +25,7 @@ One trace per end-to-end operation: a registration, a mapping-detection run, a s
 
 - **Sync Engine**: success/failure/skipped-loop/skipped-policy/conflict rate per `SyncRule`; poller lag (time since `lastRunAt` vs. expected interval); initial-backfill progress/duration; identity-resolution failure rate (no-match / ambiguous-match, see [sync-engine.md](sync-engine.md)).
 - **Adapter Engine**: request rate/latency/error rate per `AdapterEndpoint`; cache hit rate; partial-failure/degraded-response rate.
-- **Mapping Engine**: LLM call latency, error rate, and token/cost usage per provider, labeled by stage (shortlist vs. detail); shortlist yield (candidate resource pairs per spec pair); escape-hatch usage rate — manually triggered detail analyses; frequent use means stage-1 recall is too low, the key health signal of the two-stage design (see [mapping-engine.md](mapping-engine.md)); mapping review queue depth (pending / `reviewRequired` proposals); average confidence score trend.
+- **Mapping Engine**: LLM call latency, error rate, and token/cost usage per provider, labeled by stage (shortlist vs. detail); shortlist yield (candidate resource pairs per spec pair); escape-hatch usage rate — manually triggered detail analyses; frequent use means stage-1 recall is too low, the key health signal of the two-stage design (see [mapping-engine.md](mapping-engine.md)); analysis-scope size (resource groups excluded per spec, `ApiSpec.analysisExclusions`) and re-inclusion-triggered analyses; mapping review queue depth (pending / `reviewRequired` proposals); average confidence score trend.
 
 ### Logs
 
@@ -49,7 +49,7 @@ flowchart LR
 - **Landscape health** — per-app sync status, last successful sync time, error rate. A monitoring-oriented companion to the in-app [graph overview](../flows/graph-overview.md): Grafana shows operational health over time, the Graph Service shows current structural connections.
 - **Sync engine** — poll-run throughput, poller lag per `SyncRule`, loop-prevention skip rate, conflict rate.
 - **Adapter engine** — request rate/latency/error rate per `AdapterEndpoint`, cache hit rate, partial-failure/degraded-response rate.
-- **Mapping engine** — LLM call latency/error rate/token usage per provider and stage, shortlist yield, escape-hatch usage, proposals pending review, average confidence score trend.
+- **Mapping engine** — LLM call latency/error rate/token usage per provider and stage, shortlist yield, escape-hatch usage, analysis-scope exclusions and re-inclusions, proposals pending review, average confidence score trend.
 
 ## Alerting
 
