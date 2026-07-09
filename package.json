@@ -14,7 +14,9 @@
     "test": "vitest run",
     "build": "pnpm -r build",
     "verify": "pnpm typecheck && pnpm lint && pnpm format && pnpm test && pnpm build",
-    "test:e2e": "pnpm --filter @mediator/e2e run test:e2e"
+    "test:e2e": "pnpm --filter @mediator/e2e run test:e2e",
+    "db:generate": "pnpm --filter @mediator/db db:generate",
+    "db:migrate": "pnpm --filter @mediator/db db:migrate"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

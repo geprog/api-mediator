@@ -4,6 +4,7 @@
     { "path": "./packages/domain" },
     { "path": "./packages/config" },
     { "path": "./packages/telemetry" },
+    { "path": "./packages/db" },
     { "path": "./apps/e2e" }
   ]
 }
