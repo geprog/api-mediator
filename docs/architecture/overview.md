@@ -51,6 +51,7 @@ flowchart TB
     AdapterEngine --> ExternalApps
     SyncEngine & AdapterEngine --> Creds[Credential Store]
     SyncEngine & AdapterEngine --> AuditLog[(Audit / Event Log)]
+    Approval & Creds --> AuditLog
 
     UI -.otel traces/metrics/logs.-> Otel[OpenTelemetry Collector]
     Registry -.-> Otel

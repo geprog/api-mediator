@@ -2,7 +2,7 @@
 
 Even though the deployment model is single-tenant and self-hosted (no multi-tenant isolation required, see [overview.md](overview.md)), credential handling is not simplified to the point of being naive — the mediator holds live credentials to every app in the landscape, making the Credential Store one of its highest-value targets.
 
-A structural consequence of poll-only change detection (see [sync-engine.md](sync-engine.md)) is that the mediator accepts **no unauthenticated inbound traffic at all**: its only inbound surfaces are the operator API/UI (authenticated identity, below) and the generated adapter servers (token-gated, below). Registered apps never call the mediator — it always calls them.
+A structural consequence of poll-only change detection (see [sync-engine.md](sync-engine.md)) is that the mediator accepts **no unauthenticated inbound traffic at all**: its only inbound surfaces are the operator API/UI (authenticated identity, below) and the generated adapter servers (token-gated, below). No landscape app ever *pushes* changes to the mediator: provider APIs are only ever called *by* it (polling included); the one app-initiated surface is a consumer app calling its own token-gated adapter endpoints.
 
 ## Operator authentication & authorization
 
