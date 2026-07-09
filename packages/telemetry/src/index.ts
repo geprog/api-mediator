@@ -78,7 +78,16 @@ export function startTelemetry(cfg: TelemetryConfig): TelemetrySDK | null {
         exporter: new OTLPLogExporter({ url: signalUrl(cfg.endpoint, "v1/logs") }),
       }),
     ],
-    instrumentations: [getNodeAutoInstrumentations()],
+    instrumentations: [
+      getNodeAutoInstrumentations({
+        // The app's own pino `mixin` already stamps the active span's
+        // camelCase `traceId`/`spanId` (matching `SyncEvent.traceId`/`spanId`)
+        // onto every log record, so silence this instrumentation's redundant
+        // snake_case `trace_id`/`span_id` log-correlation injection. Only log
+        // correlation is disabled — the pino→OTLP log bridge stays on.
+        "@opentelemetry/instrumentation-pino": { disableLogCorrelation: true },
+      }),
+    ],
   });
 
   sdk.start();

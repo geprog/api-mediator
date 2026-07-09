@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { tx, type TransactionScope } from "./client.js";
+import { closeDb, createDb, tx, type TransactionScope } from "./client.js";
 
 interface FakeTx {
   readonly id: string;
@@ -28,6 +28,34 @@ function fakeScope(log: string[]): TransactionScope<FakeTx> {
     },
   };
 }
+
+describe("createDb pool error handling", () => {
+  // A pool 'error' event with no listener is an unhandled 'error' → Node crashes
+  // the process. `createDb` must always register one. `new Pool(...)` is lazy (it
+  // does not connect until first use), so we can emit the event synthetically —
+  // exactly the idle-client failure a Postgres restart produces — without a live
+  // database, and assert the process survives.
+  const CONNECTION_STRING = "postgres://user:pass@localhost:1/none";
+  const IDLE_ERROR = new Error("terminating connection due to administrator command");
+
+  it("routes a pool 'error' to the supplied handler without throwing", async () => {
+    const seen: Error[] = [];
+    const db = createDb(CONNECTION_STRING, (error) => seen.push(error));
+
+    expect(() => db.$client.emit("error", IDLE_ERROR)).not.toThrow();
+    expect(seen).toEqual([IDLE_ERROR]);
+
+    await closeDb(db);
+  });
+
+  it("swallows a pool 'error' by default so the process cannot crash", async () => {
+    const db = createDb(CONNECTION_STRING);
+
+    expect(() => db.$client.emit("error", IDLE_ERROR)).not.toThrow();
+
+    await closeDb(db);
+  });
+});
 
 describe("tx", () => {
   it("commits and returns the callback result when it resolves", async () => {

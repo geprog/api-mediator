@@ -9,7 +9,7 @@
 import { loadConfig } from "@mediator/config";
 import { createDb } from "@mediator/db";
 
-import { buildServer } from "./composition-root.js";
+import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
 
 /**
@@ -20,8 +20,14 @@ const HOST = "127.0.0.1";
 
 loadRepoEnv();
 const config = loadConfig();
-const db = createDb(config.database.url);
-const { app, shutdown } = buildServer({ config, db });
+const logger = createServerLogger(config);
+// Wire the shared logger to the pool's 'error' listener so a dropped idle
+// connection (Postgres restart, admin shutdown, network partition) is logged and
+// survivable — `/health` then returns 503 instead of the process crashing.
+const db = createDb(config.database.url, (error) => {
+  logger.error({ error: error.message }, "database pool error (idle client) — swallowed");
+});
+const { app, shutdown } = buildServer({ config, db, logger });
 
 async function handleSignal(signal: NodeJS.Signals): Promise<void> {
   app.log.info({ signal }, "shutdown signal received");

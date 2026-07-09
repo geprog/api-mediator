@@ -2,7 +2,7 @@ import { loadConfig } from "@mediator/config";
 import { createDb, type Database } from "@mediator/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { buildServer, type RunningServer } from "./composition-root.js";
+import { buildServer, createServerLogger, type RunningServer } from "./composition-root.js";
 
 /**
  * Live-database integration test for the operator API skeleton. Requires the
@@ -20,8 +20,11 @@ describe("operator API /health integration (requires Postgres)", () => {
 
   beforeAll(() => {
     const config = loadConfig();
-    db = createDb(config.database.url);
-    server = buildServer({ config, db });
+    const logger = createServerLogger(config);
+    db = createDb(config.database.url, (error) => {
+      logger.error({ error: error.message }, "database pool error (idle client) — swallowed");
+    });
+    server = buildServer({ config, db, logger });
   });
 
   afterAll(async () => {

@@ -62,6 +62,9 @@ importers:
       fastify:
         specifier: 5.10.0
         version: 5.10.0
+      pino:
+        specifier: 10.3.1
+        version: 10.3.1
     devDependencies:
       '@types/node':
         specifier: 24.13.3
