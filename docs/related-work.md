@@ -1,6 +1,6 @@
 # Related Work — Tools Overlapping with the Mediator Approach
 
-This document surveys existing tools (proprietary and open source) that tackle parts of the mediator's approach, ranked from highest to lowest conceptual overlap. It exists to sharpen the concept's positioning and to record which prior art is worth studying. Research date: July 2026.
+This document surveys existing tools (proprietary and open source) that tackle parts of the mediator's approach, ranked from highest to lowest conceptual overlap. It exists to sharpen the concept's positioning and to record which prior art is worth studying. For the complementary question — whether any of these or adjacent tools could be *adopted* as the mediator's execution engines rather than compete with it — see [build-vs-buy.md](build-vs-buy.md). Research date: July 2026.
 
 ## Comparison frame
 
