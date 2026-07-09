@@ -12,6 +12,10 @@ node_modules/
 
 # Lockfiles and generated content
 pnpm-lock.yaml
+# drizzle-kit-generated SQL migrations + snapshot/journal metadata: owned by the
+# generator, kept byte-faithful to its output (Prettier has no SQL parser and
+# would reflow the JSON snapshots away from what drizzle-kit writes/expects).
+**/migrations/
 
 # Pre-existing repo content this toolchain slice does not own — the concept
 # docs, the vendored scenario fixtures (must stay byte-faithful to upstream),
