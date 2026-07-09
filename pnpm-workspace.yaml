@@ -1,0 +1,11 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+  - "eval"
+
+# pnpm 10 blocks dependency build scripts unless explicitly allowed. esbuild
+# (pulled in transitively by Vite/Vitest/tsx) ships a prebuilt platform binary
+# and works without its postinstall, but allowing it keeps `pnpm install` output
+# clean and deterministic across machines/CI.
+onlyBuiltDependencies:
+  - esbuild
