@@ -1,0 +1,131 @@
+name: api-mediator-s5
+
+services:
+  # ---------------------------------------------------------------- Dolibarr
+  dolibarr:
+    image: docker.io/dolibarr/dolibarr:${DOLIBARR_TAG:-23.0.3}
+    environment:
+      - DOLI_INSTALL_AUTO=1
+      - DOLI_DB_HOST=dolibarr-db
+      - DOLI_DB_NAME=dolibarr
+      - DOLI_DB_USER=dolibarr
+      - DOLI_DB_PASSWORD=dolibarr-pass
+      - DOLI_ADMIN_LOGIN=${ADMIN_USER:-mediator-admin}
+      - DOLI_ADMIN_PASSWORD=${ADMIN_PASS:-mediator-pass-123}
+      - DOLI_URL_ROOT=http://localhost:${DOLIBARR_PORT:-15700}
+      # Third parties, projects/tasks (incl. time spent), invoices, REST API.
+      - DOLI_ENABLE_MODULES=Societe,Projet,Facture,Api
+      - DOLI_COMPANY_NAME=Mediator Test Landscape
+    ports:
+      - "${DOLIBARR_PORT:-15700}:80"
+    volumes:
+      - dolibarr-docs:/var/www/documents
+      - dolibarr-html:/var/www/html/custom
+    depends_on:
+      dolibarr-db:
+        condition: service_healthy
+    healthcheck:
+      # First boot runs the auto-installer — allow a generous start period.
+      test: ["CMD-SHELL", "curl -fsS http://localhost/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 90s
+
+  dolibarr-db:
+    image: docker.io/library/mariadb:11
+    environment:
+      - MARIADB_ROOT_PASSWORD=root-pass
+      - MARIADB_DATABASE=dolibarr
+      - MARIADB_USER=dolibarr
+      - MARIADB_PASSWORD=dolibarr-pass
+    volumes:
+      - dolibarr-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # ------------------------------------------------------------------- Kimai
+  kimai:
+    image: docker.io/kimai/kimai2:${KIMAI_TAG:-apache-2.57.0}
+    environment:
+      # No TRUSTED_HOSTS: setting it made Symfony reject "localhost" as
+      # untrusted; unset, all hosts are allowed (fine for a test landscape).
+      - DATABASE_URL=mysql://kimai:kimai-pass@kimai-db:3306/kimai?charset=utf8mb4
+      - ADMINMAIL=${ADMIN_EMAIL:-admin@example.test}
+      - ADMINPASS=${ADMIN_PASS:-mediator-pass-123}
+    ports:
+      - "${KIMAI_PORT:-15750}:8001"
+    volumes:
+      - kimai-data:/opt/kimai/var/data
+    depends_on:
+      kimai-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+  kimai-db:
+    image: docker.io/library/mariadb:11
+    environment:
+      - MARIADB_ROOT_PASSWORD=root-pass
+      - MARIADB_DATABASE=kimai
+      - MARIADB_USER=kimai
+      - MARIADB_PASSWORD=kimai-pass
+    volumes:
+      - kimai-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # --------------------------------------------------------------- OrangeHRM
+  # The image only documents a web installer; bootstrap.sh drives the CLI
+  # installer (installer/cli_install.php + a generated config YAML) instead.
+  orangehrm:
+    image: docker.io/orangehrm/orangehrm:${ORANGEHRM_TAG:-5.9}
+    ports:
+      - "${ORANGEHRM_PORT:-15800}:80"
+    volumes:
+      - orangehrm-data:/var/www/html
+    depends_on:
+      orangehrm-db:
+        condition: service_healthy
+    healthcheck:
+      # Answers 200 (installer or app) as soon as Apache is up.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+  orangehrm-db:
+    image: docker.io/library/mariadb:11
+    environment:
+      - MARIADB_ROOT_PASSWORD=root-pass
+      - MARIADB_DATABASE=orangehrm
+    volumes:
+      - orangehrm-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  dolibarr-docs:
+  dolibarr-html:
+  dolibarr-db-data:
+  kimai-data:
+  kimai-db-data:
+  orangehrm-data:
+  orangehrm-db-data:

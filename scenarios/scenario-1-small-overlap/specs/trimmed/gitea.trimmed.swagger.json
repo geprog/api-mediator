@@ -1,0 +1,6841 @@
+{
+  "basePath": "/api/v1",
+  "consumes": [
+    "application/json",
+    "text/plain"
+  ],
+  "definitions": {
+    "AddTimeOption": {
+      "description": "AddTimeOption options for adding time to an issue",
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "time": {
+          "description": "time in seconds",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Time"
+        },
+        "user_name": {
+          "description": "username of the user who spent the time working on the issue (optional)",
+          "type": "string",
+          "x-go-name": "User"
+        }
+      },
+      "required": [
+        "time"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Attachment": {
+      "description": "Attachment a generic attachment",
+      "properties": {
+        "browser_download_url": {
+          "description": "DownloadURL is the URL to download the attachment",
+          "type": "string",
+          "x-go-name": "DownloadURL"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "download_count": {
+          "description": "DownloadCount is the number of times the attachment has been downloaded",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "DownloadCount"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the attachment",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "name": {
+          "description": "Name is the filename of the attachment",
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "size": {
+          "description": "Size is the file size in bytes",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Size"
+        },
+        "uuid": {
+          "description": "UUID is the unique identifier for the attachment file",
+          "type": "string",
+          "x-go-name": "UUID"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Badge": {
+      "description": "Badge represents a user badge",
+      "properties": {
+        "description": {
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "image_url": {
+          "type": "string",
+          "x-go-name": "ImageURL"
+        },
+        "slug": {
+          "type": "string",
+          "x-go-name": "Slug"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Comment": {
+      "description": "Comment represents a comment on a commit or issue",
+      "properties": {
+        "assets": {
+          "description": "Attachments contains files attached to the comment",
+          "items": {
+            "$ref": "#/definitions/Attachment"
+          },
+          "type": "array",
+          "x-go-name": "Attachments"
+        },
+        "body": {
+          "description": "Body contains the comment text content",
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "html_url": {
+          "description": "HTMLURL is the web URL for viewing the comment",
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the comment",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "issue_url": {
+          "description": "IssueURL is the API URL for the issue",
+          "type": "string",
+          "x-go-name": "IssueURL"
+        },
+        "original_author": {
+          "description": "OriginalAuthor is the original author name (for imported comments)",
+          "type": "string",
+          "x-go-name": "OriginalAuthor"
+        },
+        "original_author_id": {
+          "description": "OriginalAuthorID is the original author ID (for imported comments)",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OriginalAuthorID"
+        },
+        "pull_request_url": {
+          "description": "PRURL is the API URL for the pull request (if applicable)",
+          "type": "string",
+          "x-go-name": "PRURL"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        },
+        "user": {
+          "$ref": "#/definitions/User"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateIssueCommentOption": {
+      "description": "CreateIssueCommentOption options for creating a comment on an issue",
+      "properties": {
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateIssueOption": {
+      "description": "CreateIssueOption options to create one issue",
+      "properties": {
+        "assignee": {
+          "description": "deprecated",
+          "type": "string",
+          "x-go-name": "Assignee"
+        },
+        "assignees": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "Assignees"
+        },
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "closed": {
+          "type": "boolean",
+          "x-go-name": "Closed"
+        },
+        "due_date": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "labels": {
+          "description": "list of label ids",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array",
+          "x-go-name": "Labels"
+        },
+        "milestone": {
+          "description": "milestone id",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Milestone"
+        },
+        "ref": {
+          "type": "string",
+          "x-go-name": "Ref"
+        },
+        "title": {
+          "type": "string",
+          "x-go-name": "Title"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateKeyOption": {
+      "description": "CreateKeyOption options when creating a key",
+      "properties": {
+        "key": {
+          "description": "An armored SSH key to add",
+          "type": "string",
+          "uniqueItems": true,
+          "x-go-name": "Key"
+        },
+        "read_only": {
+          "description": "Describe if the key has only read access or read/write",
+          "type": "boolean",
+          "x-go-name": "ReadOnly"
+        },
+        "title": {
+          "description": "Title of the key to add",
+          "type": "string",
+          "uniqueItems": true,
+          "x-go-name": "Title"
+        }
+      },
+      "required": [
+        "title",
+        "key"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateLabelOption": {
+      "description": "CreateLabelOption options for creating a label",
+      "properties": {
+        "color": {
+          "example": "#00aabb",
+          "type": "string",
+          "x-go-name": "Color"
+        },
+        "description": {
+          "description": "Description provides additional context about the label's purpose",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "exclusive": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "Exclusive"
+        },
+        "is_archived": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "IsArchived"
+        },
+        "name": {
+          "type": "string",
+          "x-go-name": "Name"
+        }
+      },
+      "required": [
+        "name",
+        "color"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateMilestoneOption": {
+      "description": "CreateMilestoneOption options for creating a milestone",
+      "properties": {
+        "description": {
+          "description": "Description provides details about the milestone",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "due_on": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed"
+          ],
+          "type": "string",
+          "x-go-name": "State"
+        },
+        "title": {
+          "description": "Title is the title of the new milestone",
+          "type": "string",
+          "x-go-name": "Title"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateOrgOption": {
+      "description": "CreateOrgOption options for creating an organization",
+      "properties": {
+        "description": {
+          "description": "The description of the organization",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "email": {
+          "description": "The email address of the organization",
+          "type": "string",
+          "x-go-name": "Email"
+        },
+        "full_name": {
+          "description": "The full display name of the organization",
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "location": {
+          "description": "The location of the organization",
+          "type": "string",
+          "x-go-name": "Location"
+        },
+        "repo_admin_change_team_access": {
+          "description": "Whether repository administrators can change team access",
+          "type": "boolean",
+          "x-go-name": "RepoAdminChangeTeamAccess"
+        },
+        "username": {
+          "description": "username of the organization",
+          "type": "string",
+          "x-go-name": "UserName"
+        },
+        "visibility": {
+          "description": "possible values are `public` (default), `limited` or `private`",
+          "enum": [
+            "public",
+            "limited",
+            "private"
+          ],
+          "type": "string",
+          "x-go-name": "Visibility"
+        },
+        "website": {
+          "description": "The website URL of the organization",
+          "type": "string",
+          "x-go-name": "Website"
+        }
+      },
+      "required": [
+        "username"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateRepoOption": {
+      "description": "CreateRepoOption options when creating repository",
+      "properties": {
+        "auto_init": {
+          "description": "Whether the repository should be auto-initialized?",
+          "type": "boolean",
+          "x-go-name": "AutoInit"
+        },
+        "default_branch": {
+          "description": "DefaultBranch of the repository (used when initializes and in template)",
+          "type": "string",
+          "x-go-name": "DefaultBranch"
+        },
+        "description": {
+          "description": "Description of the repository to create",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "gitignores": {
+          "description": "Gitignores to use",
+          "type": "string",
+          "x-go-name": "Gitignores"
+        },
+        "issue_labels": {
+          "description": "Label-Set to use",
+          "type": "string",
+          "x-go-name": "IssueLabels"
+        },
+        "license": {
+          "description": "License to use",
+          "type": "string",
+          "x-go-name": "License"
+        },
+        "name": {
+          "description": "Name of the repository to create",
+          "type": "string",
+          "uniqueItems": true,
+          "x-go-name": "Name"
+        },
+        "object_format_name": {
+          "description": "ObjectFormatName of the underlying git repository, empty string for default (sha1)",
+          "enum": [
+            "sha1",
+            "sha256"
+          ],
+          "type": "string",
+          "x-go-name": "ObjectFormatName"
+        },
+        "private": {
+          "description": "Whether the repository is private",
+          "type": "boolean",
+          "x-go-name": "Private"
+        },
+        "readme": {
+          "description": "Readme of the repository to create",
+          "type": "string",
+          "x-go-name": "Readme"
+        },
+        "template": {
+          "description": "Whether the repository is template",
+          "type": "boolean",
+          "x-go-name": "Template"
+        },
+        "trust_model": {
+          "description": "TrustModel of the repository",
+          "enum": [
+            "default",
+            "collaborator",
+            "committer",
+            "collaboratorcommitter"
+          ],
+          "type": "string",
+          "x-go-name": "TrustModel"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "CreateUserOption": {
+      "description": "CreateUserOption create user options",
+      "properties": {
+        "created_at": {
+          "description": "For explicitly setting the user creation timestamp. Useful when users are\nmigrated from other systems. When omitted, the user's creation timestamp\nwill be set to \"now\".",
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "email": {
+          "format": "email",
+          "type": "string",
+          "x-go-name": "Email"
+        },
+        "full_name": {
+          "description": "The full display name of the user",
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "login_name": {
+          "default": "empty",
+          "description": "identifier of the user, provided by the external authenticator (if configured)",
+          "type": "string",
+          "x-go-name": "LoginName"
+        },
+        "must_change_password": {
+          "description": "Whether the user must change password on first login",
+          "type": "boolean",
+          "x-go-name": "MustChangePassword"
+        },
+        "password": {
+          "description": "The plain text password for the user",
+          "type": "string",
+          "x-go-name": "Password"
+        },
+        "restricted": {
+          "description": "Whether the user has restricted access privileges",
+          "type": "boolean",
+          "x-go-name": "Restricted"
+        },
+        "send_notify": {
+          "description": "Whether to send welcome notification email to the user",
+          "type": "boolean",
+          "x-go-name": "SendNotify"
+        },
+        "source_id": {
+          "description": "The authentication source ID to associate with the user",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "SourceID"
+        },
+        "username": {
+          "description": "username of the user",
+          "type": "string",
+          "x-go-name": "Username"
+        },
+        "visibility": {
+          "description": "User visibility level: public, limited, or private",
+          "type": "string",
+          "x-go-name": "Visibility"
+        }
+      },
+      "required": [
+        "username",
+        "email"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditAttachmentOptions": {
+      "description": "EditAttachmentOptions options for editing attachments",
+      "properties": {
+        "name": {
+          "description": "Name is the new filename for the attachment",
+          "type": "string",
+          "x-go-name": "Name"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditDeadlineOption": {
+      "description": "EditDeadlineOption options for creating a deadline",
+      "properties": {
+        "due_date": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        }
+      },
+      "required": [
+        "due_date"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditIssueCommentOption": {
+      "description": "EditIssueCommentOption options for editing a comment",
+      "properties": {
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditIssueOption": {
+      "description": "EditIssueOption options for editing an issue",
+      "properties": {
+        "assignee": {
+          "description": "deprecated",
+          "type": "string",
+          "x-go-name": "Assignee"
+        },
+        "assignees": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "Assignees"
+        },
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "due_date": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "milestone": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Milestone"
+        },
+        "ref": {
+          "type": "string",
+          "x-go-name": "Ref"
+        },
+        "state": {
+          "type": "string",
+          "x-go-name": "State"
+        },
+        "title": {
+          "type": "string",
+          "x-go-name": "Title"
+        },
+        "unset_due_date": {
+          "type": "boolean",
+          "x-go-name": "RemoveDeadline"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditLabelOption": {
+      "description": "EditLabelOption options for editing a label",
+      "properties": {
+        "color": {
+          "example": "#00aabb",
+          "type": "string",
+          "x-go-name": "Color"
+        },
+        "description": {
+          "description": "Description provides additional context about the label's purpose",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "exclusive": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "Exclusive"
+        },
+        "is_archived": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "IsArchived"
+        },
+        "name": {
+          "description": "Name is the new display name for the label",
+          "type": "string",
+          "x-go-name": "Name"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditMilestoneOption": {
+      "description": "EditMilestoneOption options for editing a milestone",
+      "properties": {
+        "description": {
+          "description": "Description provides updated details about the milestone",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "due_on": {
+          "description": "Deadline is the updated due date for the milestone",
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "state": {
+          "description": "State indicates the updated state of the milestone",
+          "type": "string",
+          "x-go-name": "State"
+        },
+        "title": {
+          "description": "Title is the updated title of the milestone",
+          "type": "string",
+          "x-go-name": "Title"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditReactionOption": {
+      "description": "EditReactionOption contain the reaction type",
+      "properties": {
+        "content": {
+          "description": "The reaction content (e.g., emoji or reaction type)",
+          "type": "string",
+          "x-go-name": "Reaction"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "EditUserOption": {
+      "description": "EditUserOption edit user options",
+      "properties": {
+        "active": {
+          "description": "Whether the user account is active",
+          "type": "boolean",
+          "x-go-name": "Active"
+        },
+        "admin": {
+          "description": "Whether the user has administrator privileges",
+          "type": "boolean",
+          "x-go-name": "Admin"
+        },
+        "allow_create_organization": {
+          "description": "Whether the user can create organizations",
+          "type": "boolean",
+          "x-go-name": "AllowCreateOrganization"
+        },
+        "allow_git_hook": {
+          "description": "Whether the user can use Git hooks",
+          "type": "boolean",
+          "x-go-name": "AllowGitHook"
+        },
+        "allow_import_local": {
+          "description": "Whether the user can import local repositories",
+          "type": "boolean",
+          "x-go-name": "AllowImportLocal"
+        },
+        "description": {
+          "description": "The user's personal description or bio",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "email": {
+          "format": "email",
+          "type": "string",
+          "x-go-name": "Email"
+        },
+        "full_name": {
+          "description": "The full display name of the user",
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "location": {
+          "description": "The user's location or address",
+          "type": "string",
+          "x-go-name": "Location"
+        },
+        "login_name": {
+          "default": "empty",
+          "description": "identifier of the user, provided by the external authenticator (if configured)",
+          "type": "string",
+          "x-go-name": "LoginName"
+        },
+        "max_repo_creation": {
+          "description": "Maximum number of repositories the user can create",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "MaxRepoCreation"
+        },
+        "must_change_password": {
+          "description": "Whether the user must change password on next login",
+          "type": "boolean",
+          "x-go-name": "MustChangePassword"
+        },
+        "password": {
+          "description": "The plain text password for the user",
+          "type": "string",
+          "x-go-name": "Password"
+        },
+        "prohibit_login": {
+          "description": "Whether the user is prohibited from logging in",
+          "type": "boolean",
+          "x-go-name": "ProhibitLogin"
+        },
+        "restricted": {
+          "description": "Whether the user has restricted access privileges",
+          "type": "boolean",
+          "x-go-name": "Restricted"
+        },
+        "source_id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "SourceID"
+        },
+        "visibility": {
+          "description": "User visibility level: public, limited, or private",
+          "type": "string",
+          "x-go-name": "Visibility"
+        },
+        "website": {
+          "description": "The user's personal website URL",
+          "type": "string",
+          "x-go-name": "Website"
+        }
+      },
+      "required": [
+        "source_id",
+        "login_name"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "ExternalTracker": {
+      "description": "ExternalTracker represents settings for external tracker",
+      "properties": {
+        "external_tracker_format": {
+          "description": "External Issue Tracker URL Format. Use the placeholders {user}, {repo} and {index} for the username, repository name and issue index.",
+          "type": "string",
+          "x-go-name": "ExternalTrackerFormat"
+        },
+        "external_tracker_regexp_pattern": {
+          "description": "External Issue Tracker issue regular expression",
+          "type": "string",
+          "x-go-name": "ExternalTrackerRegexpPattern"
+        },
+        "external_tracker_style": {
+          "description": "External Issue Tracker Number Format, either `numeric`, `alphanumeric`, or `regexp`",
+          "type": "string",
+          "x-go-name": "ExternalTrackerStyle"
+        },
+        "external_tracker_url": {
+          "description": "URL of external issue tracker.",
+          "type": "string",
+          "x-go-name": "ExternalTrackerURL"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "ExternalWiki": {
+      "description": "ExternalWiki represents setting for external wiki",
+      "properties": {
+        "external_wiki_url": {
+          "description": "URL of external wiki.",
+          "type": "string",
+          "x-go-name": "ExternalWikiURL"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "InternalTracker": {
+      "description": "InternalTracker represents settings for internal tracker",
+      "properties": {
+        "allow_only_contributors_to_track_time": {
+          "description": "Let only contributors track time (Built-in issue tracker)",
+          "type": "boolean",
+          "x-go-name": "AllowOnlyContributorsToTrackTime"
+        },
+        "enable_issue_dependencies": {
+          "description": "Enable dependencies for issues and pull requests (Built-in issue tracker)",
+          "type": "boolean",
+          "x-go-name": "EnableIssueDependencies"
+        },
+        "enable_time_tracker": {
+          "description": "Enable time tracking (Built-in issue tracker)",
+          "type": "boolean",
+          "x-go-name": "EnableTimeTracker"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Issue": {
+      "description": "Issue represents an issue in a repository",
+      "properties": {
+        "assets": {
+          "items": {
+            "$ref": "#/definitions/Attachment"
+          },
+          "type": "array",
+          "x-go-name": "Attachments"
+        },
+        "assignee": {
+          "$ref": "#/definitions/User"
+        },
+        "assignees": {
+          "items": {
+            "$ref": "#/definitions/User"
+          },
+          "type": "array",
+          "x-go-name": "Assignees"
+        },
+        "body": {
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "closed_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Closed"
+        },
+        "comments": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Comments"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "due_date": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "html_url": {
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "is_locked": {
+          "type": "boolean",
+          "x-go-name": "IsLocked"
+        },
+        "labels": {
+          "items": {
+            "$ref": "#/definitions/Label"
+          },
+          "type": "array",
+          "x-go-name": "Labels"
+        },
+        "milestone": {
+          "$ref": "#/definitions/Milestone"
+        },
+        "number": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Index"
+        },
+        "original_author": {
+          "type": "string",
+          "x-go-name": "OriginalAuthor"
+        },
+        "original_author_id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OriginalAuthorID"
+        },
+        "pin_order": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "PinOrder"
+        },
+        "pull_request": {
+          "$ref": "#/definitions/PullRequestMeta"
+        },
+        "ref": {
+          "type": "string",
+          "x-go-name": "Ref"
+        },
+        "repository": {
+          "$ref": "#/definitions/RepositoryMeta"
+        },
+        "state": {
+          "$ref": "#/definitions/StateType"
+        },
+        "time_estimate": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "TimeEstimate"
+        },
+        "title": {
+          "type": "string",
+          "x-go-name": "Title"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        },
+        "url": {
+          "type": "string",
+          "x-go-name": "URL"
+        },
+        "user": {
+          "$ref": "#/definitions/User"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "IssueDeadline": {
+      "description": "IssueDeadline represents an issue deadline",
+      "properties": {
+        "due_date": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "IssueLabelsOption": {
+      "description": "IssueLabelsOption a collection of labels",
+      "properties": {
+        "labels": {
+          "description": "Labels can be a list of integers representing label IDs\nor a list of strings representing label names",
+          "items": {},
+          "type": "array",
+          "x-go-name": "Labels"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "IssueMeta": {
+      "description": "IssueMeta basic issue information",
+      "properties": {
+        "index": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Index"
+        },
+        "owner": {
+          "description": "owner of the issue's repo",
+          "type": "string",
+          "x-go-name": "Owner"
+        },
+        "repo": {
+          "type": "string",
+          "x-go-name": "Name"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Label": {
+      "description": "Label a label to an issue or a pr",
+      "properties": {
+        "color": {
+          "example": "00aabb",
+          "type": "string",
+          "x-go-name": "Color"
+        },
+        "description": {
+          "description": "Description provides additional context about the label's purpose",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "exclusive": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "Exclusive"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the label",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "is_archived": {
+          "example": false,
+          "type": "boolean",
+          "x-go-name": "IsArchived"
+        },
+        "name": {
+          "description": "Name is the display name of the label",
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "url": {
+          "description": "URL is the API endpoint for accessing this label",
+          "type": "string",
+          "x-go-name": "URL"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "LockIssueOption": {
+      "description": "LockIssueOption options to lock an issue",
+      "properties": {
+        "lock_reason": {
+          "type": "string",
+          "x-go-name": "Reason"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Milestone": {
+      "description": "Milestone milestone is a collection of issues on one repository",
+      "properties": {
+        "closed_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Closed"
+        },
+        "closed_issues": {
+          "description": "ClosedIssues is the number of closed issues in this milestone",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ClosedIssues"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "description": {
+          "description": "Description provides details about the milestone",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "due_on": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Deadline"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the milestone",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "open_issues": {
+          "description": "OpenIssues is the number of open issues in this milestone",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OpenIssues"
+        },
+        "state": {
+          "$ref": "#/definitions/StateType"
+        },
+        "title": {
+          "description": "Title is the title of the milestone",
+          "type": "string",
+          "x-go-name": "Title"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Organization": {
+      "description": "Organization represents an organization",
+      "properties": {
+        "avatar_url": {
+          "description": "The URL of the organization's avatar",
+          "type": "string",
+          "x-go-name": "AvatarURL"
+        },
+        "description": {
+          "description": "The description of the organization",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "email": {
+          "description": "The email address of the organization",
+          "type": "string",
+          "x-go-name": "Email"
+        },
+        "full_name": {
+          "description": "The full display name of the organization",
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "id": {
+          "description": "The unique identifier of the organization",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "location": {
+          "description": "The location of the organization",
+          "type": "string",
+          "x-go-name": "Location"
+        },
+        "name": {
+          "description": "The name of the organization",
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "repo_admin_change_team_access": {
+          "description": "Whether repository administrators can change team access",
+          "type": "boolean",
+          "x-go-name": "RepoAdminChangeTeamAccess"
+        },
+        "username": {
+          "description": "username of the organization\ndeprecated",
+          "type": "string",
+          "x-go-name": "UserName"
+        },
+        "visibility": {
+          "description": "The visibility level of the organization (public, limited, private)",
+          "type": "string",
+          "x-go-name": "Visibility"
+        },
+        "website": {
+          "description": "The website URL of the organization",
+          "type": "string",
+          "x-go-name": "Website"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Permission": {
+      "description": "Permission represents a set of permissions",
+      "properties": {
+        "admin": {
+          "type": "boolean",
+          "x-go-name": "Admin"
+        },
+        "pull": {
+          "type": "boolean",
+          "x-go-name": "Pull"
+        },
+        "push": {
+          "type": "boolean",
+          "x-go-name": "Push"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "PublicKey": {
+      "description": "PublicKey publickey is a user key to push code to repository",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "fingerprint": {
+          "description": "Fingerprint is the key's fingerprint",
+          "type": "string",
+          "x-go-name": "Fingerprint"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the public key",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "key": {
+          "description": "Key contains the actual SSH public key content",
+          "type": "string",
+          "x-go-name": "Key"
+        },
+        "key_type": {
+          "description": "KeyType indicates the type of the SSH key",
+          "type": "string",
+          "x-go-name": "KeyType"
+        },
+        "last_used_at": {
+          "description": "Updated is the time when the key was last used",
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        },
+        "read_only": {
+          "description": "ReadOnly indicates if the key has read-only access",
+          "type": "boolean",
+          "x-go-name": "ReadOnly"
+        },
+        "title": {
+          "description": "Title is the human-readable name for the key",
+          "type": "string",
+          "x-go-name": "Title"
+        },
+        "url": {
+          "description": "URL is the API URL for this key",
+          "type": "string",
+          "x-go-name": "URL"
+        },
+        "user": {
+          "$ref": "#/definitions/User"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "PullRequestMeta": {
+      "description": "PullRequestMeta PR info if an issue is a PR",
+      "properties": {
+        "draft": {
+          "type": "boolean",
+          "x-go-name": "IsWorkInProgress"
+        },
+        "html_url": {
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "merged": {
+          "type": "boolean",
+          "x-go-name": "HasMerged"
+        },
+        "merged_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Merged"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Reaction": {
+      "description": "Reaction contain one reaction",
+      "properties": {
+        "content": {
+          "description": "The reaction content (e.g., emoji or reaction type)",
+          "type": "string",
+          "x-go-name": "Reaction"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "user": {
+          "$ref": "#/definitions/User"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "RenameUserOption": {
+      "description": "RenameUserOption options when renaming a user",
+      "properties": {
+        "new_username": {
+          "description": "New username for this user. This name cannot be in use yet by any other user.",
+          "type": "string",
+          "uniqueItems": true,
+          "x-go-name": "NewName"
+        }
+      },
+      "required": [
+        "new_username"
+      ],
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "RepoTransfer": {
+      "description": "RepoTransfer represents a pending repo transfer",
+      "properties": {
+        "doer": {
+          "$ref": "#/definitions/User"
+        },
+        "recipient": {
+          "$ref": "#/definitions/User"
+        },
+        "teams": {
+          "items": {
+            "$ref": "#/definitions/Team"
+          },
+          "type": "array",
+          "x-go-name": "Teams"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Repository": {
+      "description": "Repository represents a repository",
+      "properties": {
+        "allow_fast_forward_only_merge": {
+          "type": "boolean",
+          "x-go-name": "AllowFastForwardOnly"
+        },
+        "allow_manual_merge": {
+          "type": "boolean",
+          "x-go-name": "AllowManualMerge"
+        },
+        "allow_merge_commits": {
+          "type": "boolean",
+          "x-go-name": "AllowMerge"
+        },
+        "allow_rebase": {
+          "type": "boolean",
+          "x-go-name": "AllowRebase"
+        },
+        "allow_rebase_explicit": {
+          "type": "boolean",
+          "x-go-name": "AllowRebaseMerge"
+        },
+        "allow_rebase_update": {
+          "type": "boolean",
+          "x-go-name": "AllowRebaseUpdate"
+        },
+        "allow_squash_merge": {
+          "type": "boolean",
+          "x-go-name": "AllowSquash"
+        },
+        "archived": {
+          "type": "boolean",
+          "x-go-name": "Archived"
+        },
+        "archived_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "ArchivedAt"
+        },
+        "autodetect_manual_merge": {
+          "type": "boolean",
+          "x-go-name": "AutodetectManualMerge"
+        },
+        "avatar_url": {
+          "type": "string",
+          "x-go-name": "AvatarURL"
+        },
+        "clone_url": {
+          "type": "string",
+          "x-go-name": "CloneURL"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "default_allow_maintainer_edit": {
+          "type": "boolean",
+          "x-go-name": "DefaultAllowMaintainerEdit"
+        },
+        "default_branch": {
+          "type": "string",
+          "x-go-name": "DefaultBranch"
+        },
+        "default_delete_branch_after_merge": {
+          "type": "boolean",
+          "x-go-name": "DefaultDeleteBranchAfterMerge"
+        },
+        "default_merge_style": {
+          "type": "string",
+          "x-go-name": "DefaultMergeStyle"
+        },
+        "description": {
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "empty": {
+          "type": "boolean",
+          "x-go-name": "Empty"
+        },
+        "external_tracker": {
+          "$ref": "#/definitions/ExternalTracker"
+        },
+        "external_wiki": {
+          "$ref": "#/definitions/ExternalWiki"
+        },
+        "fork": {
+          "type": "boolean",
+          "x-go-name": "Fork"
+        },
+        "forks_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Forks"
+        },
+        "full_name": {
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "has_actions": {
+          "type": "boolean",
+          "x-go-name": "HasActions"
+        },
+        "has_code": {
+          "type": "boolean",
+          "x-go-name": "HasCode"
+        },
+        "has_issues": {
+          "type": "boolean",
+          "x-go-name": "HasIssues"
+        },
+        "has_packages": {
+          "type": "boolean",
+          "x-go-name": "HasPackages"
+        },
+        "has_projects": {
+          "type": "boolean",
+          "x-go-name": "HasProjects"
+        },
+        "has_pull_requests": {
+          "type": "boolean",
+          "x-go-name": "HasPullRequests"
+        },
+        "has_releases": {
+          "type": "boolean",
+          "x-go-name": "HasReleases"
+        },
+        "has_wiki": {
+          "type": "boolean",
+          "x-go-name": "HasWiki"
+        },
+        "html_url": {
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "ignore_whitespace_conflicts": {
+          "type": "boolean",
+          "x-go-name": "IgnoreWhitespaceConflicts"
+        },
+        "internal": {
+          "type": "boolean",
+          "x-go-name": "Internal"
+        },
+        "internal_tracker": {
+          "$ref": "#/definitions/InternalTracker"
+        },
+        "language": {
+          "type": "string",
+          "x-go-name": "Language"
+        },
+        "languages_url": {
+          "type": "string",
+          "x-go-name": "LanguagesURL"
+        },
+        "licenses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "Licenses"
+        },
+        "link": {
+          "type": "string",
+          "x-go-name": "Link"
+        },
+        "mirror": {
+          "type": "boolean",
+          "x-go-name": "Mirror"
+        },
+        "mirror_interval": {
+          "type": "string",
+          "x-go-name": "MirrorInterval"
+        },
+        "mirror_updated": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "MirrorUpdated"
+        },
+        "name": {
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "object_format_name": {
+          "description": "ObjectFormatName of the underlying git repository",
+          "enum": [
+            "sha1",
+            "sha256"
+          ],
+          "type": "string",
+          "x-go-name": "ObjectFormatName"
+        },
+        "open_issues_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OpenIssues"
+        },
+        "open_pr_counter": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OpenPulls"
+        },
+        "original_url": {
+          "type": "string",
+          "x-go-name": "OriginalURL"
+        },
+        "owner": {
+          "$ref": "#/definitions/User"
+        },
+        "parent": {
+          "$ref": "#/definitions/Repository"
+        },
+        "permissions": {
+          "$ref": "#/definitions/Permission"
+        },
+        "private": {
+          "type": "boolean",
+          "x-go-name": "Private"
+        },
+        "projects_mode": {
+          "type": "string",
+          "x-go-name": "ProjectsMode"
+        },
+        "release_counter": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Releases"
+        },
+        "repo_transfer": {
+          "$ref": "#/definitions/RepoTransfer"
+        },
+        "size": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Size"
+        },
+        "ssh_url": {
+          "type": "string",
+          "x-go-name": "SSHURL"
+        },
+        "stars_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Stars"
+        },
+        "template": {
+          "type": "boolean",
+          "x-go-name": "Template"
+        },
+        "topics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "Topics"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        },
+        "url": {
+          "type": "string",
+          "x-go-name": "URL"
+        },
+        "watchers_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Watchers"
+        },
+        "website": {
+          "type": "string",
+          "x-go-name": "Website"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "RepositoryMeta": {
+      "description": "RepositoryMeta basic repository information",
+      "properties": {
+        "full_name": {
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "name": {
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "owner": {
+          "type": "string",
+          "x-go-name": "Owner"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "StateType": {
+      "description": "StateType issue state type",
+      "type": "string",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "Team": {
+      "description": "Team represents a team in an organization",
+      "properties": {
+        "can_create_org_repo": {
+          "description": "Whether the team can create repositories in the organization",
+          "type": "boolean",
+          "x-go-name": "CanCreateOrgRepo"
+        },
+        "description": {
+          "description": "The description of the team",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "id": {
+          "description": "The unique identifier of the team",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "includes_all_repositories": {
+          "description": "Whether the team has access to all repositories in the organization",
+          "type": "boolean",
+          "x-go-name": "IncludesAllRepositories"
+        },
+        "name": {
+          "description": "The name of the team",
+          "type": "string",
+          "x-go-name": "Name"
+        },
+        "organization": {
+          "$ref": "#/definitions/Organization"
+        },
+        "permission": {
+          "enum": [
+            "none",
+            "read",
+            "write",
+            "admin",
+            "owner"
+          ],
+          "type": "string",
+          "x-go-name": "Permission"
+        },
+        "units": {
+          "example": [
+            "repo.code",
+            "repo.issues",
+            "repo.ext_issues",
+            "repo.wiki",
+            "repo.pulls",
+            "repo.releases",
+            "repo.projects",
+            "repo.ext_wiki"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "Units"
+        },
+        "units_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "example": {
+            "repo.code": "read",
+            "repo.ext_issues": "none",
+            "repo.ext_wiki": "none",
+            "repo.issues": "write",
+            "repo.projects": "none",
+            "repo.pulls": "owner",
+            "repo.releases": "none",
+            "repo.wiki": "admin"
+          },
+          "type": "object",
+          "x-go-name": "UnitsMap"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "TimelineComment": {
+      "description": "TimelineComment represents a timeline comment (comment of any type) on a commit or issue",
+      "properties": {
+        "assignee": {
+          "$ref": "#/definitions/User"
+        },
+        "assignee_team": {
+          "$ref": "#/definitions/Team"
+        },
+        "body": {
+          "description": "Body contains the timeline event content",
+          "type": "string",
+          "x-go-name": "Body"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "dependent_issue": {
+          "$ref": "#/definitions/Issue"
+        },
+        "html_url": {
+          "description": "HTMLURL is the web URL for viewing the comment",
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the timeline comment",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "issue_url": {
+          "description": "IssueURL is the API URL for the issue",
+          "type": "string",
+          "x-go-name": "IssueURL"
+        },
+        "label": {
+          "$ref": "#/definitions/Label"
+        },
+        "milestone": {
+          "$ref": "#/definitions/Milestone"
+        },
+        "new_ref": {
+          "type": "string",
+          "x-go-name": "NewRef"
+        },
+        "new_title": {
+          "type": "string",
+          "x-go-name": "NewTitle"
+        },
+        "old_milestone": {
+          "$ref": "#/definitions/Milestone"
+        },
+        "old_project_id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "OldProjectID"
+        },
+        "old_ref": {
+          "type": "string",
+          "x-go-name": "OldRef"
+        },
+        "old_title": {
+          "type": "string",
+          "x-go-name": "OldTitle"
+        },
+        "project_id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ProjectID"
+        },
+        "pull_request_url": {
+          "description": "PRURL is the API URL for the pull request (if applicable)",
+          "type": "string",
+          "x-go-name": "PRURL"
+        },
+        "ref_action": {
+          "type": "string",
+          "x-go-name": "RefAction"
+        },
+        "ref_comment": {
+          "$ref": "#/definitions/Comment"
+        },
+        "ref_commit_sha": {
+          "description": "commit SHA where issue/PR was referenced",
+          "type": "string",
+          "x-go-name": "RefCommitSHA"
+        },
+        "ref_issue": {
+          "$ref": "#/definitions/Issue"
+        },
+        "removed_assignee": {
+          "description": "whether the assignees were removed or added",
+          "type": "boolean",
+          "x-go-name": "RemovedAssignee"
+        },
+        "resolve_doer": {
+          "$ref": "#/definitions/User"
+        },
+        "review_id": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ReviewID"
+        },
+        "tracked_time": {
+          "$ref": "#/definitions/TrackedTime"
+        },
+        "type": {
+          "description": "Type indicates the type of timeline event",
+          "type": "string",
+          "x-go-name": "Type"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Updated"
+        },
+        "user": {
+          "$ref": "#/definitions/User"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "TrackedTime": {
+      "description": "TrackedTime worked time for an issue / pr",
+      "properties": {
+        "created": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "id": {
+          "description": "ID is the unique identifier for the tracked time entry",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "issue": {
+          "$ref": "#/definitions/Issue"
+        },
+        "issue_id": {
+          "description": "deprecated (only for backwards compatibility)",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "IssueID"
+        },
+        "time": {
+          "description": "Time in seconds",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Time"
+        },
+        "user_id": {
+          "description": "deprecated (only for backwards compatibility)",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "UserID"
+        },
+        "user_name": {
+          "description": "username of the user",
+          "type": "string",
+          "x-go-name": "UserName"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "User": {
+      "description": "User represents a user",
+      "properties": {
+        "active": {
+          "description": "Is user active",
+          "type": "boolean",
+          "x-go-name": "IsActive"
+        },
+        "avatar_url": {
+          "description": "URL to the user's avatar",
+          "type": "string",
+          "x-go-name": "AvatarURL"
+        },
+        "created": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "Created"
+        },
+        "description": {
+          "description": "the user's description",
+          "type": "string",
+          "x-go-name": "Description"
+        },
+        "email": {
+          "format": "email",
+          "type": "string",
+          "x-go-name": "Email"
+        },
+        "followers_count": {
+          "description": "user counts",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Followers"
+        },
+        "following_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "Following"
+        },
+        "full_name": {
+          "description": "the user's full name",
+          "type": "string",
+          "x-go-name": "FullName"
+        },
+        "html_url": {
+          "description": "URL to the user's gitea page",
+          "type": "string",
+          "x-go-name": "HTMLURL"
+        },
+        "id": {
+          "description": "the user's id",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "ID"
+        },
+        "is_admin": {
+          "description": "Is the user an administrator",
+          "type": "boolean",
+          "x-go-name": "IsAdmin"
+        },
+        "language": {
+          "description": "User locale",
+          "type": "string",
+          "x-go-name": "Language"
+        },
+        "last_login": {
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "LastLogin"
+        },
+        "location": {
+          "description": "the user's location",
+          "type": "string",
+          "x-go-name": "Location"
+        },
+        "login": {
+          "description": "login of the user, same as `username`",
+          "type": "string",
+          "x-go-name": "UserName"
+        },
+        "login_name": {
+          "default": "empty",
+          "description": "identifier of the user, provided by the external authenticator (if configured)",
+          "type": "string",
+          "x-go-name": "LoginName"
+        },
+        "prohibit_login": {
+          "description": "Is user login prohibited",
+          "type": "boolean",
+          "x-go-name": "ProhibitLogin"
+        },
+        "restricted": {
+          "description": "Is user restricted",
+          "type": "boolean",
+          "x-go-name": "Restricted"
+        },
+        "source_id": {
+          "description": "The ID of the user's Authentication Source",
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "SourceID"
+        },
+        "starred_repos_count": {
+          "format": "int64",
+          "type": "integer",
+          "x-go-name": "StarredRepos"
+        },
+        "visibility": {
+          "description": "User visibility level option: public, limited, private",
+          "type": "string",
+          "x-go-name": "Visibility"
+        },
+        "website": {
+          "description": "the user's website",
+          "type": "string",
+          "x-go-name": "Website"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "UserBadgeOption": {
+      "description": "UserBadgeOption options for link between users and badges",
+      "properties": {
+        "badge_slugs": {
+          "example": [
+            "badge1",
+            "badge2"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-go-name": "BadgeSlugs"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    },
+    "WatchInfo": {
+      "description": "WatchInfo represents an API watch status of one repository",
+      "properties": {
+        "created_at": {
+          "description": "The timestamp when the watch status was created",
+          "format": "date-time",
+          "type": "string",
+          "x-go-name": "CreatedAt"
+        },
+        "ignored": {
+          "description": "Whether notifications for the repository are ignored",
+          "type": "boolean",
+          "x-go-name": "Ignored"
+        },
+        "reason": {
+          "description": "The reason for the current watch status",
+          "x-go-name": "Reason"
+        },
+        "repository_url": {
+          "description": "The URL of the repository being watched",
+          "type": "string",
+          "x-go-name": "RepositoryURL"
+        },
+        "subscribed": {
+          "description": "Whether the repository is being watched for notifications",
+          "type": "boolean",
+          "x-go-name": "Subscribed"
+        },
+        "url": {
+          "description": "The URL for managing the watch status",
+          "type": "string",
+          "x-go-name": "URL"
+        }
+      },
+      "type": "object",
+      "x-go-package": "code.gitea.io/gitea/modules/structs"
+    }
+  },
+  "info": {
+    "description": "This documentation describes the Gitea API.",
+    "license": {
+      "name": "MIT",
+      "url": "http://opensource.org/licenses/MIT"
+    },
+    "title": "Gitea API",
+    "version": "1.25.5"
+  },
+  "paths": {
+    "/admin/users": {
+      "get": {
+        "operationId": "adminSearchUsers",
+        "parameters": [
+          {
+            "description": "ID of the user's login source to search for",
+            "format": "int64",
+            "in": "query",
+            "name": "source_id",
+            "type": "integer"
+          },
+          {
+            "description": "identifier of the user, provided by the external authenticator",
+            "in": "query",
+            "name": "login_name",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/UserList"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          }
+        },
+        "summary": "Search users according filter conditions",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminCreateUser",
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/CreateUserOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/User"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Create a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}": {
+      "delete": {
+        "operationId": "adminDeleteUser",
+        "parameters": [
+          {
+            "description": "username of the user to delete",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "purge the user from the system completely",
+            "in": "query",
+            "name": "purge",
+            "type": "boolean"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Delete a user",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminEditUser",
+        "parameters": [
+          {
+            "description": "username of the user whose data is to be edited",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditUserOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/User"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Edit an existing user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/badges": {
+      "delete": {
+        "operationId": "adminDeleteUserBadges",
+        "parameters": [
+          {
+            "description": "username of the user whose badge is to be deleted",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/UserBadgeOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Remove a badge from a user",
+        "tags": [
+          "admin"
+        ]
+      },
+      "get": {
+        "operationId": "adminListUserBadges",
+        "parameters": [
+          {
+            "description": "username of the user whose badges are to be listed",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/BadgeList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List a user's badges",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminAddUserBadges",
+        "parameters": [
+          {
+            "description": "username of the user to whom a badge is to be added",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/UserBadgeOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          }
+        },
+        "summary": "Add a badge to a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/keys": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminCreatePublicKey",
+        "parameters": [
+          {
+            "description": "username of the user who is to receive a public key",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "key",
+            "schema": {
+              "$ref": "#/definitions/CreateKeyOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/PublicKey"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Add a public key on behalf of a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/keys/{id}": {
+      "delete": {
+        "operationId": "adminDeleteUserPublicKey",
+        "parameters": [
+          {
+            "description": "username of the user whose public key is to be deleted",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the key to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete a user's public key",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/orgs": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminCreateOrg",
+        "parameters": [
+          {
+            "description": "username of the user who will own the created organization",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "organization",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/CreateOrgOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Organization"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Create an organization",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/rename": {
+      "post": {
+        "operationId": "adminRenameUser",
+        "parameters": [
+          {
+            "description": "current username of the user",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/RenameUserOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Rename a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/users/{username}/repos": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "adminCreateRepo",
+        "parameters": [
+          {
+            "description": "username of the user who will own the created repository",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/CreateRepoOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Repository"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "409": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Create a repository on behalf of a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/repos/issues/search": {
+      "get": {
+        "operationId": "issueSearchIssues",
+        "parameters": [
+          {
+            "default": "open",
+            "description": "State of the issue",
+            "enum": [
+              "open",
+              "closed",
+              "all"
+            ],
+            "in": "query",
+            "name": "state",
+            "type": "string"
+          },
+          {
+            "description": "Comma-separated list of label names. Fetch only issues that have any of these labels. Non existent labels are discarded.",
+            "in": "query",
+            "name": "labels",
+            "type": "string"
+          },
+          {
+            "description": "Comma-separated list of milestone names. Fetch only issues that have any of these milestones. Non existent milestones are discarded.",
+            "in": "query",
+            "name": "milestones",
+            "type": "string"
+          },
+          {
+            "description": "Search string",
+            "in": "query",
+            "name": "q",
+            "type": "string"
+          },
+          {
+            "description": "Repository ID to prioritize in the results",
+            "format": "int64",
+            "in": "query",
+            "name": "priority_repo_id",
+            "type": "integer"
+          },
+          {
+            "description": "Filter by issue type",
+            "enum": [
+              "issues",
+              "pulls"
+            ],
+            "in": "query",
+            "name": "type",
+            "type": "string"
+          },
+          {
+            "description": "Only show issues updated after the given time (RFC 3339 format)",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "Only show issues updated before the given time (RFC 3339 format)",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          },
+          {
+            "default": false,
+            "description": "Filter issues or pulls assigned to the authenticated user",
+            "in": "query",
+            "name": "assigned",
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Filter issues or pulls created by the authenticated user",
+            "in": "query",
+            "name": "created",
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Filter issues or pulls mentioning the authenticated user",
+            "in": "query",
+            "name": "mentioned",
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Filter pull requests where the authenticated user's review was requested",
+            "in": "query",
+            "name": "review_requested",
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Filter pull requests reviewed by the authenticated user",
+            "in": "query",
+            "name": "reviewed",
+            "type": "boolean"
+          },
+          {
+            "description": "Filter by repository owner",
+            "in": "query",
+            "name": "owner",
+            "type": "string"
+          },
+          {
+            "description": "Filter by team (requires organization owner parameter)",
+            "in": "query",
+            "name": "team",
+            "type": "string"
+          },
+          {
+            "default": 1,
+            "description": "Page number of results to return (1-based)",
+            "in": "query",
+            "minimum": 1,
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "Number of items per page",
+            "in": "query",
+            "minimum": 0,
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/IssueList"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Search for issues across the repositories that the user has access to",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues": {
+      "get": {
+        "operationId": "issueListIssues",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "whether issue is open or closed",
+            "enum": [
+              "closed",
+              "open",
+              "all"
+            ],
+            "in": "query",
+            "name": "state",
+            "type": "string"
+          },
+          {
+            "description": "comma separated list of labels. Fetch only issues that have any of this labels. Non existent labels are discarded",
+            "in": "query",
+            "name": "labels",
+            "type": "string"
+          },
+          {
+            "description": "search string",
+            "in": "query",
+            "name": "q",
+            "type": "string"
+          },
+          {
+            "description": "filter by type (issues / pulls) if set",
+            "enum": [
+              "issues",
+              "pulls"
+            ],
+            "in": "query",
+            "name": "type",
+            "type": "string"
+          },
+          {
+            "description": "comma separated list of milestone names or ids. It uses names and fall back to ids. Fetch only issues that have any of this milestones. Non existent milestones are discarded",
+            "in": "query",
+            "name": "milestones",
+            "type": "string"
+          },
+          {
+            "description": "Only show items updated after the given time. This is a timestamp in RFC 3339 format",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "Only show items updated before the given time. This is a timestamp in RFC 3339 format",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          },
+          {
+            "description": "Only show items which were created by the given user",
+            "in": "query",
+            "name": "created_by",
+            "type": "string"
+          },
+          {
+            "description": "Only show items for which the given user is assigned",
+            "in": "query",
+            "name": "assigned_by",
+            "type": "string"
+          },
+          {
+            "description": "Only show items in which the given user was mentioned",
+            "in": "query",
+            "name": "mentioned_by",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/IssueList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List a repository's issues",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueCreateIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/CreateIssueOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Issue"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "412": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Create an issue. If using deadline only the date will be taken into account, and time of day ignored.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments": {
+      "get": {
+        "operationId": "issueGetRepoComments",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "if provided, only comments updated since the provided time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "if provided, only comments updated before the provided time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/CommentList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List all comments in a repository",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments/{id}": {
+      "delete": {
+        "operationId": "issueDeleteComment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of comment to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete a comment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueGetComment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Comment"
+          },
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a comment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditComment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditIssueCommentOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Comment"
+          },
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Edit a comment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments/{id}/assets": {
+      "get": {
+        "operationId": "issueListIssueCommentAttachments",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/AttachmentList"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          }
+        },
+        "summary": "List comment's attachments",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data"
+        ],
+        "operationId": "issueCreateIssueCommentAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "name of the attachment",
+            "in": "query",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "description": "attachment to upload",
+            "in": "formData",
+            "name": "attachment",
+            "required": true,
+            "type": "file"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Attachment"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "413": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Create a comment attachment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments/{id}/assets/{attachment_id}": {
+      "delete": {
+        "operationId": "issueDeleteIssueCommentAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Delete a comment attachment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetIssueCommentAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to get",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Attachment"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          }
+        },
+        "summary": "Get a comment attachment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditIssueCommentAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditAttachmentOptions"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Attachment"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Edit a comment attachment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/comments/{id}/reactions": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueDeleteCommentReaction",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "content",
+            "schema": {
+              "$ref": "#/definitions/EditReactionOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Remove a reaction from a comment of an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueGetCommentReactions",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/ReactionList"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a list of reactions from a comment of an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issuePostCommentReaction",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the comment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "content",
+            "schema": {
+              "$ref": "#/definitions/EditReactionOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Reaction"
+          },
+          "201": {
+            "$ref": "#/responses/Reaction"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Add a reaction to a comment of an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/pinned": {
+      "get": {
+        "operationId": "repoListPinnedIssues",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/IssueList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List a repo's pinned issues",
+        "tags": [
+          "repository"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}": {
+      "delete": {
+        "operationId": "issueDelete",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of issue to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to get",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Issue"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditIssueOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Issue"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "412": {
+            "$ref": "#/responses/error"
+          }
+        },
+        "summary": "Edit an issue. If using deadline only the date will be taken into account, and time of day ignored.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/assets": {
+      "get": {
+        "operationId": "issueListIssueAttachments",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/AttachmentList"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          }
+        },
+        "summary": "List issue's attachments",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data"
+        ],
+        "operationId": "issueCreateIssueAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "name of the attachment",
+            "in": "query",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "description": "attachment to upload",
+            "in": "formData",
+            "name": "attachment",
+            "required": true,
+            "type": "file"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Attachment"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "413": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Create an issue attachment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/assets/{attachment_id}": {
+      "delete": {
+        "operationId": "issueDeleteIssueAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Delete an issue attachment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetIssueAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to get",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Attachment"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          }
+        },
+        "summary": "Get an issue attachment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditIssueAttachment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the attachment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditAttachmentOptions"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Attachment"
+          },
+          "404": {
+            "$ref": "#/responses/error"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Edit an issue attachment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/blocks": {
+      "delete": {
+        "operationId": "issueRemoveIssueBlocking",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueMeta"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Issue"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Unblock the issue given in the body by the issue in path",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueListBlocks",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/IssueList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List issues that are blocked by this issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "operationId": "issueCreateIssueBlocking",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueMeta"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Issue"
+          },
+          "404": {
+            "description": "the issue does not exist"
+          }
+        },
+        "summary": "Block the issue given in the body by the issue in path",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/comments": {
+      "get": {
+        "operationId": "issueGetComments",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "if provided, only comments updated since the specified time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "if provided, only comments updated before the provided time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/CommentList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List all comments on an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueCreateComment",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/CreateIssueCommentOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Comment"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Add a comment to an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/comments/{id}": {
+      "delete": {
+        "deprecated": true,
+        "operationId": "issueDeleteCommentDeprecated",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "this parameter is ignored",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of comment to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete a comment",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "deprecated": true,
+        "operationId": "issueEditCommentDeprecated",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "this parameter is ignored",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the comment to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditIssueCommentOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Comment"
+          },
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Edit a comment",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/deadline": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditIssueDeadline",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to create or update a deadline on",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditDeadlineOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/IssueDeadline"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Set an issue deadline. If set to null, the deadline is deleted. If using deadline only the date will be taken into account, and time of day ignored.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/dependencies": {
+      "delete": {
+        "operationId": "issueRemoveIssueDependencies",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueMeta"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Issue"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Remove an issue dependency",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueListIssueDependencies",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/IssueList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List an issue's dependencies, i.e all issues that block this issue.",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "operationId": "issueCreateIssueDependencies",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueMeta"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Issue"
+          },
+          "404": {
+            "description": "the issue does not exist"
+          },
+          "423": {
+            "$ref": "#/responses/repoArchivedError"
+          }
+        },
+        "summary": "Make the issue in the url depend on the issue in the form.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/labels": {
+      "delete": {
+        "operationId": "issueClearLabels",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Remove all labels from an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetLabels",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/LabelList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get an issue's labels",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueAddLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueLabelsOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/LabelList"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Add a label to an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueReplaceLabels",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/IssueLabelsOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/LabelList"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Replace an issue's labels",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/labels/{id}": {
+      "delete": {
+        "operationId": "issueRemoveLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of the label to remove",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Remove a label from an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/lock": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueUnlockIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Unlock an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueLockIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/LockIssueOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Lock an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/pin": {
+      "delete": {
+        "operationId": "unpinIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of issue to unpin",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Unpin an Issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "operationId": "pinIssue",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of issue to pin",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Pin an Issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/pin/{position}": {
+      "patch": {
+        "operationId": "moveIssuePin",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "the new position",
+            "format": "int64",
+            "in": "path",
+            "name": "position",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Moves the Pin to the given Position",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/reactions": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueDeleteIssueReaction",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "content",
+            "schema": {
+              "$ref": "#/definitions/EditReactionOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Remove a reaction from an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueGetIssueReactions",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/ReactionList"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a list reactions of an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issuePostIssueReaction",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "content",
+            "schema": {
+              "$ref": "#/definitions/EditReactionOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Reaction"
+          },
+          "201": {
+            "$ref": "#/responses/Reaction"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Add a reaction to an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/stopwatch/delete": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueDeleteStopWatch",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to stop the stopwatch on",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "description": "Not repo writer, user does not have rights to toggle stopwatch"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "409": {
+            "description": "Cannot cancel a non-existent stopwatch"
+          }
+        },
+        "summary": "Delete an issue's existing stopwatch.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/stopwatch/start": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueStartStopWatch",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to create the stopwatch on",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "description": "Not repo writer, user does not have rights to toggle stopwatch"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "409": {
+            "description": "Cannot start a stopwatch again if it already exists"
+          }
+        },
+        "summary": "Start stopwatch on an issue.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/stopwatch/stop": {
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueStopStopWatch",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to stop the stopwatch on",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/empty"
+          },
+          "403": {
+            "description": "Not repo writer, user does not have rights to toggle stopwatch"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "409": {
+            "description": "Cannot stop a non-existent stopwatch"
+          }
+        },
+        "summary": "Stop an issue's existing stopwatch.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/subscriptions": {
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueSubscriptions",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/UserList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get users who subscribed on an issue.",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/subscriptions/check": {
+      "get": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueCheckSubscription",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/WatchInfo"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Check if user is subscribed to an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/subscriptions/{user}": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueDeleteSubscription",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "username of the user to unsubscribe from an issue",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Already unsubscribed"
+          },
+          "201": {
+            "description": "Successfully Unsubscribed"
+          },
+          "304": {
+            "description": "User can only subscribe itself if he is no admin"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Unsubscribe user from issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueAddSubscription",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "username of the user to subscribe the issue to",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Already subscribed"
+          },
+          "201": {
+            "description": "Successfully Subscribed"
+          },
+          "304": {
+            "description": "User can only subscribe itself if he is no admin"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Subscribe user to issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/timeline": {
+      "get": {
+        "operationId": "issueGetCommentsAndTimeline",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "if provided, only comments updated since the specified time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          },
+          {
+            "description": "if provided, only comments updated before the provided time are returned.",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/TimelineList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List all comments and events on an issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/times": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueResetTime",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue to add tracked time to",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Reset a tracked time of an issue",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueTrackedTimes",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "optional filter by user (available for issue managers)",
+            "in": "query",
+            "name": "user",
+            "type": "string"
+          },
+          {
+            "description": "Only show times updated after the given time. This is a timestamp in RFC 3339 format",
+            "format": "date-time",
+            "in": "query",
+            "name": "since",
+            "type": "string"
+          },
+          {
+            "description": "Only show times updated before the given time. This is a timestamp in RFC 3339 format",
+            "format": "date-time",
+            "in": "query",
+            "name": "before",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/TrackedTimeList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "List an issue's tracked times",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueAddTime",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/AddTimeOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/TrackedTime"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Add tracked time to a issue",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{index}/times/{id}": {
+      "delete": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueDeleteTime",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "index of the issue",
+            "format": "int64",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "description": "id of time to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete specific tracked time",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/labels": {
+      "get": {
+        "operationId": "issueListLabels",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/LabelList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get all of a repository's labels",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueCreateLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/CreateLabelOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Label"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Create a label",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/labels/{id}": {
+      "delete": {
+        "operationId": "issueDeleteLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the label to delete",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete a label",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the label to get",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Label"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a single label",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditLabel",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "id of the label to edit",
+            "format": "int64",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditLabelOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Label"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          },
+          "422": {
+            "$ref": "#/responses/validationError"
+          }
+        },
+        "summary": "Update a label",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/milestones": {
+      "get": {
+        "operationId": "issueGetMilestonesList",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Milestone state, Recognized values are open, closed and all. Defaults to \"open\"",
+            "in": "query",
+            "name": "state",
+            "type": "string"
+          },
+          {
+            "description": "filter by milestone name",
+            "in": "query",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "description": "page number of results to return (1-based)",
+            "in": "query",
+            "name": "page",
+            "type": "integer"
+          },
+          {
+            "description": "page size of results",
+            "in": "query",
+            "name": "limit",
+            "type": "integer"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/MilestoneList"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get all of a repository's opened milestones",
+        "tags": [
+          "issue"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueCreateMilestone",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/CreateMilestoneOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "201": {
+            "$ref": "#/responses/Milestone"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Create a milestone",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/repos/{owner}/{repo}/milestones/{id}": {
+      "delete": {
+        "operationId": "issueDeleteMilestone",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the milestone to delete, identified by ID and if not available by name",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "204": {
+            "$ref": "#/responses/empty"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Delete a milestone",
+        "tags": [
+          "issue"
+        ]
+      },
+      "get": {
+        "operationId": "issueGetMilestone",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the milestone to get, identified by ID and if not available by name",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Milestone"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a milestone",
+        "tags": [
+          "issue"
+        ]
+      },
+      "patch": {
+        "consumes": [
+          "application/json"
+        ],
+        "operationId": "issueEditMilestone",
+        "parameters": [
+          {
+            "description": "owner of the repo",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "name of the repo",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the milestone to edit, identified by ID and if not available by name",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "$ref": "#/definitions/EditMilestoneOption"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/Milestone"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Update a milestone",
+        "tags": [
+          "issue"
+        ]
+      }
+    },
+    "/user": {
+      "get": {
+        "operationId": "userGetCurrent",
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/User"
+          }
+        },
+        "summary": "Get the authenticated user",
+        "tags": [
+          "user"
+        ]
+      }
+    },
+    "/users/{username}": {
+      "get": {
+        "operationId": "userGet",
+        "parameters": [
+          {
+            "description": "username of the user whose data is to be listed",
+            "in": "path",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/User"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        },
+        "summary": "Get a user",
+        "tags": [
+          "user"
+        ]
+      }
+    }
+  },
+  "produces": [
+    "application/json",
+    "text/html"
+  ],
+  "responses": {
+    "Attachment": {
+      "description": "Attachment",
+      "schema": {
+        "$ref": "#/definitions/Attachment"
+      }
+    },
+    "AttachmentList": {
+      "description": "AttachmentList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Attachment"
+        },
+        "type": "array"
+      }
+    },
+    "BadgeList": {
+      "description": "BadgeList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Badge"
+        },
+        "type": "array"
+      }
+    },
+    "Comment": {
+      "description": "Comment",
+      "schema": {
+        "$ref": "#/definitions/Comment"
+      }
+    },
+    "CommentList": {
+      "description": "CommentList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Comment"
+        },
+        "type": "array"
+      }
+    },
+    "Issue": {
+      "description": "Issue",
+      "schema": {
+        "$ref": "#/definitions/Issue"
+      }
+    },
+    "IssueDeadline": {
+      "description": "IssueDeadline",
+      "schema": {
+        "$ref": "#/definitions/IssueDeadline"
+      }
+    },
+    "IssueList": {
+      "description": "IssueList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Issue"
+        },
+        "type": "array"
+      }
+    },
+    "Label": {
+      "description": "Label",
+      "schema": {
+        "$ref": "#/definitions/Label"
+      }
+    },
+    "LabelList": {
+      "description": "LabelList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Label"
+        },
+        "type": "array"
+      }
+    },
+    "Milestone": {
+      "description": "Milestone",
+      "schema": {
+        "$ref": "#/definitions/Milestone"
+      }
+    },
+    "MilestoneList": {
+      "description": "MilestoneList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Milestone"
+        },
+        "type": "array"
+      }
+    },
+    "Organization": {
+      "description": "Organization",
+      "schema": {
+        "$ref": "#/definitions/Organization"
+      }
+    },
+    "PublicKey": {
+      "description": "PublicKey",
+      "schema": {
+        "$ref": "#/definitions/PublicKey"
+      }
+    },
+    "Reaction": {
+      "description": "Reaction",
+      "schema": {
+        "$ref": "#/definitions/Reaction"
+      }
+    },
+    "ReactionList": {
+      "description": "ReactionList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/Reaction"
+        },
+        "type": "array"
+      }
+    },
+    "Repository": {
+      "description": "Repository",
+      "schema": {
+        "$ref": "#/definitions/Repository"
+      }
+    },
+    "TimelineList": {
+      "description": "TimelineList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/TimelineComment"
+        },
+        "type": "array"
+      }
+    },
+    "TrackedTime": {
+      "description": "TrackedTime",
+      "schema": {
+        "$ref": "#/definitions/TrackedTime"
+      }
+    },
+    "TrackedTimeList": {
+      "description": "TrackedTimeList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/TrackedTime"
+        },
+        "type": "array"
+      }
+    },
+    "User": {
+      "description": "User",
+      "schema": {
+        "$ref": "#/definitions/User"
+      }
+    },
+    "UserList": {
+      "description": "UserList",
+      "schema": {
+        "items": {
+          "$ref": "#/definitions/User"
+        },
+        "type": "array"
+      }
+    },
+    "WatchInfo": {
+      "description": "WatchInfo",
+      "schema": {
+        "$ref": "#/definitions/WatchInfo"
+      }
+    },
+    "empty": {
+      "description": "APIEmpty is an empty response"
+    },
+    "error": {
+      "description": "APIError is error format response",
+      "headers": {
+        "message": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "forbidden": {
+      "description": "APIForbiddenError is a forbidden error response",
+      "headers": {
+        "message": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "notFound": {
+      "description": "APINotFound is a not found empty response"
+    },
+    "repoArchivedError": {
+      "description": "APIRepoArchivedError is an error that is raised when an archived repo should be modified",
+      "headers": {
+        "message": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "validationError": {
+      "description": "APIValidationError is error format response related to input validation",
+      "headers": {
+        "message": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "schemes": [
+    "https",
+    "http"
+  ],
+  "security": [
+    {
+      "BasicAuth": []
+    },
+    {
+      "Token": []
+    },
+    {
+      "AccessToken": []
+    },
+    {
+      "AuthorizationHeaderToken": []
+    },
+    {
+      "SudoParam": []
+    },
+    {
+      "SudoHeader": []
+    },
+    {
+      "TOTPHeader": []
+    }
+  ],
+  "securityDefinitions": {
+    "AccessToken": {
+      "description": "This authentication option is deprecated for removal in Gitea 1.23. Please use AuthorizationHeaderToken instead.",
+      "in": "query",
+      "name": "access_token",
+      "type": "apiKey"
+    },
+    "AuthorizationHeaderToken": {
+      "description": "API tokens must be prepended with \"token\" followed by a space.",
+      "in": "header",
+      "name": "Authorization",
+      "type": "apiKey"
+    },
+    "BasicAuth": {
+      "type": "basic"
+    },
+    "SudoHeader": {
+      "description": "Sudo API request as the user provided as the key. Admin privileges are required.",
+      "in": "header",
+      "name": "Sudo",
+      "type": "apiKey"
+    },
+    "SudoParam": {
+      "description": "Sudo API request as the user provided as the key. Admin privileges are required.",
+      "in": "query",
+      "name": "sudo",
+      "type": "apiKey"
+    },
+    "TOTPHeader": {
+      "description": "Must be used in combination with BasicAuth if two-factor authentication is enabled.",
+      "in": "header",
+      "name": "X-GITEA-OTP",
+      "type": "apiKey"
+    },
+    "Token": {
+      "description": "This authentication option is deprecated for removal in Gitea 1.23. Please use AuthorizationHeaderToken instead.",
+      "in": "query",
+      "name": "token",
+      "type": "apiKey"
+    }
+  },
+  "swagger": "2.0"
+}

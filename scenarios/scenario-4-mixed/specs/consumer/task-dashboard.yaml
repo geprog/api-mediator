@@ -1,0 +1,151 @@
+# CONSUMER spec: the API the "task-dashboard" app wishes existed.
+#
+# Registered with the mediator as a CONSUMER spec and served by it as a virtual
+# provider, backed by THREE providers at once (Gitea, Forgejo, Vikunja) — the
+# aggregation scenario (docs/architecture/adapter-engine.md):
+#
+#   GET /work-items          -> collection-union over
+#                                 Gitea   GET /repos/issues/search   (global, no path params)
+#                                 Forgejo GET /repos/issues/search
+#                                 Vikunja GET /api/v1/tasks
+#                               `q` pushes down to each backend's search param;
+#                               page/pageSize never push down (the mediator
+#                               paginates the merged union); dedup key: headline.
+#   POST /collections/{collectionId}/work-items
+#                            -> single binding to Vikunja PUT /api/v1/projects/{id}/tasks
+#                               (writes must be single-binding; the Gitea/Forgejo
+#                               creates are rejected bindings — their {owner}/{repo}
+#                               path params have no consumer counterpart).
+#
+# There is deliberately NO GET /work-items/{itemId}: native ids don't align
+# across backends, so a by-id union is unresolvable without RecordLinks — a
+# documented modeling-limitation probe.
+#
+# Response-phase ground truth per backend (see ../ground-truth.yaml):
+#   Gitea/Forgejo: number->itemId (coerce), title->headline, body->body,
+#                  state->finished (open|closed -> bool), updated_at->lastChanged,
+#                  due_date->due
+#   Vikunja:       id->itemId (coerce), title->headline, description->body,
+#                  done->finished (rename), updated->lastChanged, due_date->due
+#   `source` is annotated by the mediator per collection-union semantics —
+#   mapped from no backend field.
+openapi: 3.1.0
+info:
+  title: Task Dashboard API
+  description: >-
+    The unified work-item API a landscape dashboard wants to consume. Registered
+    with the mediator as a CONSUMER spec; served by the mediator, backed by
+    Gitea, Forgejo and Vikunja.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:14900
+    description: Reserved host port for the mediator's adapter server in scenario 4.
+
+security:
+  - adapterToken: []
+
+paths:
+  /work-items:
+    get:
+      operationId: listWorkItems
+      summary: List work items across the whole landscape
+      parameters:
+        - name: q
+          in: query
+          description: Free-text search over headline/body.
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: A page of the merged, deduplicated union.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkItem"
+
+  /collections/{collectionId}/work-items:
+    post:
+      operationId: createWorkItem
+      summary: Create a work item in a collection
+      parameters:
+        - name: collectionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewWorkItem"
+      responses:
+        "201":
+          description: The created work item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItem"
+
+components:
+  securitySchemes:
+    adapterToken:
+      type: http
+      scheme: bearer
+      description: Mediator-issued adapter token (docs/architecture/security.md).
+
+  schemas:
+    WorkItem:
+      type: object
+      required: [itemId, headline, finished]
+      properties:
+        itemId:
+          type: string
+          description: Opaque identifier, unique only within its source system.
+        headline:
+          type: string
+        body:
+          type: string
+        finished:
+          type: boolean
+        due:
+          type: string
+          format: date-time
+        lastChanged:
+          type: string
+          format: date-time
+          readOnly: true
+        source:
+          type: string
+          readOnly: true
+          description: >-
+            Which backend the item came from — annotated by the mediator
+            (collection-union semantics), mapped from no backend field.
+
+    NewWorkItem:
+      type: object
+      required: [headline]
+      properties:
+        headline:
+          type: string
+        body:
+          type: string
+        finished:
+          type: boolean
+          default: false

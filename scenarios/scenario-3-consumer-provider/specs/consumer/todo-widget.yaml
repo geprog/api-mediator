@@ -1,0 +1,154 @@
+# CONSUMER spec: the API the "todo-widget" app wishes existed.
+#
+# Per the concept (docs/architecture/adapter-engine.md) the mediator hosts this
+# API itself as a virtual provider and resolves calls against the real backend
+# (Vikunja, the scenario's PROVIDER spec). The mediator never calls the widget.
+#
+# Field shapes are deliberately renamed/coerced against Vikunja's models.Task so
+# mapping detection has genuine transform work. Intended mappings (the ground
+# truth in ../ground-truth.yaml):
+#
+#   GET  /todos                    -> GET  /api/v1/tasks            (global list, no path params)
+#   POST /lists/{listId}/todos     -> PUT  /api/v1/projects/{id}/tasks
+#                                     parameter: listId -> id (string -> int coercion)
+#   POST /todos/{todoId}/complete  -> POST /api/v1/tasks/{id}
+#                                     parameter: todoId -> id; request phase sets
+#                                     the constant done=true (expression transform)
+#
+#   TodoItem.todoId    <- id        (int -> string coercion)
+#   TodoItem.name      <- title     (rename)
+#   TodoItem.notes     <- description (rename)
+#   TodoItem.done      <- done      (direct)
+#   TodoItem.due       <- due_date  (rename)
+#   TodoItem.updatedAt <- updated   (rename)
+openapi: 3.1.0
+info:
+  title: Todo Widget API
+  description: >-
+    The task API a small dashboard widget wants to consume. Registered with the
+    mediator as a CONSUMER spec; served by the mediator, backed by Vikunja.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:13900
+    description: Reserved host port for the mediator's adapter server in scenario 3.
+
+security:
+  - adapterToken: []
+
+paths:
+  /todos:
+    get:
+      operationId: listTodos
+      summary: List all todos visible to the widget
+      parameters:
+        - name: page
+          in: query
+          description: 1-based page number.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: done
+          in: query
+          description: Filter by completion state.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: A page of todos.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TodoItem"
+
+  /lists/{listId}/todos:
+    post:
+      operationId: createTodo
+      summary: Create a todo in a list
+      parameters:
+        - name: listId
+          in: path
+          required: true
+          description: The list to create the todo in.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewTodo"
+      responses:
+        "201":
+          description: The created todo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TodoItem"
+
+  /todos/{todoId}/complete:
+    post:
+      operationId: completeTodo
+      summary: Mark a todo as completed
+      description: >-
+        Takes no request body — the backend update must set the completion flag
+        as a constant in the request phase.
+      parameters:
+        - name: todoId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The completed todo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TodoItem"
+
+components:
+  securitySchemes:
+    adapterToken:
+      type: http
+      scheme: bearer
+      description: Mediator-issued adapter token (docs/architecture/security.md).
+
+  schemas:
+    TodoItem:
+      type: object
+      required: [todoId, name, done]
+      properties:
+        todoId:
+          type: string
+          description: Opaque todo identifier.
+        name:
+          type: string
+          description: Short human-readable title.
+        notes:
+          type: string
+          description: Free-form details.
+        done:
+          type: boolean
+        due:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+
+    NewTodo:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        notes:
+          type: string
+        due:
+          type: string
+          format: date-time

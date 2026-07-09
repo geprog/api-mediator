@@ -1,0 +1,172 @@
+# Ground truth for mapping detection in scenario 1 (Gitea <-> Vikunja).
+#
+# `pairs` are resource pairs the mediator SHOULD detect (with the field
+# mappings a correct detail pass should propose). `negatives` are pairings it
+# must NOT confidently propose — each with a verdict:
+#   ambiguous              acceptable as a low-confidence shortlist entry,
+#                          must not survive review as an auto-approval
+#   no-counterpart         resource has no match in the other app
+#   incorrect-but-tempting looks like a match, is semantically wrong
+#
+# transform kinds mirror docs/architecture/data-model.md FieldMapping:
+#   direct | rename | coerce | aggregate | expression
+#
+# Paths/fields reference the *trimmed* specs unless marked full-spec-only.
+
+meta:
+  scenario: scenario-1-small-overlap
+  specs:
+    gitea:
+      full: specs/full/gitea-1.25.5.swagger.json
+      trimmed: specs/trimmed/gitea.trimmed.swagger.json
+    vikunja:
+      full: specs/full/vikunja-2.3.0.swagger.json
+      trimmed: specs/trimmed/vikunja.trimmed.swagger.json
+  notes:
+    - >-
+      Gitea's issue operations all carry {owner}/{repo} path parameters that a
+      sync ResourceBinding must fix to constants (alice/phoenix) — a deliberate
+      probe of the constant-parameter-binding question. Gitea also offers
+      GET /repos/issues/search (no path params) as an alternative collectionRead.
+    - >-
+      Vikunja uses PUT for create and POST for update — a deliberate probe that
+      operation-mapping must classify by semantics, not verb convention.
+
+pairs:
+  - source: { app: gitea, resource: issues }
+    target: { app: vikunja, resource: tasks }
+    kind: peer-peer
+    operations:
+      list:
+        source: GET /repos/{owner}/{repo}/issues
+        target: GET /tasks
+        alternatives:
+          source: [GET /repos/issues/search]
+          target: ["GET /projects/{id}/views/{view}/tasks"]
+        note: >-
+          Vikunja 2.x has no plain project-scoped GET — the scoped list lives
+          under kanban views (an extra constant path param); the global GET
+          /tasks is the clean collectionRead.
+      read:
+        source: GET /repos/{owner}/{repo}/issues/{index}
+        target: GET /tasks/{id}
+      create:
+        source: POST /repos/{owner}/{repo}/issues
+        target: PUT /projects/{id}/tasks
+      update:
+        source: PATCH /repos/{owner}/{repo}/issues/{index}
+        target: POST /tasks/{id}
+      delete:
+        source: DELETE /repos/{owner}/{repo}/issues/{index}
+        target: DELETE /tasks/{id}
+    identityKey: { source: title, target: title }
+    changeTimestamp: { source: updated_at, target: updated }
+    fields:
+      - { source: title, target: title, transform: direct, note: identity key }
+      - { source: body, target: description, transform: rename }
+      - { source: state, target: done, transform: coerce, note: "enum open|closed -> boolean" }
+      - { source: due_date, target: due_date, transform: direct }
+      - { source: created_at, target: created, transform: rename }
+      - { source: updated_at, target: updated, transform: rename }
+      - { source: closed_at, target: done_at, transform: rename }
+      - { source: "labels[].name", target: "labels[].title", transform: rename, note: nested collection }
+      - { source: "assignees[].login", target: "assignees[].username", transform: rename, note: nested collection }
+    plausible:
+      - { source: number, target: index, note: "both are per-container sequence numbers; mapping them across apps is wrong for sync but a reasonable shortlist guess" }
+    unmapped:
+      source: [milestone, pull_request, is_locked, pin_order, comments, ref, assets, time_estimate]
+      target: [bucket_id, percent_done, priority, hex_color, is_favorite, reminders, repeat_after, related_tasks, start_date, end_date]
+
+  - source: { app: gitea, resource: issue-comments }
+    target: { app: vikunja, resource: task-comments }
+    kind: peer-peer
+    operations:
+      list:
+        source: GET /repos/{owner}/{repo}/issues/{index}/comments
+        target: GET /tasks/{taskID}/comments
+      create:
+        source: POST /repos/{owner}/{repo}/issues/{index}/comments
+        target: PUT /tasks/{taskID}/comments
+    identityKey: { source: null, target: null, note: "comments have no natural business key — expect detection to leave identity unconfirmed, blocking SyncRule enablement (sync-engine.md)" }
+    fields:
+      - { source: body, target: comment, transform: rename }
+      - { source: "user.login", target: "author.username", transform: rename }
+      - { source: created_at, target: created, transform: rename }
+      - { source: updated_at, target: updated, transform: rename }
+
+  - source: { app: gitea, resource: labels }
+    target: { app: vikunja, resource: labels }
+    kind: peer-peer
+    operations:
+      list:
+        source: GET /repos/{owner}/{repo}/labels
+        target: GET /labels
+      read:
+        source: GET /repos/{owner}/{repo}/labels/{id}
+        target: GET /labels/{id}
+      create:
+        source: POST /repos/{owner}/{repo}/labels
+        target: PUT /labels
+      update:
+        source: PATCH /repos/{owner}/{repo}/labels/{id}
+        target: PUT /labels/{id}
+      delete:
+        source: DELETE /repos/{owner}/{repo}/labels/{id}
+        target: DELETE /labels/{id}
+    identityKey: { source: name, target: title }
+    fields:
+      - { source: name, target: title, transform: rename, note: identity key }
+      - { source: color, target: hex_color, transform: rename, note: "both hex-without-hash at rest, but Gitea's create API also accepts #-prefixed" }
+      - { source: description, target: description, transform: direct }
+    unmapped:
+      source: [exclusive, is_archived]
+      target: []
+
+  - source: { app: gitea, resource: users }
+    target: { app: vikunja, resource: users }
+    kind: peer-peer
+    operations:
+      list:
+        source: GET /users
+        target: GET /users
+        note: both are search-style list endpoints (Gitea `q`, Vikunja `s`)
+      create:
+        source: POST /admin/users
+        target: POST /register
+        note: asymmetric — admin-create vs public self-registration
+    identityKey: { source: login, target: username, alternatives: [email] }
+    fields:
+      - { source: login, target: username, transform: rename, note: identity key }
+      - { source: full_name, target: name, transform: rename }
+      - { source: email, target: email, transform: direct }
+      - { source: created, target: created, transform: direct }
+    unmapped:
+      source: [avatar_url, is_admin, location, website, visibility, restricted, prohibit_login]
+      target: []
+
+negatives:
+  - source: { app: gitea, resource: repositories }
+    target: { app: vikunja, resource: projects }
+    verdict: ambiguous
+    note: >-
+      Structural analogs (both contain the work items) but semantically
+      different things — a code repository is not a task project. Full-spec-only
+      (repos CRUD is trimmed away); in the trimmed pair the container concepts
+      appear only as path parameters.
+  - source: { app: gitea, resource: milestones }
+    target: { app: vikunja, resource: buckets }
+    verdict: incorrect-but-tempting
+    note: >-
+      Milestones are deadline groupings; Vikunja buckets are kanban columns of a
+      view. Detection should not propose this as a mapping.
+  - source: { app: gitea, resource: milestones }
+    target: null
+    verdict: no-counterpart
+  - source: { app: vikunja, resource: api-tokens }
+    target: null
+    verdict: no-counterpart
+    note: infrastructure resource, not business data
+  - source: { app: vikunja, resource: project-views }
+    target: null
+    verdict: no-counterpart
+    note: full-spec-only (views are trimmed away)

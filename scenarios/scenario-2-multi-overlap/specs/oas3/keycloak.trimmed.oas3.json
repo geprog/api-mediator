@@ -1,0 +1,4140 @@
+{
+  "components": {
+    "schemas": {
+      "ClientMappingsRepresentation": {
+        "properties": {
+          "client": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mappings": {
+            "items": {
+              "$ref": "#/components/schemas/RoleRepresentation"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Composites": {
+        "properties": {
+          "application": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deprecated": true,
+            "type": "object"
+          },
+          "client": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "realm": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "type": "object"
+      },
+      "CredentialRepresentation": {
+        "properties": {
+          "algorithm": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "config": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MultivaluedHashMapStringString"
+              }
+            ],
+            "deprecated": true,
+            "type": "object"
+          },
+          "counter": {
+            "deprecated": true,
+            "format": "int32",
+            "type": "integer"
+          },
+          "createdDate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "credentialData": {
+            "type": "string"
+          },
+          "device": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "digits": {
+            "deprecated": true,
+            "format": "int32",
+            "type": "integer"
+          },
+          "federationLink": {
+            "type": "string"
+          },
+          "hashIterations": {
+            "deprecated": true,
+            "format": "int32",
+            "type": "integer"
+          },
+          "hashedSaltedValue": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "period": {
+            "deprecated": true,
+            "format": "int32",
+            "type": "integer"
+          },
+          "priority": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "salt": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "secretData": {
+            "type": "string"
+          },
+          "temporary": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          },
+          "userLabel": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorRepresentation": {
+        "properties": {
+          "errorMessage": {
+            "type": "string"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/ErrorRepresentation"
+            },
+            "type": "array"
+          },
+          "field": {
+            "type": "string"
+          },
+          "params": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "FederatedIdentityRepresentation": {
+        "properties": {
+          "identityProvider": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "userName": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GroupRepresentation": {
+        "properties": {
+          "access": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object"
+          },
+          "attributes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "clientRoles": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentId": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "realmRoles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "subGroupCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "subGroups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupRepresentation"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "IssuedVerifiableCredentialRepresentation": {
+        "properties": {
+          "clientBaseUrl": {
+            "type": "string"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "clientName": {
+            "type": "string"
+          },
+          "credentialType": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issuedAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ManagementPermissionReference": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "scopePermissions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "MappingsRepresentation": {
+        "properties": {
+          "clientMappings": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ClientMappingsRepresentation"
+            },
+            "type": "object"
+          },
+          "realmMappings": {
+            "items": {
+              "$ref": "#/components/schemas/RoleRepresentation"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "MultivaluedHashMapStringString": {
+        "additionalProperties": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": "object"
+      },
+      "RoleRepresentation": {
+        "properties": {
+          "attributes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "clientRole": {
+            "type": "boolean"
+          },
+          "composite": {
+            "type": "boolean"
+          },
+          "composites": {
+            "$ref": "#/components/schemas/Composites"
+          },
+          "containerId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scopeParamRequired": {
+            "deprecated": true,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SocialLinkRepresentation": {
+        "properties": {
+          "socialProvider": {
+            "type": "string"
+          },
+          "socialUserId": {
+            "type": "string"
+          },
+          "socialUsername": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UPAttribute": {
+        "properties": {
+          "annotations": {
+            "additionalProperties": {},
+            "type": "object"
+          },
+          "defaultValue": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "multivalued": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/UPAttributePermissions"
+          },
+          "required": {
+            "$ref": "#/components/schemas/UPAttributeRequired"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/UPAttributeSelector"
+          },
+          "validations": {
+            "additionalProperties": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "UPAttributePermissions": {
+        "properties": {
+          "edit": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "view": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "type": "object"
+      },
+      "UPAttributeRequired": {
+        "properties": {
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "type": "object"
+      },
+      "UPAttributeSelector": {
+        "properties": {
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "type": "object"
+      },
+      "UPConfig": {
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/UPAttribute"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/UPGroup"
+            },
+            "type": "array"
+          },
+          "unmanagedAttributePolicy": {
+            "$ref": "#/components/schemas/UnmanagedAttributePolicy"
+          }
+        },
+        "type": "object"
+      },
+      "UPGroup": {
+        "properties": {
+          "annotations": {
+            "additionalProperties": {},
+            "type": "object"
+          },
+          "displayDescription": {
+            "type": "string"
+          },
+          "displayHeader": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UnmanagedAttributePolicy": {
+        "enum": [
+          "ENABLED",
+          "ADMIN_VIEW",
+          "ADMIN_EDIT"
+        ],
+        "type": "string"
+      },
+      "UserConsentRepresentation": {
+        "properties": {
+          "clientId": {
+            "type": "string"
+          },
+          "createdDate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "grantedClientScopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "grantedRealmRoles": {
+            "deprecated": true,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "lastUpdatedDate": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "UserProfileAttributeGroupMetadata": {
+        "properties": {
+          "annotations": {
+            "additionalProperties": {},
+            "type": "object"
+          },
+          "displayDescription": {
+            "type": "string"
+          },
+          "displayHeader": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UserProfileAttributeMetadata": {
+        "properties": {
+          "annotations": {
+            "additionalProperties": {},
+            "type": "object"
+          },
+          "defaultValue": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "multivalued": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "readOnly": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "validators": {
+            "additionalProperties": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "UserProfileMetadata": {
+        "properties": {
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/UserProfileAttributeMetadata"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/UserProfileAttributeGroupMetadata"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "UserRepresentation": {
+        "properties": {
+          "access": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object"
+          },
+          "applicationRoles": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "deprecated": true,
+            "type": "object"
+          },
+          "attributes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "clientConsents": {
+            "items": {
+              "$ref": "#/components/schemas/UserConsentRepresentation"
+            },
+            "type": "array"
+          },
+          "clientRoles": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "createdTimestamp": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialRepresentation"
+            },
+            "type": "array"
+          },
+          "disableableCredentialTypes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "email": {
+            "type": "string"
+          },
+          "emailVerified": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "federatedIdentities": {
+            "items": {
+              "$ref": "#/components/schemas/FederatedIdentityRepresentation"
+            },
+            "type": "array"
+          },
+          "federationLink": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": "string"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issuedVerifiableCredentials": {
+            "items": {
+              "$ref": "#/components/schemas/IssuedVerifiableCredentialRepresentation"
+            },
+            "type": "array"
+          },
+          "lastName": {
+            "type": "string"
+          },
+          "notBefore": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "realmRoles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requiredActions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "self": {
+            "type": "string"
+          },
+          "serviceAccountClientId": {
+            "type": "string"
+          },
+          "socialLinks": {
+            "deprecated": true,
+            "items": {
+              "$ref": "#/components/schemas/SocialLinkRepresentation"
+            },
+            "type": "array"
+          },
+          "totp": {
+            "type": "boolean"
+          },
+          "userProfileMetadata": {
+            "$ref": "#/components/schemas/UserProfileMetadata"
+          },
+          "username": {
+            "type": "string"
+          },
+          "verifiableCredentials": {
+            "items": {
+              "$ref": "#/components/schemas/UserVerifiableCredentialRepresentation"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "UserSessionRepresentation": {
+        "properties": {
+          "clients": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ipAddress": {
+            "type": "string"
+          },
+          "lastAccess": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rememberMe": {
+            "type": "boolean"
+          },
+          "start": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "transientUser": {
+            "type": "boolean"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UserVerifiableCredentialRepresentation": {
+        "properties": {
+          "createdDate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "credentialConfigurationId": {
+            "type": "string"
+          },
+          "credentialScopeName": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "updatedDate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "userAttributes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "This is a REST API reference for the Keycloak Admin REST API.",
+    "title": "Keycloak Admin REST API",
+    "version": "1.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/admin/realms/{realm}/groups": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exact",
+            "schema": {
+              "default": "false",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "first",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "populateHierarchy",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Boolean which defines whether to return the count of subgroups for each group (default: true",
+            "in": "query",
+            "name": "subGroupsCount",
+            "schema": {
+              "default": "true",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GroupRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get group hierarchy.  Only `name` and `id` are returned.  `subGroups` are only returned when using the `search` or `q` parameter. If none of these parameters is provided, the top-level groups are returned without `subGroups` being filled.",
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "This will update the group and set the parent if it exists. Create it and set the parent if the group doesn’t exist.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        },
+        "summary": "create or add a top level realm groupSet or create child.",
+        "tags": [
+          "Groups"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/count": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "top",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Returns the groups counts.",
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "tags": [
+          "Groups"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupRepresentation"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        },
+        "summary": "Update group, ignores subgroups.",
+        "tags": [
+          "Groups"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/{group-id}/children": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Boolean which defines whether brief groups representations are returned or not (default: false)",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": "false",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Boolean which defines whether the params \"search\" must match exactly or not",
+            "in": "query",
+            "name": "exact",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "The position of the first result to be returned (pagination offset).",
+            "in": "query",
+            "name": "first",
+            "schema": {
+              "default": "0",
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The maximum number of results that are to be returned. Defaults to 10",
+            "in": "query",
+            "name": "max",
+            "schema": {
+              "default": "10",
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "A String representing either an exact group name or a partial name, defaults to prefix search.",
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Boolean which defines whether to return the count of subgroups for each subgroup of this group (default: true)",
+            "in": "query",
+            "name": "subGroupsCount",
+            "schema": {
+              "default": "true",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GroupRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Return a paginated list of subgroups that have a parent group corresponding to the group on the URL",
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "This will just set the parent if it exists. Create it and set the parent if the group doesn’t exist.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "409": {
+            "description": "Conflict"
+          }
+        },
+        "summary": "Set or create child.",
+        "tags": [
+          "Groups"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/{group-id}/management/permissions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagementPermissionReference"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Return object stating whether client Authorization permissions have been initialized or not and a reference",
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagementPermissionReference"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagementPermissionReference"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Return object stating whether client Authorization permissions have been initialized or not and a reference",
+        "tags": [
+          "Groups"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/{group-id}/members": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Only return basic information (only guaranteed to return id, username, created, first and last name, email, enabled state, email verification state, federation link, and access. Note that it means that namely user attributes, required actions, and not before are not returned.)",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Pagination offset",
+            "in": "query",
+            "name": "first",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum results size (defaults to 100)",
+            "in": "query",
+            "name": "max",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get users Returns a stream of users, filtered according to query parameters",
+        "tags": [
+          "Groups"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingsRepresentation"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/clients/{client-id}": {
+      "delete": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Delete client-level roles from user or group role mapping",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get client-level role mappings for the user or group, and the app",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Add client-level roles to the user or group role mapping",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/clients/{client-id}/available": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get available client-level roles that can be mapped to the user or group",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/clients/{client-id}/composite": {
+      "get": {
+        "parameters": [
+          {
+            "description": "if false, return roles with their attributes",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get effective client-level role mappings This recurses any composite roles",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm": {
+      "delete": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Delete realm-level role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get realm-level role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Add realm-level role mappings to the user",
+        "tags": [
+          "Role Mapper"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/available": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get realm-level roles that can be mapped",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/groups/{group-id}/role-mappings/realm/composite": {
+      "get": {
+        "parameters": [
+          {
+            "description": "if false, return roles with their attributes",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get effective realm-level role mappings This will recurse all composite roles to get the result.",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "group-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users": {
+      "get": {
+        "description": "Returns a stream of users. Note that the 'credentials' field in the returned UserRepresentation objects is typically not populated for performance reasons. If specific credential metadata is required, use the dedicated 'GET /admin/realms/{realm}/users/{user-id}/credentials' endpoint.",
+        "parameters": [
+          {
+            "description": "Boolean which defines whether brief representations are returned (default: false)",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Only return users created after (inclusive) the given date, in ISO-8601 format (yyyy-MM-dd) or epoch milliseconds",
+            "in": "query",
+            "name": "createdAfter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only return users created before (inclusive) the given date, in ISO-8601 format (yyyy-MM-dd) or epoch milliseconds",
+            "in": "query",
+            "name": "createdBefore",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in email, or the complete email, if param \"exact\" is true",
+            "in": "query",
+            "name": "email",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "whether the email has been verified",
+            "in": "query",
+            "name": "emailVerified",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Boolean representing if user is enabled or not",
+            "in": "query",
+            "name": "enabled",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Boolean which defines whether the params \"last\", \"first\", \"email\" and \"username\" must match exactly",
+            "in": "query",
+            "name": "exact",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Pagination offset",
+            "in": "query",
+            "name": "first",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "A String contained in firstName, or the complete firstName, if param \"exact\" is true",
+            "in": "query",
+            "name": "firstName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The alias of an Identity Provider linked to the user",
+            "in": "query",
+            "name": "idpAlias",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The userId at an Identity Provider linked to the user",
+            "in": "query",
+            "name": "idpUserId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in lastName, or the complete lastName, if param \"exact\" is true",
+            "in": "query",
+            "name": "lastName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum results size (defaults to 100)",
+            "in": "query",
+            "name": "max",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "A query to search for custom attributes, in the format 'key1:value2 key2:value2'",
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in username, first or last name, or email. Default search behavior is prefix-based (e.g., foo or foo*). Use *foo* for infix search and \"foo\" for exact search.",
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in username, or the complete username, if param \"exact\" is true",
+            "in": "query",
+            "name": "username",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get users Returns a stream of users, filtered according to query parameters.",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {},
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Create a new user Username must be unique.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/count": {
+      "get": {
+        "description": "It can be called in three different ways. 1. Don’t specify any criteria and pass {@code null}. The number of all users within that realm will be returned. <p> 2. If {@code search} is specified other criteria such as {@code last} will be ignored even though you set them. The {@code search} string will be matched against the first and last name, the username and the email of a user. <p> 3. If {@code search} is unspecified but any of {@code last}, {@code first}, {@code email} or {@code username} those criteria are matched against their respective fields on a user entity. Combined with a logical and.",
+        "parameters": [
+          {
+            "description": "Only return users created after (inclusive) the given date, in ISO-8601 format (yyyy-MM-dd) or epoch milliseconds",
+            "in": "query",
+            "name": "createdAfter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only return users created before (inclusive) the given date, in ISO-8601 format (yyyy-MM-dd) or epoch milliseconds",
+            "in": "query",
+            "name": "createdBefore",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in email, or the complete email, if param \"exact\" is true",
+            "in": "query",
+            "name": "email",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "whether the email has been verified",
+            "in": "query",
+            "name": "emailVerified",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Boolean representing if user is enabled or not",
+            "in": "query",
+            "name": "enabled",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Boolean which defines whether the params \"last\", \"first\", \"email\" and \"username\" must match exactly",
+            "in": "query",
+            "name": "exact",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "A String contained in firstName, or the complete firstName, if param \"exact\" is true",
+            "in": "query",
+            "name": "firstName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The alias of an Identity Provider linked to the user",
+            "in": "query",
+            "name": "idpAlias",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The userId at an Identity Provider linked to the user",
+            "in": "query",
+            "name": "idpUserId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in lastName, or the complete lastName, if param \"exact\" is true",
+            "in": "query",
+            "name": "lastName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A query to search for custom attributes, in the format 'key1:value2 key2:value2'",
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in username, first or last name, or email. Default search behavior is prefix-based (e.g., foo or foo*). Use *foo* for infix search and \"foo\" for exact search.",
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A String contained in username, or the complete username, if param \"exact\" is true",
+            "in": "query",
+            "name": "username",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Returns the number of users that match the given criteria.",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/profile": {
+      "get": {
+        "description": "Get the configuration for the user profile",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UPConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Set the configuration for the user profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UPConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UPConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/profile/metadata": {
+      "get": {
+        "description": "Get the UserProfileMetadata from the configuration",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfileMetadata"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Delete the user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "get": {
+        "parameters": [
+          {
+            "description": "Indicates if the user profile metadata should be added to the response",
+            "in": "query",
+            "name": "userProfileMetadata",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRepresentation"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get representation of the user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {},
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Update the user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/configured-user-storage-credential-types": {
+      "get": {
+        "description": "Returned values can contain for example \"password\", \"otp\" etc. This will always return empty list for \"local\" users, which are not backed by any user storage",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Return credential types, which are provided by the user storage where user is stored.",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/consents": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": {},
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get consents granted by the user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/consents/{client}": {
+      "delete": {
+        "parameters": [
+          {
+            "description": "Client id",
+            "in": "path",
+            "name": "client",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Revoke consent and offline tokens for particular client from user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/credentials": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CredentialRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credentialId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Remove a credential for a user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}/moveAfter/{newPreviousCredentialId}": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "parameters": [
+          {
+            "description": "The credential to move",
+            "in": "path",
+            "name": "credentialId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The credential that will be the previous element in the list. If set to null, the moved credential will be the first element in the list.",
+            "in": "path",
+            "name": "newPreviousCredentialId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Move a credential to a position behind another credential",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}/moveToFirst": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "parameters": [
+          {
+            "description": "The credential to move",
+            "in": "path",
+            "name": "credentialId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Move a credential to a first position in the credentials list of the user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/credentials/{credentialId}/userLabel": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credentialId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Update a credential label for a user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/disable-credential-types": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Disable all credentials for a user of a specific type",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/execute-actions-email": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "An email contains a link the user can click to perform a set of required actions. The redirectUri and clientId parameters are optional. If no redirect is given, then there will be no link back to click after actions have completed. Redirect uri must be a valid uri for the particular clientId.",
+        "parameters": [
+          {
+            "description": "Client id",
+            "in": "query",
+            "name": "client_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of seconds after which the generated token expires",
+            "in": "query",
+            "name": "lifespan",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Redirect uri",
+            "in": "query",
+            "name": "redirect_uri",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Send an email to the user with a link they can click to execute particular actions.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/federated-identity": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FederatedIdentityRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get social logins associated with the user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/federated-identity/{provider}": {
+      "delete": {
+        "parameters": [
+          {
+            "description": "Social login provider id",
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Remove a social login provider from user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "parameters": [
+          {
+            "description": "Social login provider id",
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FederatedIdentityRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {},
+            "description": "Conflict"
+          }
+        },
+        "summary": "Add a social login provider to the user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/groups": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "first",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GroupRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/groups/count": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/groups/{groupId}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "groupId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/impersonation": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {},
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorRepresentation"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Impersonate the user",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/logout": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Remove all user sessions associated with the user Also send notification to all clients that have an admin URL to invalidate the sessions for the particular user.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/offline-sessions/{clientUuid}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "clientUuid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserSessionRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        },
+        "summary": "Get offline sessions associated with the user and client",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/reset-password": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialRepresentation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Set up a new password for the user.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/reset-password-email": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "deprecated": true,
+        "description": "The redirectUri and clientId parameters are optional. The default for the redirect is the account client. This endpoint has been deprecated.  Please use the execute-actions-email passing a list with UPDATE_PASSWORD within it.",
+        "parameters": [
+          {
+            "description": "client id",
+            "in": "query",
+            "name": "client_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "redirect uri",
+            "in": "query",
+            "name": "redirect_uri",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Send an email to the user with a link they can click to reset their password.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingsRepresentation"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}": {
+      "delete": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Delete client-level roles from user or group role mapping",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get client-level role mappings for the user or group, and the app",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Add client-level roles to the user or group role mapping",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}/available": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get available client-level roles that can be mapped to the user or group",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/clients/{client-id}/composite": {
+      "get": {
+        "parameters": [
+          {
+            "description": "if false, return roles with their attributes",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Get effective client-level role mappings This recurses any composite roles",
+        "tags": [
+          "Client Role Mappings"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "client id (not clientId!)",
+          "in": "path",
+          "name": "client-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/realm": {
+      "delete": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Delete realm-level role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get realm-level role mappings",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/RoleRepresentation"
+                },
+                "type": "array"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Add realm-level role mappings to the user",
+        "tags": [
+          "Role Mapper"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/realm/available": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get realm-level roles that can be mapped",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/role-mappings/realm/composite": {
+      "get": {
+        "parameters": [
+          {
+            "description": "if false, return roles with their attributes",
+            "in": "query",
+            "name": "briefRepresentation",
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RoleRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get effective realm-level role mappings This will recurse all composite roles to get the result.",
+        "tags": [
+          "Role Mapper"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/send-verify-email": {
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "The redirectUri, clientId and lifespan parameters are optional. The default for the redirect is the account client. The default for the lifespan is 12 hours",
+        "parameters": [
+          {
+            "description": "Client id",
+            "in": "query",
+            "name": "client_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of seconds after which the generated token expires",
+            "in": "query",
+            "name": "lifespan",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Redirect uri",
+            "in": "query",
+            "name": "redirect_uri",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {},
+            "description": "Bad Request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {},
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Send an email-verification email to the user An email contains a link the user can click to verify their email address.",
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/admin/realms/{realm}/users/{user-id}/sessions": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserSessionRepresentation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Get sessions associated with the user",
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/admin/realms/{realm}/users/{user-id}/unmanagedAttributes": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "tags": [
+          "Users"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "realm name (not id!)",
+          "in": "path",
+          "name": "realm",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "user-id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  },
+  "tags": [
+    {
+      "name": "Client Role Mappings"
+    },
+    {
+      "name": "Groups"
+    },
+    {
+      "name": "Role Mapper"
+    },
+    {
+      "name": "Users"
+    }
+  ]
+}

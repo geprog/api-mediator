@@ -1,0 +1,4766 @@
+{
+  "definitions": {},
+  "info": {
+    "description": "The REST API allows you to control and extend Wekan with ease.\n\nIf you are an end-user and not a dev or a tester, [create an issue](https://github.com/wekan/wekan/issues/new) to request new APIs.\n\n> All API calls in the documentation are made using `curl`.  However, you are free to use Java / Python / PHP / Golang / Ruby / Swift / Objective-C / Rust / Scala / C# or any other programming languages.\n\n# Production Security Concerns\nWhen calling a production Wekan server, ensure it is running via HTTPS and has a valid SSL Certificate. The login method requires you to post your username and password in plaintext, which is why we highly suggest only calling the REST login api over HTTPS. Also, few things to note:\n\n* Only call via HTTPS\n* Implement a timed authorization token expiration strategy\n* Ensure the calling user only has permissions for what they are calling and no more\n",
+    "title": "Wekan REST API",
+    "version": "v9.57"
+  },
+  "paths": {
+    "/api/boards": {
+      "get": {
+        "operationId": "get_boards",
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_boards",
+        "parameters": null,
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/import": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "description": "Accepts a WeKan board export JSON (the body returned by\n `GET /api/boards/:boardId/export`) and recreates the board \u2014 including its\n **rules / triggers / actions (workflows)** and other data \u2014 in the\n authenticated user's account. Combined with the export endpoint, this allows\n migrating all boards (and their workflows) from another WeKan instance over the\n REST API: list the remote boards, export each, then POST each here. An optional\n `membersMapping` ({ sourceUserId: localUserId }) maps members; unmapped members\n are simply not added.\n",
+        "operationId": "import_board",
+        "parameters": [
+          {
+            "description": "the WeKan board export object\n",
+            "in": "formData",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "map of source user id -> local user id\n",
+            "in": "formData",
+            "name": "membersMapping",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Import a whole board (with its lists, cards, swimlanes, custom fields  and automation rules) from a WeKan board export",
+        "tags": [
+          "Boards",
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/import/{source}": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "description": "Generalized import: `:source` is one of `trello`, `wekan`, `csv`,\n `jira`, `kanboard`, `excel`, `deck` (NextCloud Deck), `openproject`, `github`,\n `gitlab`, `gitea`, `forgejo`, `asana`, `zenkit`. The request body is that\n tool's export JSON (sent directly, or wrapped as `{ \"board\": <export> }`);\n an optional `membersMapping` maps members. Reuses the same import engine as\n the UI.\n",
+        "operationId": "import_board_from",
+        "parameters": [
+          {
+            "description": "the import source\n",
+            "in": "path",
+            "name": "source",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Import a board from another tool's export",
+        "tags": [
+          "Boards",
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{boardId}/cardSettings": {
+      "get": {
+        "operationId": "get_board_card_settings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Card settings returned"
+          },
+          "401": {
+            "description": "Missing or invalid authentication"
+          },
+          "404": {
+            "description": "Board not found"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Get a board's card settings (display toggles + card aging)",
+        "tags": [
+          "Boards"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "application/json"
+        ],
+        "description": "Boolean keys (the allows* display toggles and `cardAging`) accept true/false.\nNumeric keys `cardAgingDays1`, `cardAgingDays2`, `cardAgingDays3` set the\nthree card-aging fade-tier day thresholds (default 7 / 14 / 28).\n",
+        "operationId": "edit_board_card_settings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "properties": {
+                "cardAging": {
+                  "description": "Enable visual card aging on the board",
+                  "type": "boolean"
+                },
+                "cardAgingDays1": {
+                  "description": "Idle days for the first (lightest) fade tier",
+                  "type": "integer"
+                },
+                "cardAgingDays2": {
+                  "description": "Idle days for the second fade tier",
+                  "type": "integer"
+                },
+                "cardAgingDays3": {
+                  "description": "Idle days for the third (heaviest) fade tier",
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated card settings returned"
+          },
+          "400": {
+            "description": "No recognized card settings in body"
+          },
+          "401": {
+            "description": "Missing or invalid authentication"
+          },
+          "404": {
+            "description": "Board not found"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Update a board's card settings (display toggles + card aging)",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}": {
+      "delete": {
+        "operationId": "delete_board",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      },
+      "get": {
+        "operationId": "get_board",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/attachments": {
+      "get": {
+        "operationId": "get_board_attachments",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/attachments/{attachment}/export": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n \"authToken\": '/api/boards/:boardId/attachments/:attachmentId/export?authToken=:token'\n",
+        "operationId": "exportJson",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the ID of the attachment we are exporting\n",
+            "in": "path",
+            "name": "attachment",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "This route is used to export a attachement to a json file format.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/cardSettings": {
+      "get": {
+        "operationId": "get_board_cardSettings",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_cardSettings",
+        "parameters": [
+          {
+            "description": "the key value",
+            "in": "formData",
+            "name": "key",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/bulk": {
+      "delete": {
+        "operationId": "delete_board_cards_bulk",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/labels": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_cards_labels",
+        "parameters": [
+          {
+            "description": "the cardIds value",
+            "in": "formData",
+            "name": "cardIds",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/checklists": {
+      "get": {
+        "operationId": "get_board_card_checklists",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Checklists"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_card_checklists",
+        "parameters": [
+          {
+            "description": "the items value",
+            "in": "formData",
+            "name": "items",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Checklists"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/checklists/{checklist}": {
+      "delete": {
+        "operationId": "delete_board_card_checklist",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Checklists"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_card_checklist",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Checklists"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/checklists/{checklist}/items": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_card_checklist_items",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "ChecklistItems"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/checklists/{checklist}/items/{item}": {
+      "delete": {
+        "operationId": "delete_board_card_checklist_item",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the item value",
+            "in": "path",
+            "name": "item",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "ChecklistItems"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_card_checklist_item",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the item value",
+            "in": "path",
+            "name": "item",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "ChecklistItems"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_card_checklist_item",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the checklist value",
+            "in": "path",
+            "name": "checklist",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the item value",
+            "in": "path",
+            "name": "item",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "ChecklistItems"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/comments": {
+      "get": {
+        "operationId": "get_board_card_comments",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CardComments"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_card_comments",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CardComments"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/comments/{comment}": {
+      "delete": {
+        "operationId": "delete_board_card_comment",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the comment value",
+            "in": "path",
+            "name": "comment",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CardComments"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_card_comment",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the comment value",
+            "in": "path",
+            "name": "comment",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CardComments"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/dependencies": {
+      "get": {
+        "operationId": "get_card_dependencies",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card ID\n",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "items": {
+                "properties": {
+                  "cardId": {
+                    "type": "string"
+                  },
+                  "color": {
+                    "type": "string"
+                  },
+                  "icon": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Get one card's dependencies",
+        "tags": [
+          "Dependencies"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "description": "The target card must be on the same board. If the dependency\n already exists, its type/color/icon are updated.\n",
+        "operationId": "new_card_dependency",
+        "parameters": [
+          {
+            "description": "the source card ID\n",
+            "in": "formData",
+            "name": "cardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the dependsOn value",
+            "in": "formData",
+            "name": "dependsOn",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "relation type: related-to | blocks | is-blocked-by | fixes | is-fixed-by\n",
+            "in": "formData",
+            "name": "type",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "line/badge color, any CSS color e.g. \"#eb144c\"\n",
+            "in": "formData",
+            "name": "color",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "FontAwesome icon name without the \"fa-\" prefix\n",
+            "in": "formData",
+            "name": "icon",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the source card ID\n",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                },
+                "cardId": {
+                  "type": "string"
+                },
+                "color": {
+                  "type": "string"
+                },
+                "icon": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Add (or update) a typed dependency line from a card to another card",
+        "tags": [
+          "Dependencies"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards/{card}/dependencies/{target}": {
+      "delete": {
+        "operationId": "delete_card_dependency",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the source card ID\n",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the target card ID of the dependency to remove\n",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Remove a dependency line from a card",
+        "tags": [
+          "Dependencies"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "edit_card_dependency",
+        "parameters": [
+          {
+            "description": "relation type: related-to | blocks | is-blocked-by | fixes | is-fixed-by\n",
+            "in": "formData",
+            "name": "type",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "the key value",
+            "in": "formData",
+            "name": "key",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the source card ID\n",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the target card ID of the dependency\n",
+            "in": "path",
+            "name": "target",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Edit a dependency line's type, color or icon",
+        "tags": [
+          "Dependencies"
+        ]
+      }
+    },
+    "/api/boards/{board}/cardsByCustomField/{customField}/{customFieldValue}": {
+      "get": {
+        "operationId": "get_board_customFieldValue",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customFieldValue value",
+            "in": "path",
+            "name": "customFieldValue",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/cards_count": {
+      "get": {
+        "operationId": "get_board_cards_count",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/copy": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_copy",
+        "parameters": [
+          {
+            "description": "the title value",
+            "in": "formData",
+            "name": "title",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/custom-fields": {
+      "get": {
+        "operationId": "get_board_custom-fields",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_custom-fields",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      }
+    },
+    "/api/boards/{board}/custom-fields/{customField}": {
+      "delete": {
+        "operationId": "delete_board_customField",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_customField",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_customField",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      }
+    },
+    "/api/boards/{board}/custom-fields/{customField}/dropdown-items": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_customField_dropdown-items",
+        "parameters": [
+          {
+            "description": "the items value",
+            "in": "formData",
+            "name": "items",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      }
+    },
+    "/api/boards/{board}/custom-fields/{customField}/dropdown-items/{dropdownItem}": {
+      "delete": {
+        "operationId": "delete_board_customField_dropdownItem",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the dropdownItem value",
+            "in": "path",
+            "name": "dropdownItem",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_customField_dropdownItem",
+        "parameters": [
+          {
+            "description": "the name value",
+            "in": "formData",
+            "name": "name",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the dropdownItem value",
+            "in": "path",
+            "name": "dropdownItem",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "CustomFields"
+        ]
+      }
+    },
+    "/api/boards/{board}/dependencies": {
+      "get": {
+        "operationId": "get_board_dependencies",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "items": {
+                "properties": {
+                  "color": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "fromCardNumber": {
+                    "type": "number"
+                  },
+                  "fromTitle": {
+                    "type": "string"
+                  },
+                  "icon": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "toCardNumber": {
+                    "type": "number"
+                  },
+                  "toTitle": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Get all card dependency lines (\"Red Strings\") of a board",
+        "tags": [
+          "Dependencies"
+        ]
+      }
+    },
+    "/api/boards/{board}/export": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n \"authToken\": '/api/boards/:boardId/export?authToken=:token'\n\n See https://blog.kayla.com.au/server-side-route-authentication-in-meteor/\n for detailed explanations\n",
+        "operationId": "exportJson_2",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "This route is used to export the board to a json file format.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/export/csv": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n\n See https://blog.kayla.com.au/server-side-route-authentication-in-meteor/\n for detailed explanations\n",
+        "operationId": "exportCSV/TSV",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "This route is used to export the board to a CSV or TSV file format.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/export/kanboard": {
+      "get": {
+        "description": "Pass the loginToken as the `authToken` query param for private\n boards: `/api/boards/:boardId/export/kanboard?authToken=:token`.\n",
+        "operationId": "exportKanboard",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Export the board as a Kanboard-style JSON (columns + tasks).",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/export/{format}": {
+      "get": {
+        "operationId": "exportExternal",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the format value",
+            "in": "path",
+            "name": "format",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Export the board as a NextCloud Deck / OpenProject / GitHub /  GitLab / Gitea / Forgejo style JSON.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/exportExcel": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n \"authToken\": '/api/boards/:boardId/exportExcel?authToken=:token'\n\n See https://blog.kayla.com.au/server-side-route-authentication-in-meteor/\n for detailed explanations\n",
+        "operationId": "exportExcel",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "This route is used to export the board Excel.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/exportPDF": {
+      "get": {
+        "description": "Pass the loginToken as the `authToken` query param for private\n boards: `/api/boards/:boardId/exportPDF?authToken=:token`.\n",
+        "operationId": "exportBoardPDF",
+        "parameters": [
+          {
+            "description": "the ID of the board to export\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Export a whole board to PDF (board title, lists and their cards).",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/integrations": {
+      "get": {
+        "operationId": "get_board_integrations",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_integrations",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      }
+    },
+    "/api/boards/{board}/integrations/{int}": {
+      "delete": {
+        "operationId": "delete_board_int",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the int value",
+            "in": "path",
+            "name": "int",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "get_board_int",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the int value",
+            "in": "path",
+            "name": "int",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_int",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the int value",
+            "in": "path",
+            "name": "int",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      }
+    },
+    "/api/boards/{board}/integrations/{int}/activities": {
+      "delete": {
+        "operationId": "delete_board_int_activities",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the int value",
+            "in": "path",
+            "name": "int",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_int_activities",
+        "parameters": [
+          {
+            "description": "the activities value",
+            "in": "formData",
+            "name": "activities",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the int value",
+            "in": "path",
+            "name": "int",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ]
+      }
+    },
+    "/api/boards/{board}/labels": {
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_labels",
+        "parameters": [
+          {
+            "description": "the label value",
+            "in": "formData",
+            "name": "label",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists": {
+      "get": {
+        "operationId": "get_board_lists",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_lists",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}": {
+      "delete": {
+        "operationId": "delete_board_list",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_list",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_list",
+        "parameters": [
+          {
+            "description": "the title value",
+            "in": "formData",
+            "name": "title",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the color value",
+            "in": "formData",
+            "name": "color",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the wipLimit value",
+            "in": "formData",
+            "name": "wipLimit",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards": {
+      "get": {
+        "operationId": "get_board_list_cards",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_cards",
+        "parameters": [
+          {
+            "description": "the linkedId value",
+            "in": "formData",
+            "name": "linkedId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the members value",
+            "in": "formData",
+            "name": "members",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the assignees value",
+            "in": "formData",
+            "name": "assignees",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/bulk": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_cards_bulk",
+        "parameters": [
+          {
+            "description": "the cards value",
+            "in": "formData",
+            "name": "cards",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}": {
+      "delete": {
+        "operationId": "delete_board_list_card",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_list_card",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_list_card",
+        "parameters": [
+          {
+            "description": "the newBoardId value",
+            "in": "formData",
+            "name": "newBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the newSwimlaneId value",
+            "in": "formData",
+            "name": "newSwimlaneId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the newListId value",
+            "in": "formData",
+            "name": "newListId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the title value",
+            "in": "formData",
+            "name": "title",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the sort value",
+            "in": "formData",
+            "name": "sort",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the parentId value",
+            "in": "formData",
+            "name": "parentId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the description value",
+            "in": "formData",
+            "name": "description",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the color value",
+            "in": "formData",
+            "name": "color",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the vote value",
+            "in": "formData",
+            "name": "vote",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the poker value",
+            "in": "formData",
+            "name": "poker",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the labelIds value",
+            "in": "formData",
+            "name": "labelIds",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the requestedBy value",
+            "in": "formData",
+            "name": "requestedBy",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the assignedBy value",
+            "in": "formData",
+            "name": "assignedBy",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the spentTime value",
+            "in": "formData",
+            "name": "spentTime",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the isOverTime value",
+            "in": "formData",
+            "name": "isOverTime",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customFields value",
+            "in": "formData",
+            "name": "customFields",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the members value",
+            "in": "formData",
+            "name": "members",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the assignees value",
+            "in": "formData",
+            "name": "assignees",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlaneId value",
+            "in": "formData",
+            "name": "swimlaneId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the listId value",
+            "in": "formData",
+            "name": "listId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the archive value",
+            "in": "formData",
+            "name": "archive",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the stickers value",
+            "in": "formData",
+            "name": "stickers",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the locations value",
+            "in": "formData",
+            "name": "locations",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/archive": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_archive",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/assignees/{assignee}": {
+      "delete": {
+        "operationId": "delete_board_list_card_assignee",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the assignee value",
+            "in": "path",
+            "name": "assignee",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_assignee",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the assignee value",
+            "in": "path",
+            "name": "assignee",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/copy": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_copy",
+        "parameters": [
+          {
+            "description": "the toBoardId value",
+            "in": "formData",
+            "name": "toBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the toSwimlaneId value",
+            "in": "formData",
+            "name": "toSwimlaneId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the toListId value",
+            "in": "formData",
+            "name": "toListId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the position value",
+            "in": "formData",
+            "name": "position",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/customFields/{customField}": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_customField",
+        "parameters": [
+          {
+            "description": "the value value",
+            "in": "formData",
+            "name": "value",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the customField value",
+            "in": "path",
+            "name": "customField",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/exportExcel": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n \"authToken\": '/api/boards/:boardId/lists/:listId/cards/:cardId/exportExcel?authToken=:token'\n\n Optional query param \"fields\" is a comma-separated list of sections to include.\n Valid values: people, board-info, dates, description, checklists, subtasks, comments\n Omitting \"fields\" includes all sections.\n",
+        "operationId": "exportExcelCard",
+        "parameters": [
+          {
+            "description": "the ID of the board\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the ID of the list\n",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the ID of the card to export\n",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Export a single card to Excel (.xlsx), formatted for DIN A4 Portrait printing.",
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/exportPDF": {
+      "get": {
+        "description": "If user is already logged-in, pass loginToken as param\n \"authToken\": '/api/boards/:boardId/exportExcel?authToken=:token'\n\n See https://blog.kayla.com.au/server-side-route-authentication-in-meteor/\n for detailed explanations\n",
+        "operationId": "exportExcel_2",
+        "parameters": [
+          {
+            "description": "the ID of the board we are exporting\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "This route is used to export the board Excel.",
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/members/{member}": {
+      "delete": {
+        "operationId": "delete_board_list_card_member",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the member value",
+            "in": "path",
+            "name": "member",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_member",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the member value",
+            "in": "path",
+            "name": "member",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards/{card}/unarchive": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_card_unarchive",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the card value",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/cards_count": {
+      "get": {
+        "operationId": "get_board_list_cards_count",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/copy": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_copy",
+        "parameters": [
+          {
+            "description": "the toBoardId value",
+            "in": "formData",
+            "name": "toBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      }
+    },
+    "/api/boards/{board}/lists/{list}/move": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_list_move",
+        "parameters": [
+          {
+            "description": "the toBoardId value",
+            "in": "formData",
+            "name": "toBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the toSwimlaneId value",
+            "in": "formData",
+            "name": "toSwimlaneId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the list value",
+            "in": "path",
+            "name": "list",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Lists"
+        ]
+      }
+    },
+    "/api/boards/{board}/members/{member}": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_member",
+        "parameters": [
+          {
+            "description": "the role value",
+            "in": "formData",
+            "name": "role",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the member value",
+            "in": "path",
+            "name": "member",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/boards/{board}/members/{user}/add": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_user_add",
+        "parameters": [
+          {
+            "description": "the action value",
+            "in": "formData",
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the role value",
+            "in": "formData",
+            "name": "role",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/api/boards/{board}/members/{user}/remove": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_user_remove",
+        "parameters": [
+          {
+            "description": "the action value",
+            "in": "formData",
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/api/boards/{board}/rules": {
+      "get": {
+        "operationId": "get_board_rules",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "items": {
+                "properties": {
+                  "_id": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "object"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Get the list of automation rules of a board",
+        "tags": [
+          "Rules",
+          "Rules"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "description": "The trigger and action are embedded inline. See the Rules\n documentation for the available trigger activityTypes and action actionTypes.\n",
+        "operationId": "new_board_rule",
+        "parameters": [
+          {
+            "description": "the rule title\n",
+            "in": "formData",
+            "name": "title",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the trigger document (must include activityType)\n",
+            "in": "formData",
+            "name": "trigger",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the action document (must include actionType)\n",
+            "in": "formData",
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                },
+                "actionId": {
+                  "type": "string"
+                },
+                "triggerId": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Add an automation rule to a board",
+        "tags": [
+          "Rules",
+          "Rules"
+        ]
+      }
+    },
+    "/api/boards/{board}/rules/{rule}": {
+      "delete": {
+        "operationId": "delete_board_rule",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the rule ID\n",
+            "in": "path",
+            "name": "rule",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Remove an automation rule (and its trigger and action)",
+        "tags": [
+          "Rules",
+          "Rules"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_rule",
+        "parameters": [
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the rule ID\n",
+            "in": "path",
+            "name": "rule",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "object"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "trigger": {
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Get a single automation rule",
+        "tags": [
+          "Rules",
+          "Rules"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "description": "Any of title, trigger and action may be supplied; the trigger\n and action documents are replaced ($set) when present.\n",
+        "operationId": "edit_board_rule",
+        "parameters": [
+          {
+            "description": "the new rule title\n",
+            "in": "formData",
+            "name": "title",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "the new trigger document\n",
+            "in": "formData",
+            "name": "trigger",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "the new action document\n",
+            "in": "formData",
+            "name": "action",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "the board ID\n",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the rule ID\n",
+            "in": "path",
+            "name": "rule",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response",
+            "schema": {
+              "properties": {
+                "_id": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "summary": "Edit an automation rule",
+        "tags": [
+          "Rules",
+          "Rules"
+        ]
+      }
+    },
+    "/api/boards/{board}/swimlanes": {
+      "get": {
+        "operationId": "get_board_swimlanes",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_swimlanes",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      }
+    },
+    "/api/boards/{board}/swimlanes/{swimlane}": {
+      "delete": {
+        "operationId": "delete_board_swimlane",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      },
+      "get": {
+        "operationId": "get_board_swimlane",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_swimlane",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      }
+    },
+    "/api/boards/{board}/swimlanes/{swimlane}/cards": {
+      "get": {
+        "operationId": "get_board_swimlane_cards",
+        "parameters": [
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Cards"
+        ]
+      }
+    },
+    "/api/boards/{board}/swimlanes/{swimlane}/copy": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_swimlane_copy",
+        "parameters": [
+          {
+            "description": "the toBoardId value",
+            "in": "formData",
+            "name": "toBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      }
+    },
+    "/api/boards/{board}/swimlanes/{swimlane}/move": {
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_board_swimlane_move",
+        "parameters": [
+          {
+            "description": "the toBoardId value",
+            "in": "formData",
+            "name": "toBoardId",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the swimlane value",
+            "in": "path",
+            "name": "swimlane",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Swimlanes"
+        ]
+      }
+    },
+    "/api/boards/{board}/title": {
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_board_title",
+        "parameters": [
+          {
+            "description": "the title value",
+            "in": "formData",
+            "name": "title",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the board value",
+            "in": "path",
+            "name": "board",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/api/users": {
+      "get": {
+        "operationId": "get_users",
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      },
+      "post": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "post_users",
+        "parameters": [
+          {
+            "description": "the username value",
+            "in": "formData",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the email value",
+            "in": "formData",
+            "name": "email",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the password value",
+            "in": "formData",
+            "name": "password",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/api/users/{user}": {
+      "delete": {
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      },
+      "get": {
+        "operationId": "get_user_2",
+        "parameters": [
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      },
+      "put": {
+        "consumes": [
+          "multipart/form-data",
+          "application/json"
+        ],
+        "operationId": "put_user",
+        "parameters": [
+          {
+            "description": "the action value",
+            "in": "formData",
+            "name": "action",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Users"
+        ]
+      }
+    },
+    "/api/users/{user}/boards": {
+      "get": {
+        "operationId": "get_user_boards",
+        "parameters": [
+          {
+            "description": "the user value",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "responses": {
+          "200": {
+            "description": "200 response"
+          }
+        },
+        "security": [
+          {
+            "UserSecurity": []
+          }
+        ],
+        "tags": [
+          "Boards"
+        ]
+      }
+    },
+    "/users/login": {
+      "post": {
+        "consumes": [
+          "application/json",
+          "application/x-www-form-urlencoded"
+        ],
+        "operationId": "login",
+        "parameters": [
+          {
+            "description": "Login credentials",
+            "in": "body",
+            "name": "loginRequest",
+            "required": true,
+            "schema": {
+              "properties": {
+                "password": {
+                  "description": "Your password\n",
+                  "format": "password",
+                  "type": "string"
+                },
+                "username": {
+                  "description": "Your username\n",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "username",
+                "password"
+              ],
+              "type": "object"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful authentication",
+            "schema": {
+              "properties": {
+                "id": {
+                  "description": "User ID",
+                  "type": "string"
+                },
+                "token": {
+                  "description": "Authentication token\n",
+                  "type": "string"
+                },
+                "tokenExpires": {
+                  "description": "Token expiration date\n",
+                  "format": "date-time",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "token",
+                "tokenExpires"
+              ],
+              "type": "object"
+            }
+          },
+          "400": {
+            "description": "Error in authentication\n",
+            "schema": {
+              "properties": {
+                "error": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "default": {
+            "description": "Error in authentication\n"
+          }
+        },
+        "summary": "Login with REST API",
+        "tags": [
+          "Login"
+        ]
+      }
+    },
+    "/users/register": {
+      "post": {
+        "consumes": [
+          "application/x-www-form-urlencoded",
+          "application/json"
+        ],
+        "description": "Notes:\n  - You will need to provide the token for any of the authenticated methods.\n",
+        "operationId": "register",
+        "parameters": [
+          {
+            "description": "Your username\n",
+            "in": "formData",
+            "name": "username",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Your password\n",
+            "format": "password",
+            "in": "formData",
+            "name": "password",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Your email\n",
+            "in": "formData",
+            "name": "email",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful registration",
+            "schema": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  },
+                  "tokenExpires": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error in registration\n",
+            "schema": {
+              "items": {
+                "properties": {
+                  "error": {
+                    "type": "number"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error in registration\n"
+          }
+        },
+        "summary": "Register with REST API",
+        "tags": [
+          "Login"
+        ]
+      }
+    }
+  },
+  "schemes": [
+    "http"
+  ],
+  "securityDefinitions": {
+    "UserSecurity": {
+      "in": "header",
+      "name": "Authorization",
+      "type": "apiKey"
+    }
+  },
+  "swagger": "2.0"
+}

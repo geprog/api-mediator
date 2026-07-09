@@ -1,0 +1,2 @@
+# Written by bootstrap.sh — contains live API tokens for the local landscape
+.tokens.env

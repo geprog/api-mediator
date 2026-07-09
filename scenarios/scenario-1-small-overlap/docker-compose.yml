@@ -1,0 +1,61 @@
+name: api-mediator-s1
+
+services:
+  gitea:
+    image: docker.io/gitea/gitea:${GITEA_TAG:-1.25.5}
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      # Never set INSTALL_LOCK=false — it breaks startup (go-gitea#26992).
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__server__ROOT_URL=http://localhost:${GITEA_PORT:-11300}/
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__service__DISABLE_REGISTRATION=false
+      - GITEA__mailer__ENABLED=false
+      - GITEA__actions__ENABLED=false
+    ports:
+      - "${GITEA_PORT:-11300}:3000"
+    volumes:
+      - gitea-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # The scratch-based Vikunja image runs as uid 1000 but fresh named volumes
+  # are root-owned and the image has no shell to fix that itself.
+  vikunja-init:
+    image: docker.io/library/busybox:1.36
+    command: chown -R 1000:1000 /db /files
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/files
+
+  vikunja:
+    image: docker.io/vikunja/vikunja:${VIKUNJA_TAG:-2.3.0}
+    depends_on:
+      vikunja-init:
+        condition: service_completed_successfully
+    environment:
+      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:${VIKUNJA_PORT:-11400}/
+      # Bootstrap/seed scripts create users through POST /api/v1/register.
+      - VIKUNJA_SERVICE_ENABLEREGISTRATION=true
+    ports:
+      - "${VIKUNJA_PORT:-11400}:3456"
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/app/vikunja/files
+    healthcheck:
+      # Scratch-based image: no shell/curl; upstream ships a healthcheck subcommand.
+      test: ["CMD", "/app/vikunja/vikunja", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  gitea-data:
+  vikunja-db:
+  vikunja-files:

@@ -1,0 +1,42 @@
+name: api-mediator-s3
+
+services:
+  # The scratch-based Vikunja image runs as uid 1000 but fresh named volumes
+  # are root-owned and the image has no shell to fix that itself.
+  vikunja-init:
+    image: docker.io/library/busybox:1.36
+    command: chown -R 1000:1000 /db /files
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/files
+
+  vikunja:
+    image: docker.io/vikunja/vikunja:${VIKUNJA_TAG:-2.3.0}
+    depends_on:
+      vikunja-init:
+        condition: service_completed_successfully
+    environment:
+      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:${VIKUNJA_PORT:-13400}/
+      # Bootstrap/seed scripts create users through POST /api/v1/register.
+      - VIKUNJA_SERVICE_ENABLEREGISTRATION=true
+    ports:
+      - "${VIKUNJA_PORT:-13400}:3456"
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/app/vikunja/files
+    healthcheck:
+      # Scratch-based image: no shell/curl; upstream ships a healthcheck subcommand.
+      test: ["CMD", "/app/vikunja/vikunja", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # The consumer ("todo-widget") is deliberately NOT a container: its spec
+  # (specs/consumer/todo-widget.yaml) describes the API it wishes existed, and
+  # per the concept the mediator itself hosts that API as a virtual provider
+  # (docs/architecture/adapter-engine.md). Host port 13900 is reserved for it.
+
+volumes:
+  vikunja-db:
+  vikunja-files:

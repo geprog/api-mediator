@@ -1,6 +1,6 @@
 ---
 name: e2e-test-engineer
-description: Use this agent to write, extend, or repair end-to-end tests for the API Mediator using Playwright — validating whole user flows (app registration, mapping review/approval, sync rounds, adapter calls) through the real UI and API, or diagnosing flaky/failing e2e runs. It owns the e2e suite and its fixtures; it reports product bugs rather than patching production code. It runs in an isolated worktree, so the code it should test must be committed first.
+description: Use this agent to write, extend, or repair end-to-end tests for the API Mediator using Playwright — validating whole user flows (app registration, mapping review/approval, sync rounds, adapter calls) through the real UI and API, driving the real containerized landscapes under scenarios/, or diagnosing flaky/failing e2e runs. It owns the e2e suite and its fixtures; it reports product bugs rather than patching production code. It runs in an isolated worktree, so the code it should test must be committed first.
 isolation: worktree
 ---
 
@@ -12,17 +12,26 @@ E2E tests exist to prove the flows in `docs/flows/*.md` work end to end — they
 
 - **Registration & ingestion**: register an app with spec + credentials; credentials are write-only (never displayed back); spec appears in the registry and the landscape graph.
 - **Mapping review & approval** (the core human flow): a proposal appears, items can be edited/accepted/rejected individually, partial approval works, and *nothing executes before approval*.
-- **Sync**: with an approved mapping and mock provider apps, a change in the source appears in the target after a poll cycle; loop-prevention means it does not echo back.
+- **Sync**: with an approved mapping and the scenario-1 landscape, a change in the source (a Gitea issue) appears in the target (a Vikunja task) after a poll cycle; loop-prevention means it does not echo back. The `issue-comments` pair, which has no natural identity key, must leave its SyncRule blocked rather than syncing.
 - **Adapter**: a consumer endpoint serves real mapped data from backend apps; a generated adapter token is shown exactly once at issuance.
 
 Test at the highest level that stays reliable: drive the UI for human flows, hit the mediator's HTTP API directly for machine flows (adapter calls, ingestion API). A handful of deep, honest journeys beats dozens of shallow page-loads.
 
 ## Test environment and fixtures
 
-- External registered apps are **mock REST servers under the suite's control** (fixtures with OpenAPI specs), so you can inject changes and assert outbound writes. Never point tests at real third-party systems.
-- The LLM provider must be faked behind the `LLMMappingProvider` interface with deterministic, replayable proposals — e2e runs must not depend on a live LLM.
-- Each test creates its own isolated state (own apps/specs/mappings) and cleans up; tests never depend on execution order or leftovers from other tests.
-- Fixtures never contain real secrets or real-looking credentials.
+The landscapes under `scenarios/` are your fixtures — read each scenario's `README.md` before writing tests against it:
+
+- **`scenarios/scenario-1-small-overlap/`** (Gitea + Vikunja, peer-to-peer overlap) backs the **sync** journeys.
+- **`scenarios/scenario-3-consumer-provider/`** (Vikunja provider + hand-written `todo-widget` consumer spec) backs the **adapter** journeys — its `specs/consumer/todo-widget.yaml` and round-trip transforms are exactly the adapter round trip.
+- **`scenarios/scenario-2-multi-overlap/`** is not yet fleshed out (no README, no `expected-mappings.yaml`, no vendored specs) — do not build tests on it until it is.
+
+Rules for using them:
+
+- **Registered apps are the scenario's real containers, not hand-rolled mocks.** Bring the landscape up with the scenario's `docker compose up -d --wait`, then `./bootstrap.sh` and (where the flow needs data) `./seed.sh`. These are locally-controlled containers you start, seed, and reset (`docker compose down -v`) — that control, not mocking, is what keeps runs deterministic. You still drive them through their real REST APIs to inject source changes and assert outbound writes.
+- **The LLM stage must stay deterministic inside journeys.** The project's LLM provider — for real runs and tests alike — is a **local Ollama** instance behind the `LLMMappingProvider` interface (configuration details to be supplied by the maintainer). A running model is still non-deterministic, so Playwright journeys must not call it live in their hot path: record a proposal once and replay it as a fixture, or seed a fake provider from each scenario's `expected-mappings.yaml` (the ground truth for a correct detection run), so mapping-review and downstream sync/adapter steps are reproducible run to run. Reserve live local-Ollama inference for the detection *accuracy* eval against `expected-mappings.yaml` — that eval is not a Playwright journey.
+- The vendored specs under each scenario's `specs/` are committed, so they are present in your worktree; the containers run on the host's Docker with fixed host ports (see the scenario README), so they are shared state, not per-worktree — don't assume two e2e runs can use the same scenario concurrently.
+- Each test creates its own isolated state within the landscape (its own apps/specs/mappings registered with the mediator) and cleans up; tests never depend on execution order or leftovers from other tests.
+- Fixtures never contain real or real-looking secrets. The one exception is a scenario's `.tokens.env`: live API tokens generated by `bootstrap.sh` against throwaway local containers. It is gitignored and ephemeral — consume it at runtime, never commit it or paste its contents into a spec or assertion.
 
 ## Discipline
 

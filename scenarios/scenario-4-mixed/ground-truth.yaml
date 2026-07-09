@@ -1,0 +1,131 @@
+# Ground truth for scenario 4: one CONSUMER spec (task-dashboard) against
+# THREE providers (Gitea, Forgejo, Vikunja) that are ALSO mapped peer-to-peer.
+# Format and verdicts as in scenario-1; consumer-provider phase semantics as in
+# scenario-3.
+
+meta:
+  scenario: scenario-4-mixed
+  consumer: specs/consumer/task-dashboard.yaml
+  providers:
+    gitea: { full: specs/full/gitea-1.25.5.swagger.json, trimmed: specs/trimmed/gitea.trimmed.swagger.json }
+    forgejo: { full: specs/full/forgejo-15.0.3.swagger.json, trimmed: specs/trimmed/forgejo.trimmed.swagger.json }
+    vikunja: { full: specs/full/vikunja-2.3.0.swagger.json, trimmed: specs/trimmed/vikunja.trimmed.swagger.json }
+  notes:
+    - Gitea<->Vikunja peer-peer: identical to ../scenario-1-small-overlap/ground-truth.yaml.
+    - Forgejo<->Vikunja peer-peer: same content as Gitea<->Vikunja (fork), swap the app name.
+
+# ---------------------------------------------------------------------------
+# Peer-to-peer: the calibration pair
+# ---------------------------------------------------------------------------
+pairs:
+  - source: { app: gitea, resource: issues }
+    target: { app: forgejo, resource: issues }
+    kind: peer-peer
+    calibration: true
+    note: >-
+      Fork pair — specs are near-identical (same paths, same operationIds, same
+      field names). A correct detection run must map issues, labels, milestones,
+      users and comments at HIGH confidence with (near-)zero transforms; use
+      this pair to calibrate confidence scoring. Anything the detector fails to
+      map here is a hard bug, not a judgment call.
+    operations:
+      list: { source: "GET /repos/{owner}/{repo}/issues", target: "GET /repos/{owner}/{repo}/issues" }
+      create: { source: "POST /repos/{owner}/{repo}/issues", target: "POST /repos/{owner}/{repo}/issues" }
+      update: { source: "PATCH /repos/{owner}/{repo}/issues/{index}", target: "PATCH /repos/{owner}/{repo}/issues/{index}" }
+      delete: { source: "DELETE /repos/{owner}/{repo}/issues/{index}", target: "DELETE /repos/{owner}/{repo}/issues/{index}" }
+    identityKey: { source: title, target: title }
+    changeTimestamp: { source: updated_at, target: updated_at }
+    fields:
+      - { source: title, target: title, transform: direct }
+      - { source: body, target: body, transform: direct }
+      - { source: state, target: state, transform: direct }
+      - { source: due_date, target: due_date, transform: direct }
+      - { source: labels, target: labels, transform: direct }
+      - { source: updated_at, target: updated_at, transform: direct }
+    companions:
+      - labels <-> labels (direct)
+      - milestones <-> milestones (direct)
+      - users <-> users (direct)
+      - issue-comments <-> issue-comments (direct)
+
+# ---------------------------------------------------------------------------
+# Consumer-provider: the aggregation endpoint
+# ---------------------------------------------------------------------------
+  - source: { app: task-dashboard, resource: work-items }
+    target: { apps: [gitea, forgejo, vikunja], resource: issues/tasks }
+    kind: consumer-provider
+    operations:
+      - consumer: GET /work-items
+        binding:
+          aggregation: collection-union
+          dedupKey: headline
+          backends:
+            - { app: gitea, operation: GET /repos/issues/search, note: global search — no path params to pin }
+            - { app: forgejo, operation: GET /repos/issues/search }
+            - { app: vikunja, operation: GET /tasks }
+        parameters:
+          - { source: "query:q", target: "gitea query:q / forgejo query:q / vikunja query:s", transform: direct, note: "filter pushdown to every backend (adapter-engine.md)" }
+          - source: "query:page + query:pageSize"
+            target: null
+            note: >-
+              pagination never pushes down — the mediator paginates the merged
+              union itself; backend paging params are the mediator's business.
+        response:
+          gitea-forgejo:
+            - { source: number, target: itemId, transform: coerce, note: "int -> string" }
+            - { source: title, target: headline, transform: rename }
+            - { source: body, target: body, transform: direct }
+            - { source: state, target: finished, transform: coerce, note: "open|closed -> bool" }
+            - { source: updated_at, target: lastChanged, transform: rename }
+            - { source: due_date, target: due, transform: rename }
+          vikunja:
+            - { source: id, target: itemId, transform: coerce, note: "int -> string" }
+            - { source: title, target: headline, transform: rename }
+            - { source: description, target: body, transform: rename }
+            - { source: done, target: finished, transform: rename }
+            - { source: updated, target: lastChanged, transform: rename }
+            - { source: due_date, target: due, transform: rename }
+          mediator-annotated:
+            - { target: source, note: "collection-union provenance annotation; mapped from no backend field" }
+
+      - consumer: POST /collections/{collectionId}/work-items
+        binding:
+          aggregation: single
+          backends:
+            - { app: vikunja, operation: "PUT /projects/{id}/tasks" }
+        note: write endpoints must be single-binding with exactly one active binding
+        parameters:
+          - { source: "path:collectionId", target: "path:id", transform: coerce, note: "string -> int" }
+        request:
+          - { source: headline, target: title, transform: rename }
+          - { source: body, target: description, transform: rename }
+          - { source: finished, target: done, transform: rename }
+        response:
+          - { source: id, target: itemId, transform: coerce }
+          - { source: title, target: headline, transform: rename }
+          - { source: done, target: finished, transform: rename }
+          - { source: updated, target: lastChanged, transform: rename }
+        rejected-bindings:
+          - { app: gitea, operation: "POST /repos/{owner}/{repo}/issues", reason: "owner+repo path params have no consumer counterpart" }
+          - { app: forgejo, operation: "POST /repos/{owner}/{repo}/issues", reason: same }
+
+negatives:
+  - source: { app: task-dashboard, operation: "GET /work-items/{itemId} (deliberately absent from the consumer spec)" }
+    target: null
+    verdict: no-counterpart
+    note: >-
+      Deliberately absent from the consumer spec: native ids don't align across
+      backends, so a by-id union is unresolvable without RecordLinks — the
+      modeling-limitation probe of this scenario.
+  - source: { app: task-dashboard, resource: work-items }
+    target: { app: vikunja, operation: "GET /projects/{id}/views/{view}/tasks" }
+    verdict: incorrect-but-tempting
+    note: the view-scoped list would need constant {id}/{view} — GET /tasks is the bindable choice.
+  - source: { app: gitea, resource: repositories }
+    target: { app: forgejo, resource: repositories }
+    verdict: ambiguous
+    note: >-
+      Actually a perfect spec-level match (fork) — but syncing git repos through
+      a REST-data mediator is out of scope; a human should reject it at review.
+      Included to probe that "mappable" and "should be synced" are different
+      questions. Trimmed specs exclude repo CRUD; full specs contain it.

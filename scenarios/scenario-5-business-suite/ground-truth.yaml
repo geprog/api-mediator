@@ -1,0 +1,181 @@
+# Ground truth for scenario 5 (Dolibarr ERP, Kimai time tracking, OrangeHRM HR)
+# — the business domain the concept docs' own examples are written in.
+# Format and verdicts as in scenario-1.
+
+meta:
+  scenario: scenario-5-business-suite
+  specs:
+    dolibarr: { full: specs/full/dolibarr-23.0.3.swagger.json, trimmed: specs/trimmed/dolibarr.trimmed.swagger.json }
+    kimai: { full: specs/full/kimai-2.57.0.openapi.json, trimmed: specs/trimmed/kimai.trimmed.swagger.json }
+    orangehrm: { full: specs/full/orangehrm-5.9.openapi.json, trimmed: specs/trimmed/orangehrm.trimmed.swagger.json }
+  notes:
+    - >-
+      Dolibarr's generated spec types loosely (numeric ids serialized as JSON
+      strings, epoch-seconds timestamps) while Kimai uses RFC 3339 strings and
+      OrangeHRM wraps every response in {data, meta, rels} — response-envelope
+      unwrapping and timestamp coercion are the cross-cutting probes here.
+    - >-
+      POST /tasks/{id}/addtimespent exists in the Dolibarr spec but is broken
+      at runtime in 23.0.3 (Restler validator fatal) — the deliberate
+      "spec lies about the implementation" probe. Detection may propose it;
+      sync execution against it must fail gracefully.
+
+pairs:
+  - source: { app: orangehrm, resource: employees }
+    target: { app: kimai, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: GET /api/v2/pim/employees, target: GET /api/users }
+      read: { source: "GET /api/v2/pim/employees/{empNumber}", target: "GET /api/users/{id}" }
+      create: { source: POST /api/v2/pim/employees, target: POST /api/users }
+      delete: { source: DELETE /api/v2/pim/employees, target: null, note: "OrangeHRM bulk-delete body {ids:[]} vs no Kimai user delete — asymmetric" }
+    identityKey: { source: workEmail, target: email, note: workEmail lives in the contact-details subresource }
+    fields:
+      - { source: workEmail, target: email, transform: rename, note: identity key }
+      - { source: "firstName + lastName", target: alias, transform: aggregate, note: reverse needs a split expression }
+      - { source: employeeId, target: null, transform: null, note: "HR badge number has no Kimai counterpart" }
+    note: >-
+      The classic HR -> tooling provisioning direction. Kimai's user create
+      requires fields OrangeHRM cannot supply (username, plainPassword,
+      language/locale/timezone) — expect create-propagation to need constant
+      or expression transforms for those (a deliberate gap probe).
+
+  - source: { app: orangehrm, resource: employees }
+    target: { app: dolibarr, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: GET /api/v2/pim/employees, target: GET /users }
+      create: { source: POST /api/v2/pim/employees, target: POST /users }
+    identityKey: { source: workEmail, target: email }
+    fields:
+      - { source: workEmail, target: email, transform: rename, note: identity key }
+      - { source: firstName, target: firstname, transform: rename, note: case-style only }
+      - { source: lastName, target: lastname, transform: rename }
+    note: >-
+      Borderline pair semantically: Dolibarr /users are LOGIN ACCOUNTS,
+      OrangeHRM employees are HR records (its login accounts live under
+      /api/v2/admin/users). Both employee->user pairings are still correct
+      sync topology for a landscape where HR is the user source of truth.
+
+  - source: { app: dolibarr, resource: users }
+    target: { app: kimai, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: GET /users, target: GET /api/users }
+      read: { source: "GET /users/{id}", target: "GET /api/users/{id}" }
+      create: { source: POST /users, target: POST /api/users }
+    identityKey: { source: login, target: username, alternatives: [email] }
+    fields:
+      - { source: login, target: username, transform: rename, note: identity key }
+      - { source: email, target: email, transform: direct }
+      - { source: "firstname + lastname", target: alias, transform: aggregate }
+      - { source: datec, target: null, transform: null, note: "epoch seconds; Kimai exposes no user-created timestamp" }
+
+  - source: { app: dolibarr, resource: thirdparties }
+    target: { app: kimai, resource: customers }
+    kind: peer-peer
+    operations:
+      list: { source: GET /thirdparties, target: GET /api/customers }
+      read: { source: "GET /thirdparties/{id}", target: "GET /api/customers/{id}" }
+      create: { source: POST /thirdparties, target: POST /api/customers }
+      update: { source: "PUT /thirdparties/{id}", target: "PATCH /api/customers/{id}" }
+      delete: { source: "DELETE /thirdparties/{id}", target: null, note: Kimai spec has no customer delete }
+    identityKey: { source: name, target: name }
+    fields:
+      - { source: name, target: name, transform: direct, note: identity key }
+      - { source: email, target: email, transform: direct }
+      - { source: phone, target: phone, transform: direct }
+      - { source: country_code, target: country, transform: rename, note: both ISO alpha-2 }
+      - { source: address, target: address, transform: direct }
+    unmapped:
+      source: [client, fournisseur, code_client, tva_intra, capital]
+      target: [timezone, currency, color, budget, timeBudget, visible]
+
+  - source: { app: dolibarr, resource: projects }
+    target: { app: kimai, resource: projects }
+    kind: peer-peer
+    operations:
+      list: { source: GET /projects, target: GET /api/projects }
+      read: { source: "GET /projects/{id}", target: "GET /api/projects/{id}" }
+      create: { source: POST /projects, target: POST /api/projects }
+      update: { source: "PUT /projects/{id}", target: "PATCH /api/projects/{id}" }
+    identityKey: { source: title, target: name }
+    fields:
+      - { source: title, target: name, transform: rename, note: identity key }
+      - { source: description, target: comment, transform: rename }
+      - source: socid
+        target: customer
+        transform: expression
+        note: >-
+          THE relation-shaped mapping probe: both sides reference their app's
+          customer record by native id — translating requires the customers
+          RecordLink, which FieldMapping transforms cannot express today.
+      - { source: date_start, target: start, transform: coerce, note: epoch seconds -> RFC 3339 }
+      - { source: date_end, target: end, transform: coerce }
+    unmapped:
+      source: [ref, opp_status, opp_amount, budget_amount, public]
+      target: [color, globalActivities, billable, budget, timeBudget]
+
+  - source: { app: dolibarr, resource: task-time-spent }
+    target: { app: kimai, resource: timesheets }
+    kind: peer-peer
+    operations:
+      list: { source: "GET /tasks/{id}/timespent", target: GET /api/timesheets }
+      create: { source: "POST /tasks/{id}/addtimespent", target: POST /api/timesheets, note: source op broken at runtime in 23.0.3 — see meta }
+    identityKey: { source: null, target: null, note: "no natural business key; like comments, identity confirmation should block a SyncRule" }
+    fields:
+      - { source: timespent_date, target: begin, transform: coerce, note: epoch -> RFC 3339 }
+      - { source: timespent_duration, target: duration, transform: direct, note: both seconds }
+      - { source: timespent_note, target: description, transform: rename }
+      - { source: timespent_fk_user, target: user, transform: expression, note: relation via users RecordLink }
+    note: >-
+      Nested-vs-flat structure probe: Dolibarr time entries hang under
+      /tasks/{id}/…, Kimai timesheets are a flat collection referencing
+      project+activity. A correct mapping must pin the task path param.
+
+  - source: { app: kimai, resource: timesheets }
+    target: { app: orangehrm, resource: attendance-records }
+    kind: peer-peer
+    verdict-note: >-
+      Low-confidence pair, acceptable in a shortlist: a Kimai timesheet is
+      project work time, an OrangeHRM attendance record is presence
+      (punch-in/out). Fields line up superficially (begin/end vs punch-in/out
+      times) but syncing them 1:1 is a business-level judgment call — three
+      time-tracking-ish resources (Dolibarr time-spent, Kimai timesheets,
+      OrangeHRM attendance) deliberately do NOT form a clean 3-way mapping.
+    fields:
+      - { source: begin, target: "punchIn.userDate + punchIn.userTime", transform: expression }
+      - { source: end, target: "punchOut.userDate + punchOut.userTime", transform: expression }
+
+negatives:
+  - source: { app: kimai, resource: activities }
+    target: { app: dolibarr, resource: tasks }
+    verdict: incorrect-but-tempting
+    note: >-
+      A Kimai activity is a reusable category ("Code Review"); a Dolibarr task
+      is a concrete work item under one project. Names/shapes look similar,
+      semantics differ.
+  - source: { app: dolibarr, resource: invoices }
+    target: null
+    verdict: no-counterpart
+    note: >-
+      Kimai's spec has invoice-related endpoints but they render documents from
+      timesheets rather than manage invoice records — expect no operation-level
+      mapping; a shortlist hit must die in the detail pass.
+  - source: { app: dolibarr, resource: products }
+    target: null
+    verdict: no-counterpart
+  - source: { app: orangehrm, resource: leave }
+    target: null
+    verdict: no-counterpart
+    note: Kimai core has no absence management.
+  - source: { app: orangehrm, resource: performance-reviews }
+    target: null
+    verdict: no-counterpart
+  - source: { app: orangehrm, resource: system-users }
+    target: { app: dolibarr, resource: users }
+    verdict: ambiguous
+    note: >-
+      /api/v2/admin/users (login accounts) also pairs plausibly with Dolibarr
+      users — the employees<->users pairing above is the useful one, but a
+      shortlist may reasonably surface both; review must pick.

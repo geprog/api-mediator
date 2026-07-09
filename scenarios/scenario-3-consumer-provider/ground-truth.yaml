@@ -1,0 +1,105 @@
+# Ground truth for scenario 3: one CONSUMER spec (todo-widget) against one
+# PROVIDER (Vikunja).
+#
+# Consumer-provider mappings differ from peer-peer (docs/flows and
+# data-model.md, commit b003b07): the consumer is always the source, there is
+# no reverse mapping, and one mapping covers both halves of a round trip via
+# two independent transform sets — phase `request` (consumer call -> backend
+# call) and phase `response` (backend result -> consumer result). Parameter
+# mappings (path/query/header) exist only in this kind.
+
+meta:
+  scenario: scenario-3-consumer-provider
+  consumer: specs/consumer/todo-widget.yaml
+  provider:
+    full: specs/full/vikunja-2.3.0.swagger.json
+    trimmed: specs/trimmed/vikunja.trimmed.swagger.json
+
+pairs:
+  - source: { app: todo-widget, resource: todos }
+    target: { app: vikunja, resource: tasks }
+    kind: consumer-provider
+    operations:
+      - consumer: GET /todos
+        binding:
+          backend: GET /tasks
+          aggregation: single
+        note: >-
+          GET /tasks is the param-free global list — deliberately the only
+          cleanly bindable choice (see negatives for the project-scoped
+          alternative).
+        parameters:
+          - { source: "query:page", target: "query:page", transform: direct }
+          - source: "query:done"
+            target: "query:filter"
+            transform: expression
+            note: >-
+              Vikunja filters with a query language (filter=done = true|false),
+              not a typed parameter — expect low confidence or unmapped; a
+              correct proposal needs an expression transform.
+        response:
+          - { source: id, target: todoId, transform: coerce, note: "int -> string" }
+          - { source: title, target: name, transform: rename }
+          - { source: description, target: notes, transform: rename }
+          - { source: done, target: done, transform: direct }
+          - { source: due_date, target: due, transform: rename }
+          - { source: updated, target: updatedAt, transform: rename }
+
+      - consumer: POST /lists/{listId}/todos
+        binding:
+          backend: PUT /projects/{id}/tasks
+          aggregation: single
+        note: write endpoints must be single-binding (adapter-engine.md)
+        parameters:
+          - { source: "path:listId", target: "path:id", transform: coerce, note: "string -> int" }
+        request:
+          - { source: name, target: title, transform: rename }
+          - { source: notes, target: description, transform: rename }
+          - { source: due, target: due_date, transform: rename }
+        response:
+          - { source: id, target: todoId, transform: coerce }
+          - { source: title, target: name, transform: rename }
+          - { source: description, target: notes, transform: rename }
+          - { source: done, target: done, transform: direct }
+          - { source: due_date, target: due, transform: rename }
+          - { source: updated, target: updatedAt, transform: rename }
+
+      - consumer: POST /todos/{todoId}/complete
+        binding:
+          backend: POST /tasks/{id}
+          aggregation: single
+        parameters:
+          - { source: "path:todoId", target: "path:id", transform: coerce, note: "string -> int" }
+        request:
+          - source: null
+            target: done
+            transform: expression
+            note: >-
+              constant true — the consumer op has no body, so the request phase
+              must synthesize done=true. The deliberately hard case of this
+              scenario.
+        response:
+          - { source: id, target: todoId, transform: coerce }
+          - { source: title, target: name, transform: rename }
+          - { source: done, target: done, transform: direct }
+          - { source: updated, target: updatedAt, transform: rename }
+
+negatives:
+  - source: { app: todo-widget, operation: GET /todos }
+    target: { app: vikunja, operation: "GET /projects/{id}/views/{view}/tasks" }
+    verdict: incorrect-but-tempting
+    note: >-
+      Binding the list to the view-scoped read would leave {id}/{view} with no
+      consumer-side counterpart — the concept has no constant-parameter binding
+      for adapter reads. Probes whether detection prefers the param-free
+      GET /tasks.
+  - source: { app: vikunja, resource: projects }
+    target: null
+    verdict: no-counterpart
+    note: the consumer never asks for lists/projects as a resource — only as a path parameter
+  - source: { app: vikunja, resource: labels }
+    target: null
+    verdict: no-counterpart
+  - source: { app: vikunja, resource: users }
+    target: null
+    verdict: no-counterpart

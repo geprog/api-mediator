@@ -1,0 +1,198 @@
+# Ground truth for mapping detection in scenario 2 (Gitea, Vikunja, Wekan,
+# Keycloak — 6 spec pairs, overlap spectrum from rich to users-only).
+# Format and verdicts as in scenario-1 (see the header there).
+#
+# The Gitea<->Vikunja pair is identical to scenario-1's ground truth and is not
+# repeated here — a detection run on this landscape must still find it.
+
+meta:
+  scenario: scenario-2-multi-overlap
+  specs:
+    gitea: { full: specs/full/gitea-1.25.5.swagger.json, trimmed: specs/trimmed/gitea.trimmed.swagger.json }
+    vikunja: { full: specs/full/vikunja-2.3.0.swagger.json, trimmed: specs/trimmed/vikunja.trimmed.swagger.json }
+    wekan: { full: specs/full/wekan-v9.57.swagger.json, trimmed: specs/trimmed/wekan.trimmed.swagger.json }
+    keycloak: { full: specs/full/keycloak-26.7.0.openapi.json, trimmed: specs/trimmed/keycloak.trimmed.swagger.json }
+  notes:
+    - Gitea<->Vikunja pairs: see ../scenario-1-small-overlap/ground-truth.yaml.
+    - >-
+      Every Keycloak collection read carries a {realm} path parameter that a
+      ResourceBinding must fix to a constant ("master") — the same
+      constant-binding probe as Gitea's {owner}/{repo}, but on ALL operations.
+    - >-
+      Wekan nests collections aggressively: cards live under
+      /api/boards/{board}/lists/{list}/cards — two constant path params for a
+      sync source, and the list id doubles as the kanban-state dimension.
+
+pairs:
+  - source: { app: vikunja, resource: projects }
+    target: { app: wekan, resource: boards }
+    kind: peer-peer
+    operations:
+      list: { source: GET /projects, target: "GET /api/users/{user}/boards" }
+      read: { source: "GET /projects/{id}", target: "GET /api/boards/{board}" }
+      create: { source: PUT /projects, target: POST /api/boards }
+      update: { source: "POST /projects/{id}", target: "PUT /api/boards/{board}/title" }
+      delete: { source: "DELETE /projects/{id}", target: "DELETE /api/boards/{board}" }
+    identityKey: { source: title, target: title }
+    fields:
+      - { source: title, target: title, transform: direct, note: identity key }
+      - { source: created, target: createdAt, transform: rename }
+      - { source: updated, target: modifiedAt, transform: rename }
+      - { source: is_archived, target: archived, transform: rename }
+    unmapped:
+      source: [hex_color, identifier, parent_project_id, views, position]
+      target: [permission, members, "allows* feature flags", labels, presentParentTask]
+    note: >-
+      Wekan has no flat "list boards" op — the collection read is user-scoped
+      (/api/users/{userId}/boards) and the update op is per-attribute
+      (PUT .../title): both are deliberate operation-mapping stress cases.
+
+  - source: { app: vikunja, resource: tasks }
+    target: { app: wekan, resource: cards }
+    kind: peer-peer
+    operations:
+      list: { source: GET /tasks, target: "GET /api/boards/{board}/lists/{list}/cards", note: "Vikunja's project-scoped GET only exists under views — the global list is the clean collectionRead" }
+      read: { source: "GET /tasks/{id}", target: "GET /api/boards/{board}/lists/{list}/cards/{card}" }
+      create: { source: "PUT /projects/{id}/tasks", target: "POST /api/boards/{board}/lists/{list}/cards" }
+      update: { source: "POST /tasks/{id}", target: "PUT /api/boards/{board}/lists/{list}/cards/{card}" }
+      delete: { source: "DELETE /tasks/{id}", target: "DELETE /api/boards/{board}/lists/{list}/cards/{card}" }
+    identityKey: { source: title, target: title }
+    changeTimestamp: { source: updated, target: modifiedAt }
+    fields:
+      - { source: title, target: title, transform: direct, note: identity key }
+      - { source: description, target: description, transform: direct }
+      - { source: due_date, target: dueAt, transform: rename }
+      - { source: created, target: createdAt, transform: rename }
+      - { source: updated, target: modifiedAt, transform: rename }
+      - { source: start_date, target: startAt, transform: rename }
+      - { source: end_date, target: endAt, transform: rename }
+      - { source: "assignees[].username", target: "assignees[]", transform: coerce, note: "user objects vs member-id strings" }
+    unmapped:
+      source: [done, done_at, priority, percent_done, hex_color, labels, repeat_after]
+      target: [listId, swimlaneId, sort, spentTime, poker, vote, customFields, cardNumber]
+    note: >-
+      done has NO counterpart — kanban state is the containing list (see
+      negatives: done<->archived). Card labels are board-scoped labelIds, not
+      title/color objects: expect unmapped or low confidence.
+
+  - source: { app: vikunja, resource: buckets }
+    target: { app: wekan, resource: lists }
+    kind: peer-peer
+    operations:
+      list: { source: "GET /projects/{id}/views/{view}/buckets", target: "GET /api/boards/{board}/lists" }
+      create: { source: "PUT /projects/{id}/views/{view}/buckets", target: "POST /api/boards/{board}/lists" }
+    identityKey: { source: title, target: title }
+    fields:
+      - { source: title, target: title, transform: direct, note: identity key }
+      - { source: created, target: createdAt, transform: rename }
+    note: full-spec-only on the Vikunja side (buckets/views are trimmed away).
+
+  - source: { app: keycloak, resource: users }
+    target: { app: gitea, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: "GET /admin/realms/{realm}/users", target: GET /users }
+      read: { source: "GET /admin/realms/{realm}/users/{user-id}", target: "GET /users/{username}" }
+      create: { source: "POST /admin/realms/{realm}/users", target: POST /admin/users }
+      update: { source: "PUT /admin/realms/{realm}/users/{user-id}", target: "PATCH /admin/users/{username}" }
+      delete: { source: "DELETE /admin/realms/{realm}/users/{user-id}", target: "DELETE /admin/users/{username}" }
+    identityKey: { source: username, target: login, alternatives: [email] }
+    fields:
+      - { source: username, target: login, transform: rename, note: identity key }
+      - { source: email, target: email, transform: direct }
+      - { source: "firstName + lastName", target: full_name, transform: aggregate, note: "the flagship aggregate/split case; reverse direction needs a split expression" }
+      - { source: createdTimestamp, target: created, transform: coerce, note: "epoch millis -> RFC 3339" }
+      - { source: enabled, target: prohibit_login, transform: expression, note: inverted boolean }
+    unmapped:
+      source: [attributes, requiredActions, groups, realmRoles, totp, federatedIdentities]
+      target: [avatar_url, followers_count, starred_repos_count, location, website]
+    note: >-
+      This is THE identity-provisioning pair (IdP -> forge). The reverse
+      direction (Gitea -> Keycloak) is a separate mapping per the concept;
+      counterpartMappingId links them.
+
+  - source: { app: keycloak, resource: users }
+    target: { app: vikunja, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: "GET /admin/realms/{realm}/users", target: GET /users }
+      create: { source: "POST /admin/realms/{realm}/users", target: POST /register }
+    identityKey: { source: username, target: username, alternatives: [email] }
+    fields:
+      - { source: username, target: username, transform: direct, note: identity key }
+      - { source: email, target: email, transform: direct }
+      - { source: "firstName + lastName", target: name, transform: aggregate }
+      - { source: createdTimestamp, target: created, transform: coerce, note: "epoch millis -> RFC 3339" }
+    note: >-
+      Vikunja's user surface is much narrower (no admin user CRUD in the
+      trimmed spec beyond register/list) — expect a read-mostly mapping with
+      create-only propagation.
+
+  - source: { app: keycloak, resource: users }
+    target: { app: wekan, resource: users }
+    kind: peer-peer
+    operations:
+      list: { source: "GET /admin/realms/{realm}/users", target: GET /api/users }
+      read: { source: "GET /admin/realms/{realm}/users/{user-id}", target: "GET /api/users/{user}" }
+      create: { source: "POST /admin/realms/{realm}/users", target: POST /api/users }
+      delete: { source: "DELETE /admin/realms/{realm}/users/{user-id}", target: "DELETE /api/users/{user}" }
+    identityKey: { source: username, target: username, alternatives: [email] }
+    fields:
+      - { source: username, target: username, transform: direct, note: identity key }
+      - { source: email, target: "emails[0].address", transform: expression, note: "flagship expression transform: scalar <-> array-of-objects" }
+      - { source: enabled, target: loginDisabled, transform: expression, note: inverted boolean }
+      - { source: createdTimestamp, target: createdAt, transform: coerce, note: "epoch millis -> RFC 3339" }
+    unmapped:
+      source: [firstName, lastName]
+      target: [isAdmin, profile, orgs, teams, authenticationMethod]
+    note: >-
+      Wekan stores names only inside profile.fullname (undocumented in the
+      spec's Users schema) — firstName/lastName expectedly unmapped.
+
+  - source: { app: keycloak, resource: groups }
+    target: { app: gitea, resource: orgs }
+    kind: peer-peer
+    verdict-note: >-
+      Borderline-acceptable pair: groups<->orgs share name/description and
+      membership semantics, but Gitea orgs are trimmed away (full-spec-only)
+      and the concepts differ (access-control group vs code namespace). A
+      shortlist hit is fine; approval should be a human call.
+    identityKey: { source: name, target: username }
+    fields:
+      - { source: name, target: username, transform: rename }
+      - { source: description, target: description, transform: direct }
+
+negatives:
+  - source: { app: vikunja, resource: tasks, field: done }
+    target: { app: wekan, resource: cards, field: archived }
+    verdict: incorrect-but-tempting
+    note: >-
+      archived means "hidden from the board", not "completed" — completion in
+      kanban is the containing list. Mapping done->archived would vanish cards.
+  - source: { app: gitea, resource: issues }
+    target: { app: wekan, resource: cards }
+    verdict: ambiguous
+    note: >-
+      Plausible low-confidence positive (title/description/dueAt line up), but
+      with Vikunja in the landscape the transitive route issues<->tasks<->cards
+      is the better sync topology; direct approval would create a 3-cycle —
+      loop prevention (sync-engine.md) is the concept probe here.
+  - source: { app: keycloak, resource: clients }
+    target: null
+    verdict: no-counterpart
+  - source: { app: keycloak, resource: roles }
+    target: null
+    verdict: no-counterpart
+  - source: { app: keycloak, resource: sessions }
+    target: null
+    verdict: no-counterpart
+  - source: { app: wekan, resource: swimlanes }
+    target: null
+    verdict: no-counterpart
+  - source: { app: wekan, resource: checklists }
+    target: { app: vikunja, resource: task-comments }
+    verdict: incorrect-but-tempting
+    note: both hang off the work item but have disjoint semantics.
+  - source: { app: wekan, resource: customFields }
+    target: null
+    verdict: no-counterpart

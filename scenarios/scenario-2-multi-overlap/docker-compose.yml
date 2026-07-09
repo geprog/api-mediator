@@ -1,0 +1,126 @@
+name: api-mediator-s2
+
+services:
+  gitea:
+    image: docker.io/gitea/gitea:${GITEA_TAG:-1.25.5}
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      # Never set INSTALL_LOCK=false — it breaks startup (go-gitea#26992).
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__server__ROOT_URL=http://localhost:${GITEA_PORT:-12300}/
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__service__DISABLE_REGISTRATION=false
+      - GITEA__mailer__ENABLED=false
+      - GITEA__actions__ENABLED=false
+    ports:
+      - "${GITEA_PORT:-12300}:3000"
+    volumes:
+      - gitea-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # The scratch-based Vikunja image runs as uid 1000 but fresh named volumes
+  # are root-owned and the image has no shell to fix that itself.
+  vikunja-init:
+    image: docker.io/library/busybox:1.36
+    command: chown -R 1000:1000 /db /files
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/files
+
+  vikunja:
+    image: docker.io/vikunja/vikunja:${VIKUNJA_TAG:-2.3.0}
+    depends_on:
+      vikunja-init:
+        condition: service_completed_successfully
+    environment:
+      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:${VIKUNJA_PORT:-12400}/
+      - VIKUNJA_SERVICE_ENABLEREGISTRATION=true
+    ports:
+      - "${VIKUNJA_PORT:-12400}:3456"
+    volumes:
+      - vikunja-db:/db
+      - vikunja-files:/app/vikunja/files
+    healthcheck:
+      test: ["CMD", "/app/vikunja/vikunja", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Wekan is pinned to the release whose spec is published at
+  # https://wekan.fi/api/v9.57/wekan.yml — the container does not serve it.
+  wekan:
+    image: docker.io/wekanteam/wekan:${WEKAN_TAG:-v9.57}
+    environment:
+      - ROOT_URL=http://localhost:${WEKAN_PORT:-12500}
+      - MONGO_URL=mongodb://wekan-db:27017/wekan?replicaSet=rs0&directConnection=true
+      - WRITABLE_PATH=/data
+      - WITH_API=true
+    ports:
+      - "${WEKAN_PORT:-12500}:8080"
+    volumes:
+      - wekan-files:/data
+    depends_on:
+      wekan-db:
+        condition: service_healthy
+    # No container healthcheck: the image carries no curl/wget contract across
+    # releases. bootstrap.sh gates on the published port instead.
+
+  # Wekan (Meteor 3) uses MongoDB change streams, which need a replica set —
+  # a single-node one suffices; the healthcheck initiates it on first run.
+  wekan-db:
+    image: docker.io/library/mongo:7
+    command: mongod --replSet rs0 --logpath /dev/null --quiet
+    volumes:
+      - wekan-db-data:/data/db
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          "try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'wekan-db:27017'}]}).ok }"
+          | grep -q 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_TAG:-26.7.0}
+    command: start-dev
+    environment:
+      # Keep in sync with shared/fixtures.env (compose interpolation can only
+      # read the scenario .env).
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KC_ADMIN_USER:-mediator-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KC_ADMIN_PASS:-mediator-pass-123}
+      - KC_HEALTH_ENABLED=true
+    ports:
+      - "${KEYCLOAK_PORT:-12600}:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+    healthcheck:
+      # Health lives on the management port 9000; the image has bash but no curl.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/localhost/9000 &&
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          cat <&3 | grep -q '200'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+volumes:
+  gitea-data:
+  vikunja-db:
+  vikunja-files:
+  wekan-files:
+  wekan-db-data:
+  keycloak-data:
