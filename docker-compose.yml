@@ -1,13 +1,16 @@
 # Local development environment for the API Mediator.
 #
-# Provides the PostgreSQL database the mediator persists its data model into
-# (see docs/architecture/data-model.md). The mediator app itself runs on the
-# host during development, as does Ollama (the local LLM backing the Mapping
-# Engine) — see DEVELOPMENT.md.
+# Provides two pieces of infrastructure:
+#   - PostgreSQL, the database the mediator persists its data model into
+#     (see docs/architecture/data-model.md).
+#   - Grafana + an OpenTelemetry backend, for the telemetry every component
+#     emits (see docs/architecture/observability.md).
+# The mediator app itself runs on the host during development, as does Ollama
+# (the local LLM backing the Mapping Engine) — see DEVELOPMENT.md.
 #
-#   docker compose up -d          # start Postgres
-#   docker compose down           # stop (keeps data)
-#   docker compose down -v        # stop and wipe the database volume
+#   docker compose up -d          # start Postgres + Grafana
+#   docker compose down           # stop (keeps the database volume)
+#   docker compose down -v        # stop and wipe volumes
 #
 # Values are read from a local .env if present, otherwise the defaults below.
 
@@ -34,5 +37,28 @@ services:
       retries: 10
     restart: unless-stopped
 
+  grafana:
+    # All-in-one Grafana LGTM image: bundles an OpenTelemetry Collector (OTLP
+    # receiver) plus Prometheus (metrics), Tempo (traces) and Loki (logs), with
+    # Grafana and its datasources pre-provisioned. This is the whole
+    # Collector -> stores -> Grafana pipeline from
+    # docs/architecture/observability.md in a single dev container. The mediator
+    # runs on the host and exports OTLP to the published ports below.
+    image: grafana/otel-lgtm:0.28.0
+    container_name: api-mediator-grafana
+    ports:
+      # Grafana UI. Configurable to avoid clashing with the app's dev server.
+      - "${GRAFANA_PORT:-3000}:3000"
+      # OTLP receivers the mediator exports telemetry to (gRPC / HTTP).
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      # Every bundled component writes under /data (Grafana home + the
+      # Prometheus/Tempo/Loki stores); mounting it keeps saved dashboards and
+      # the telemetry window across `docker compose down`. `down -v` wipes it.
+      - grafana-data:/data
+    restart: unless-stopped
+
 volumes:
   postgres-data:
+  grafana-data:

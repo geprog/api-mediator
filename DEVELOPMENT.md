@@ -1,15 +1,16 @@
 # Local development environment
 
-This sets up the two pieces of infrastructure the API Mediator needs to run
-locally: a **PostgreSQL** database and a **local LLM** (via Ollama) backing the
-Mapping Engine. The mediator application itself runs on the host.
+This sets up the infrastructure the API Mediator needs to run locally: a
+**PostgreSQL** database, a **Grafana + OpenTelemetry** stack for telemetry, and
+a **local LLM** (via Ollama) backing the Mapping Engine. The mediator
+application itself runs on the host.
 
 > The product concept is in `docs/` and is the source of truth. This file only
 > covers the local dev environment.
 
 ## Prerequisites
 
-- Docker (with the Compose plugin) — for Postgres
+- Docker (with the Compose plugin) — for Postgres and Grafana
 - [Ollama](https://ollama.com) running on the host — for the Mapping Engine LLM
 
 ## 1. Configuration
@@ -34,7 +35,29 @@ docker compose down -v        # stop and wipe the database
 Postgres listens on `localhost:${POSTGRES_PORT:-5432}`. If a Postgres is already
 using 5432, set `POSTGRES_PORT` (and the port in `DATABASE_URL`) in `.env`.
 
-## 3. Mapping Engine model
+## 3. Observability (Grafana)
+
+`docker compose up -d` also starts a **Grafana** container backed by the
+all-in-one [`grafana/otel-lgtm`](https://github.com/grafana/docker-otel-lgtm)
+stack — an OpenTelemetry Collector plus Prometheus (metrics), Tempo (traces) and
+Loki (logs), with Grafana and its datasources pre-provisioned. It stands in for
+the full `Collector → stores → Grafana` pipeline described in
+[docs/architecture/observability.md](docs/architecture/observability.md) as a
+single dev container.
+
+Open the dashboards at **http://localhost:${GRAFANA_PORT:-3000}** (anonymous
+admin access; no login). If the mediator's own dev server needs port 3000, set
+`GRAFANA_PORT` in `.env`.
+
+The mediator (running on the host) exports OTLP to the container's published
+receivers on `4317` (gRPC) and `4318` (HTTP); `OTEL_EXPORTER_OTLP_ENDPOINT` in
+`.env` points at the HTTP one. Telemetry is not on any business-logic critical
+path — the mediator runs fine with this container stopped. The container's
+`/data` (Grafana dashboards plus the Prometheus/Tempo/Loki stores) persists in
+a named volume across `docker compose down`; `down -v` wipes it and starts from
+the image's provisioned dashboards again.
+
+## 4. Mapping Engine model
 
 The Mapping Engine is provider-agnostic — the core depends only on the
 `LLMMappingProvider` interface plus a response-schema validator (see
@@ -81,7 +104,7 @@ model — a `*-base` completion model will not follow the prompt structure and i
 not suitable. The chosen `providerId` and `model` are recorded on every
 `MappingProposal.generatedBy`.
 
-## 4. Verify the model end to end
+## 5. Verify the model end to end
 
 With Ollama running and the model pulled:
 
