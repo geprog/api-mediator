@@ -13,7 +13,7 @@ Nothing produced by the [Mapping Engine](../architecture/mapping-engine.md) take
 7. If the reverse-direction `MappingProposal` for the same spec pair has *also* already been approved (recall peer-peer candidates are generated in both directions, see [architecture/mapping-engine.md](../architecture/mapping-engine.md)), the Approval Service links the two `ApprovedMapping`s via `counterpartMappingId`. Approving only one direction is a perfectly valid, common end state — it simply yields a one-way sync/adapter relationship; the counterpart link is opportunistic, not required.
 8. The Approval Service emits `MappingApproved(ApprovedMapping)` on the Event Bus.
 9. Depending on the spec-pair roles:
-   - If both apps are `PROVIDER`-role peers, the Sync Engine instantiates a `SyncRule` **per mapped resource pair** for this one direction — each created disabled until its identity key is confirmed (step 6) and its initial backfill has run or been explicitly skipped (see [architecture/sync-engine.md](../architecture/sync-engine.md)) — see [sync-polling-pull.md](sync-polling-pull.md). If a counterpart mapping exists (or is approved later), its own `SyncRule`s are a separate instantiation — two one-way rules per resource pair, not one bidirectional rule.
+   - If both apps are `PROVIDER`-role peers, the Sync Engine instantiates a `SyncRule` **per mapped resource pair** for this one direction — each created disabled; enabling one later requires its confirmed identity key (step 6), the approved target operations, and both sides' confirmed `ResourceBinding` refs, and the enable action itself triggers the one-time initial backfill before polling starts (see [architecture/sync-engine.md](../architecture/sync-engine.md)) — see [sync-polling-pull.md](sync-polling-pull.md). If a counterpart mapping exists (or is approved later), its own `SyncRule`s are a separate instantiation — two one-way rules per resource pair, not one bidirectional rule.
    - If one side is a `CONSUMER` spec, the Adapter Engine attaches bindings to the affected `AdapterEndpoint`s — activating single-binding endpoints immediately with safe defaults, flagging endpoints that now have multiple candidate bindings as `composition-required` for an explicit human composition decision — see [adapter-endpoint-composition.md](adapter-endpoint-composition.md).
 10. The Graph Service updates the corresponding `GraphEdge` — see [graph-overview.md](graph-overview.md). Two counterpart `ApprovedMapping`s render as two directed edges (or a single bidirectional rendering at the UI's discretion) between the same pair of nodes.
 
@@ -35,7 +35,7 @@ sequenceDiagram
     Appr->>Appr: validate edits against target IR; build one-way ApprovedMapping + FieldMappings + OperationMappings (+ ParameterMappings if consumer-provider)
     Appr->>Appr: link counterpartMappingId if reverse direction already approved
     Appr-->>Bus: MappingApproved(ApprovedMapping)
-    Bus->>Sync: instantiate SyncRule per resource pair, disabled until identity key + backfill (if peer-peer)
+    Bus->>Sync: instantiate SyncRule per resource pair, disabled; later enablement triggers backfill (if peer-peer)
     Bus->>Adapt: attach binding(s): activate or flag composition-required (if consumer-provider)
     Bus->>Graph: upsert GraphEdge
 ```

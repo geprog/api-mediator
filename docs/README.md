@@ -40,3 +40,4 @@ Start with [architecture/overview.md](architecture/overview.md) for the componen
 ## Reference
 
 - [glossary.md](glossary.md)
+- [related-work.md](related-work.md) — survey of proprietary and open-source tools overlapping with the mediator approach, ranked by overlap
