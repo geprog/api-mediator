@@ -41,3 +41,4 @@ Start with [architecture/overview.md](architecture/overview.md) for the componen
 
 - [glossary.md](glossary.md)
 - [related-work.md](related-work.md) — survey of proprietary and open-source tools overlapping with the mediator approach, ranked by overlap
+- [build-vs-buy.md](build-vs-buy.md) — matrix evaluation of whether an existing open-source workflow/integration tool (n8n, Node-RED, …) could replace the custom sync and adapter engines
