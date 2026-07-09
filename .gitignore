@@ -3,3 +3,19 @@
 
 # Local development configuration (copied from .env.example, may hold secrets)
 .env
+
+# Dependencies
+node_modules/
+
+# TypeScript / build output
+dist/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+blob-report/
+.playwright/

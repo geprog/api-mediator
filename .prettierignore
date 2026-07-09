@@ -1,0 +1,25 @@
+# Build artifacts and dependencies
+node_modules/
+**/dist/
+**/*.tsbuildinfo
+
+# Coverage and test output
+**/coverage/
+**/test-results/
+**/playwright-report/
+**/blob-report/
+**/.playwright/
+
+# Lockfiles and generated content
+pnpm-lock.yaml
+
+# Pre-existing repo content this toolchain slice does not own — the concept
+# docs, the vendored scenario fixtures (must stay byte-faithful to upstream),
+# the agent configs and the dev infra file predate this slice; formatting them
+# here would be an out-of-scope drive-by change.
+docs/
+scenarios/
+.claude/
+docker-compose.yml
+CLAUDE.md
+DEVELOPMENT.md
