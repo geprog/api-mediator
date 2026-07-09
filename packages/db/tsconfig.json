@@ -5,5 +5,5 @@
     "types": ["node"]
   },
   "include": ["src", "drizzle.config.ts", "vitest.integration.config.ts"],
-  "references": [{ "path": "./tsconfig.build.json" }]
+  "references": [{ "path": "./tsconfig.build.json" }, { "path": "../config/tsconfig.build.json" }]
 }

@@ -48,9 +48,29 @@ describe("loadConfig", () => {
     const config = loadConfig(baseEnv());
 
     expect(Object.isFrozen(config)).toBe(true);
+    expect(Object.isFrozen(config.http)).toBe(true);
     expect(Object.isFrozen(config.database)).toBe(true);
     expect(Object.isFrozen(config.telemetry)).toBe(true);
     expect(Object.isFrozen(config.mappingLlm)).toBe(true);
+  });
+
+  describe("HTTP_PORT", () => {
+    it("defaults to 3333 when HTTP_PORT is absent", () => {
+      const env = baseEnv();
+      delete env.HTTP_PORT;
+
+      expect(loadConfig(env).http).toEqual({ port: 3333 });
+    });
+
+    it("coerces a provided HTTP_PORT from its string value", () => {
+      expect(loadConfig({ ...baseEnv(), HTTP_PORT: "4000" }).http.port).toBe(4000);
+    });
+
+    it("rejects a non-integer or out-of-range HTTP_PORT", () => {
+      expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "3333.5" })).toThrow(/HTTP_PORT/);
+      expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "0" })).toThrow(/HTTP_PORT/);
+      expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "70000" })).toThrow(/HTTP_PORT/);
+    });
   });
 
   it("throws a helpful error when DATABASE_URL is missing", () => {

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "vitest.config.ts", "vitest.integration.config.ts"],
+  "references": [
+    { "path": "./tsconfig.build.json" },
+    { "path": "../../packages/config/tsconfig.build.json" },
+    { "path": "../../packages/db/tsconfig.build.json" },
+    { "path": "../../packages/telemetry/tsconfig.build.json" }
+  ]
+}

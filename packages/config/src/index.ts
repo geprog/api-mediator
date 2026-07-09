@@ -52,7 +52,13 @@ export interface MappingLlmConfig {
   readonly maxRetries: number;
 }
 
+/** The operator API/UI HTTP surface served by `apps/backend`. */
+export interface HttpConfig {
+  readonly port: number;
+}
+
 export interface AppConfig {
+  readonly http: HttpConfig;
   readonly database: DatabaseConfig;
   readonly telemetry: TelemetryConfig;
   readonly mappingLlm: MappingLlmConfig;
@@ -82,6 +88,26 @@ function isUrlWithProtocol(value: string, protocols: readonly string[]): boolean
 }
 
 /**
+ * Human-readable validation message for an invalid `DATABASE_URL`. Exported
+ * alongside {@link isPostgresConnectionUrl} so `@mediator/db` reuses the exact
+ * same wording when it rejects a bad URL.
+ */
+export const POSTGRES_URL_MESSAGE = "must be a postgres:// or postgresql:// connection URL";
+
+/**
+ * True when `value` is a `postgres://` / `postgresql://` connection URL — the
+ * single source of truth for what a valid `DATABASE_URL` looks like.
+ *
+ * `loadConfig` uses it to validate the environment here, and `@mediator/db`
+ * reuses it (migrate CLI + `resolveDatabaseUrl`) so both entrypoints accept and
+ * reject identical URLs. Deliberately a standalone predicate: importing it never
+ * triggers the full `loadConfig` env validation (e.g. the LLM variables).
+ */
+export function isPostgresConnectionUrl(value: string): boolean {
+  return isUrlWithProtocol(value, POSTGRES_PROTOCOLS);
+}
+
+/**
  * Boolean env vars carry the literal strings `"true"`/`"false"`; `z.coerce.boolean`
  * would treat any non-empty string (including `"false"`) as `true`, so parse the
  * two literals explicitly instead.
@@ -89,10 +115,12 @@ function isUrlWithProtocol(value: string, protocols: readonly string[]): boolean
 const booleanFromEnv = z.enum(["true", "false"]).transform((value) => value === "true");
 
 const envSchema = z.object({
+  // Operator API/UI HTTP server. Default 3333 is kept clear of Grafana's 3000
+  // (GRAFANA_PORT) to avoid a dev clash.
+  HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3333),
+
   // Database
-  DATABASE_URL: z.string().refine((v) => isUrlWithProtocol(v, POSTGRES_PROTOCOLS), {
-    error: "must be a postgres:// or postgresql:// connection URL",
-  }),
+  DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
 
   // Telemetry — empty endpoint means telemetry is disabled (a supported state).
   OTEL_EXPORTER_OTLP_ENDPOINT: z
@@ -140,6 +168,7 @@ function toTelemetryConfig(raw: RawEnv): TelemetryConfig {
 
 function toAppConfig(raw: RawEnv): AppConfig {
   return {
+    http: { port: raw.HTTP_PORT },
     database: { url: raw.DATABASE_URL },
     telemetry: toTelemetryConfig(raw),
     mappingLlm: {
@@ -155,6 +184,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
 }
 
 function freezeConfig(config: AppConfig): AppConfig {
+  Object.freeze(config.http);
   Object.freeze(config.database);
   Object.freeze(config.telemetry);
   Object.freeze(config.mappingLlm);

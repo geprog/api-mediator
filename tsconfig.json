@@ -5,6 +5,7 @@
     { "path": "./packages/config" },
     { "path": "./packages/telemetry" },
     { "path": "./packages/db" },
+    { "path": "./apps/backend" },
     { "path": "./apps/e2e" }
   ]
 }
