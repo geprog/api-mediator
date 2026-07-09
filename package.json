@@ -13,7 +13,7 @@
     "format": "prettier --check .",
     "test": "vitest run",
     "build": "pnpm -r build",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "verify": "pnpm typecheck && pnpm lint && pnpm format && pnpm test && pnpm build",
     "test:e2e": "pnpm --filter @mediator/e2e run test:e2e"
   },
   "devDependencies": {

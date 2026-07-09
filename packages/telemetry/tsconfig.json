@@ -4,5 +4,5 @@
     "noEmit": true
   },
   "include": ["src"],
-  "references": [{ "path": "./tsconfig.build.json" }]
+  "references": [{ "path": "./tsconfig.build.json" }, { "path": "../config/tsconfig.build.json" }]
 }

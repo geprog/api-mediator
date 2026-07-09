@@ -1,0 +1,33 @@
+{
+  "name": "@mediator/telemetry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {
+    "@mediator/config": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/auto-instrumentations-node": "0.78.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "0.220.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "0.220.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.220.0",
+    "@opentelemetry/resources": "2.9.0",
+    "@opentelemetry/sdk-logs": "0.220.0",
+    "@opentelemetry/sdk-metrics": "2.9.0",
+    "@opentelemetry/sdk-node": "0.220.0",
+    "@opentelemetry/semantic-conventions": "1.43.0"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  }
+}

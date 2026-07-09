@@ -23,6 +23,11 @@ echo "    compose file: ${REPO_ROOT}/docker-compose.yml"
 # --wait blocks until every service with a healthcheck reports healthy.
 docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d --wait
 
+# Resolve the Grafana host port the same way docker compose does — from .env,
+# falling back to the compose default — so the printed URL is a real value.
+GRAFANA_PORT="$(grep -E '^GRAFANA_PORT=' "${REPO_ROOT}/.env" 2>/dev/null | tail -n1 | cut -d '=' -f2- | tr -d '[:space:]' || true)"
+GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+
 echo "==> Infrastructure is up."
 echo "    Postgres:  see DATABASE_URL in .env"
-echo "    Grafana:   http://localhost:\${GRAFANA_PORT:-3000}"
+echo "    Grafana:   http://localhost:${GRAFANA_PORT}"
