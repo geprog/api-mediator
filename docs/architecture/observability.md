@@ -15,7 +15,7 @@ Every `SyncEvent`/`AuditLog` entry carries a `traceId`/`spanId` (see [data-model
 
 ## Instrumentation
 
-Every component — API/UI Layer, Spec Registry, Mapping Engine, Approval Service, Sync Engine (Webhook Receiver + Poller), Adapter Engine (Runtime + Planner), Graph Service — is instrumented with the OpenTelemetry SDK, emitting all three signal types:
+Every component — API/UI Layer, Spec Registry, Mapping Engine, Approval Service, Sync Engine (Scheduler + Poller), Adapter Engine (Runtime + Planner), Graph Service — is instrumented with the OpenTelemetry SDK, emitting all three signal types:
 
 ### Traces
 
@@ -23,7 +23,7 @@ One trace per end-to-end operation: a registration, a mapping-detection run, a s
 
 ### Metrics
 
-- **Sync Engine**: success/failure/skipped-loop/skipped-policy/conflict rate per `SyncRule`; webhook delivery latency; poller lag (time since `lastRunAt` vs. expected interval); initial-backfill progress/duration; identity-resolution failure rate (no-match / ambiguous-match, see [sync-engine.md](sync-engine.md)).
+- **Sync Engine**: success/failure/skipped-loop/skipped-policy/conflict rate per `SyncRule`; poller lag (time since `lastRunAt` vs. expected interval); initial-backfill progress/duration; identity-resolution failure rate (no-match / ambiguous-match, see [sync-engine.md](sync-engine.md)).
 - **Adapter Engine**: request rate/latency/error rate per `AdapterEndpoint`; cache hit rate; partial-failure/degraded-response rate.
 - **Mapping Engine**: LLM call latency, error rate, and token/cost usage per provider, labeled by stage (shortlist vs. detail); shortlist yield (candidate resource pairs per spec pair); escape-hatch usage rate — manually triggered detail analyses; frequent use means stage-1 recall is too low, the key health signal of the two-stage design (see [mapping-engine.md](mapping-engine.md)); mapping review queue depth (pending / `reviewRequired` proposals); average confidence score trend.
 
@@ -47,7 +47,7 @@ flowchart LR
 ## Grafana dashboards
 
 - **Landscape health** — per-app sync status, last successful sync time, error rate. A monitoring-oriented companion to the in-app [graph overview](../flows/graph-overview.md): Grafana shows operational health over time, the Graph Service shows current structural connections.
-- **Sync engine** — webhook throughput/latency, poller lag per `SyncRule`, loop-prevention skip rate, conflict rate.
+- **Sync engine** — poll-run throughput, poller lag per `SyncRule`, loop-prevention skip rate, conflict rate.
 - **Adapter engine** — request rate/latency/error rate per `AdapterEndpoint`, cache hit rate, partial-failure/degraded-response rate.
 - **Mapping engine** — LLM call latency/error rate/token usage per provider and stage, shortlist yield, escape-hatch usage, proposals pending review, average confidence score trend.
 
@@ -55,7 +55,7 @@ flowchart LR
 
 Grafana alerting rules on top of the same metrics, covering conditions such as:
 
-- A `SyncRule` with a polling transport has had no successful run past N× its expected interval (stuck poller). Webhook-only rules get no such alert — their silence is indistinguishable from "no changes" — so their alertable signals are webhook delivery *failures* and, under `webhookSetup = managed`, a periodic subscription-liveness check against the source's subscription API; pairing webhooks with polling (`transport = both`) is what buys real staleness detection.
+- A `SyncRule` has had no successful poll run past N× its expected interval (stuck poller). With polling the only change-detection transport, this staleness signal covers every rule uniformly — there is no silent transport whose inactivity is indistinguishable from "no changes".
 - An `AdapterEndpoint`'s error rate crosses a threshold.
 - The mapping review queue is growing unbounded (proposals are not being reviewed fast enough).
 - A mapping analysis has hit its retry ceiling and been marked `failed` (see [mapping-engine.md](mapping-engine.md)) — surfaced distinctly from a normal low-confidence proposal so it doesn't get lost in the review queue. A failed *shortlist* call is alerted more urgently than a failed *detail* call: it leaves the entire spec pair unanalyzed, not just one resource pair.

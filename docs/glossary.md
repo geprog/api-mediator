@@ -22,7 +22,7 @@ One-line definitions of every entity and term used across this documentation. Se
 - **PROVIDER spec** — an OpenAPI spec describing an API the app actually exposes.
 - **CONSUMER spec** — an OpenAPI spec describing what an app needs/expects from the landscape, to be served by a live [Adapter Engine](architecture/adapter-engine.md) endpoint. Never called by the mediator; if the same software also exposes an API, that is a separate, independent `PROVIDER` registration on the same app.
 - **IR (Intermediate Representation)** — the normalized, protocol-agnostic form (resources → operations → schemas) that a spec is decomposed into; everything downstream (mapping, sync, adapter) reasons over the IR, not the raw OpenAPI document.
-- **Credential** — encrypted per-app auth material (API key, OAuth2, basic auth, webhook secret).
+- **Credential** — encrypted per-app auth material (API key, OAuth2, basic auth) or the salted hash of a mediator-issued adapter token.
 - **Spec Adapter** — the conversion layer that turns any protocol description (OpenAPI today; a future GraphQL SDL/AsyncAPI/gRPC proto) into the shared IR; the seam a future non-REST protocol plugs into.
 - **Protocol Client/Server interface pair** — the seam behind the Outbound Call Executor (client side) and Adapter Server Runtime (server side) that a future non-REST protocol implements; REST is the first implementation of both.
 
@@ -55,16 +55,15 @@ One-line definitions of every entity and term used across this documentation. Se
 
 ## Sync
 
-- **Sync Engine** — executes approved peer-to-peer mappings on an ongoing basis (push and/or pull).
-- **SyncRule** — the ongoing sync configuration for one mapped resource pair of a (one-directional) peer-peer `ApprovedMapping` — the unit that owns its identity key, backfill, poll cursor, snapshot, and webhook subscription.
+- **Sync Engine** — executes approved peer-to-peer mappings on an ongoing basis by polling source apps for changes.
+- **SyncRule** — the ongoing sync configuration for one mapped resource pair of a (one-directional) peer-peer `ApprovedMapping` — the unit that owns its identity key, backfill, poll cursor, and snapshot.
 - **Scheduler** — the Sync Engine subcomponent that wakes a `SyncRule` when its polling interval elapses.
-- **Webhook Receiver** — the Sync Engine subcomponent that accepts inbound change notifications from apps.
-- **Poller** — the Sync Engine subcomponent that periodically pulls changes from apps that don't push webhooks.
+- **Poller** — the Sync Engine subcomponent that pulls changes from source apps — the mediator's only change-detection mechanism.
 - **Loop Prevention** — the mechanism that detects and skips propagating a mediator-originated write back to its own source (prevents infinite sync ping-pong); covers content echoes via per-side reconciled baselines in `SyncFieldState` (with the recently-written cache as fast path) and create/delete echoes via `RecordLink` state.
 - **Identity Resolution** — the pipeline stage that classifies a detected change (create/update/delete) and resolves — or establishes — the record's `RecordLink`.
 - **RecordLink** — the persisted pairing of one record's native id in app A with the same logical record's native id in app B; established by create propagation, identity-key match, or manual linking; tombstoned (not deleted) on deletion.
 - **Tombstone** — the `tombstoned` state of a `RecordLink` after either side's record is deleted: reason `propagated-delete` (the mediator's own deletion — recognizes the other side's delete echo) or `observed-delete` (deletion seen but not propagated — the pair is severed). Either prevents a slower poll cycle from resurrecting the record.
-- **Initial backfill** — the one-time reconciliation run when a `SyncRule` is first enabled, before its transports go live; `link-only` (default: link + seed baselines, write nothing) or `push` (source is the initial source of truth).
+- **Initial backfill** — the one-time reconciliation run when a `SyncRule` is first enabled, before its polling goes live; `link-only` (default: link + seed baselines, write nothing) or `push` (source is the initial source of truth).
 - **deletePropagation** — per-`SyncRule` policy for source-side deletions: `ignore` (default; recorded as `skipped-policy` and the link tombstoned `observed-delete`, never silently dropped) or `propagate`.
 - **Idempotency key** — a deterministic identifier per outbound write (hashing the mapping, the source record's native id, the payload, *and* the prior reconciled state — a distinguished *none* marker for creates — so value reverts aren't misread as duplicates) used to detect and skip duplicate deliveries within a bounded lookback window.
 - **Parked (dead-letter) event** — a sync write that exhausted its retry ceiling; recorded, alerted, and skipped past so it doesn't block its record's queue. Superseded by any later successful sync of the same record; manually replayable through the normal pipeline.

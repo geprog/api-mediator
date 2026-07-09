@@ -22,7 +22,7 @@ Start with [architecture/overview.md](architecture/overview.md) for the componen
 - [overview.md](architecture/overview.md) — components, responsibilities, component diagram
 - [data-model.md](architecture/data-model.md) — entities, relationships, ER diagram
 - [mapping-engine.md](architecture/mapping-engine.md) — spec decomposition, LLM interface, confidence, versioning
-- [sync-engine.md](architecture/sync-engine.md) — webhook/poll execution, loop prevention, consistency/conflict handling
+- [sync-engine.md](architecture/sync-engine.md) — polling execution, loop prevention, consistency/conflict handling
 - [adapter-engine.md](architecture/adapter-engine.md) — binding, transformation pipeline, aggregation, caching
 - [security.md](architecture/security.md) — credential handling, inbound auth, audit logging
 - [extensibility.md](architecture/extensibility.md) — spec versioning lifecycle & future-protocol seams
@@ -33,7 +33,6 @@ Start with [architecture/overview.md](architecture/overview.md) for the componen
 - [app-registration-and-mapping-detection.md](flows/app-registration-and-mapping-detection.md)
 - [mapping-review-and-approval.md](flows/mapping-review-and-approval.md)
 - [adapter-endpoint-composition.md](flows/adapter-endpoint-composition.md)
-- [sync-webhook-push.md](flows/sync-webhook-push.md)
 - [sync-polling-pull.md](flows/sync-polling-pull.md)
 - [adapter-request-resolution.md](flows/adapter-request-resolution.md)
 - [graph-overview.md](flows/graph-overview.md)

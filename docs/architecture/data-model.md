@@ -10,7 +10,7 @@ An application in the landscape. An app can carry a `PROVIDER` spec (an API it e
 
 - `id`, `name`, `status` (active/disabled)
 - `baseUrl` — optional. Absent for apps that only registered a `CONSUMER` spec, since in that case the mediator itself hosts the reachable endpoint (see [adapter-engine.md](adapter-engine.md)).
-- `capabilities`: `{ supportsWebhooks: bool, webhookSetup: managed | manual, webhookPayload: full | thin, webhookVerification: signed | none, supportsPolling: bool, supportsDeltaQuery: bool, supportsChangeTimestamps: bool, defaultPollInterval }` — declared at registration. Drives which sync transport(s) apply; how webhook subscriptions get provisioned (`webhookSetup`); whether webhook payloads carry the changed record or only its id (`webhookPayload = thin` makes the Webhook Receiver fetch the record back from the source before the pipeline runs); whether the app signs its webhooks at all (`webhookVerification = none` demotes webhooks to fetch triggers whose content is never trusted — see [sync-engine.md](sync-engine.md) and [security.md](security.md)); whether the Poller can use changed-since queries instead of full-fetch diffing; and whether conflict resolution may compare source change timestamps (`supportsChangeTimestamps`, see [sync-engine.md](sync-engine.md)). The webhook fields are meaningful only when `supportsWebhooks`.
+- `capabilities`: `{ supportsPolling: bool, supportsDeltaQuery: bool, supportsChangeTimestamps: bool, defaultPollInterval }` — declared at registration. Change detection is exclusively poll-based (see [sync-engine.md](sync-engine.md)), so `supportsPolling` decides whether the app can act as a sync *source* at all — an app that can be neither listed nor delta-queried can still be a sync *target* or an adapter backend; `supportsDeltaQuery` decides whether the Poller can use changed-since queries instead of full-fetch diffing; and `supportsChangeTimestamps` decides whether conflict resolution may compare source change timestamps (see [sync-engine.md](sync-engine.md)).
 - `createdAt`
 
 ### ApiSpec
@@ -23,7 +23,7 @@ An application in the landscape. An app can carry a `PROVIDER` spec (an API it e
 
 ### Credential
 
-- `id`, `appId`, `type` (apiKey / oauth2 / basicAuth / webhookSecret / adapterToken / custom) — `adapterToken` rows hold a consumer app's mediator-issued token, stored as a salted hash rather than encrypted material: validation needs equality, never the original value (see [security.md](security.md))
+- `id`, `appId`, `type` (apiKey / oauth2 / basicAuth / adapterToken / custom) — `adapterToken` rows hold a consumer app's mediator-issued token, stored as a salted hash rather than encrypted material: validation needs equality, never the original value (see [security.md](security.md))
 - `encryptedPayload` (envelope-encrypted, see [security.md](security.md))
 - `scopes`, `lastRotatedAt`
 
@@ -95,15 +95,14 @@ One approved operation-input correspondence under a **consumer-provider** `Appro
 
 ### SyncRule
 
-Instantiated only for peer-to-peer `ApprovedMapping`s (both sides `PROVIDER` specs): **one `SyncRule` per mapped resource pair** under the mapping. The resource pair — not the whole spec pair — is the unit that owns an identity key, a backfill, a poll cursor, a snapshot, and a webhook subscription, so it is the unit of sync execution and enablement; a mapping covering four resource pairs yields four independently enable-able rules. Since `ApprovedMapping` is always one-directional (see above), a `SyncRule` has no separate `direction` field of its own; it simply runs in the direction of the mapping it instantiates from (`sourceSpecId`'s app → `targetSpecId`'s app). A bidirectional sync of a resource pair is two `SyncRule`s, one per paired `ApprovedMapping` — which also means each direction can independently pick its own transport based on its own source app's `capabilities` (e.g. A→B over webhook because A supports webhooks, B→A over polling because B only supports polling).
+Instantiated only for peer-to-peer `ApprovedMapping`s (both sides `PROVIDER` specs): **one `SyncRule` per mapped resource pair** under the mapping. The resource pair — not the whole spec pair — is the unit that owns an identity key, a backfill, a poll cursor, and a snapshot, so it is the unit of sync execution and enablement; a mapping covering four resource pairs yields four independently enable-able rules. Since `ApprovedMapping` is always one-directional (see above), a `SyncRule` has no separate `direction` field of its own; it simply runs in the direction of the mapping it instantiates from (`sourceSpecId`'s app → `targetSpecId`'s app). A bidirectional sync of a resource pair is two `SyncRule`s, one per paired `ApprovedMapping` — each polling its own source app on its own interval.
 
 - `id`, `approvedMappingId`, `resourcePairRef` — the mapped resource pair this rule executes (same reference shape as `RecordLink.resourcePairRef`)
-- `transport` (webhook / poll / both)
-- `pollIntervalOverride`, `webhookSubscriptionRef`
+- `pollIntervalOverride`
 - `pollOperationRef` — which source operation the Poller (and backfill) calls: the resource's delta-query operation when the source declares `supportsDeltaQuery`, otherwise its collection read. Derived mechanically from the source IR at rule creation (collection-shaped `read` operation), correctable by the operator — the same derive-then-correct pattern as `OperationMapping.action`. Paging follows the operation's IR-declared pagination parameters, to exhaustion (see *Polling pull pipeline* in [sync-engine.md](sync-engine.md)).
 - `deletePropagation` (`ignore` | `propagate`, default `ignore`) — whether a detected source-side deletion is propagated to the target. Deletion is the one destructive operation the mediator can perform against an app, so it is opt-in per rule; ignored deletions are still recorded (`SyncEvent.status = skipped-policy`), never silently dropped. See *Change types* in [sync-engine.md](sync-engine.md).
 - `targetDriftCheck` (`none` | `read-before-write`, default `none`) — opt-in protection for one-way rules with no counterpart, where nothing routinely observes the target: reads the target record immediately before writing and compares mapped fields against their target-side `lastSyncedHash`; drift is handled as a conflict instead of silently overwritten (see *Conflict handling* in [sync-engine.md](sync-engine.md)). Unnecessary on bidirectional pairs, where the counterpart rule's own observation covers the target side.
-- `backfillMode` (`link-only` | `push`), `backfillStatus` (`pending` | `running` | `completed` | `skipped`) — the one-time initial reconciliation performed before the rule's transports go live; see *Initial backfill* in [sync-engine.md](sync-engine.md).
+- `backfillMode` (`link-only` | `push`), `backfillStatus` (`pending` | `running` | `completed` | `skipped`) — the one-time initial reconciliation performed before the rule's polling goes live; see *Initial backfill* in [sync-engine.md](sync-engine.md).
 - `status` (enabled/disabled), `lastRunAt`, `lastEventAt`, `cursor` (for delta polling) — a rule cannot be enabled until its resource pair has a confirmed identity `FieldMapping`, the target side has the approved `OperationMapping`s for what the rule propagates (`update` always; `delete` when `deletePropagation = propagate`; a rule without an approved `create` operation records observed creates as `skipped-policy` — see *Change types* in [sync-engine.md](sync-engine.md)), **and** its backfill has completed or been explicitly skipped. A rule only *executes* while its `ApprovedMapping` is `active`: a `stale` mapping pauses its rules without changing their `status` — staleness lives on the mapping alone (see [extensibility.md](extensibility.md)).
 - `lastSnapshotRef` — reference to the per-record content-hash snapshot (record native id → hash) from the last complete full fetch; what the Poller diffs against when the source app doesn't support delta queries (see [sync-engine.md](sync-engine.md)).
 
@@ -143,21 +142,21 @@ Tracks the last-reconciled value of one mapped field for one linked record — t
 - `recordLinkId` — the cross-app record identity this state applies to; the link carries both apps' native ids (see `RecordLink` above)
 - `appAFieldPath`, `appBFieldPath` — the unordered field pairing this state tracks (the apps themselves are given by the `RecordLink`)
 - `lastSyncedHashA`, `lastSyncedHashB`, `lastSyncedAt` — the last-reconciled value, hashed **once per side, in that side's own canonical stored representation**. A transformed field pair holds two representations of the same reconciled fact (`"DE"` on one side, `"Germany"` on the other), so a single hash could only ever match one side — comparisons are always same-side, never across the transform boundary. The *written* side's hash is captured from the write response body (or a follow-up read when the API doesn't return the stored resource) so target-side normalization doesn't defeat echo detection (see *Loop prevention* in [sync-engine.md](sync-engine.md)); the *source* side's hash is the observed source value the write was computed from. Both absent when initial backfill found the two sides already divergent for this field; the first subsequent change is then a conflict by construction (see *Initial backfill* in [sync-engine.md](sync-engine.md))
-- `sideAObservedHash`, `sideBObservedHash` (each with an `observedAt`) — the latest value hash the mediator has *observed* on each side, updated from every webhook, poll result, and write response that touches the field; conflict detection compares each side's observed hash against **that same side's** `lastSyncedHash` to decide whether the side has drifted since the last reconcile (see [sync-engine.md](sync-engine.md))
+- `sideAObservedHash`, `sideBObservedHash` (each with an `observedAt`) — the latest value hash the mediator has *observed* on each side, updated from every poll result and write response that touches the field; conflict detection compares each side's observed hash against **that same side's** `lastSyncedHash` to decide whether the side has drifted since the last reconcile (see [sync-engine.md](sync-engine.md))
 - `lastWrittenByMappingId` — the `ApprovedMapping` (direction) that produced the last write, for audit/debugging
 
 ### GraphEdge (materialized projection)
 
 - `id`, `sourceNodeId`, `targetNodeId`
 - `type` (sync / adapter-dependency)
-- `transport`, `status`
+- `status`
 - `metadata` (last activity timestamp, direction)
 
 ### SyncEvent / AuditLog
 
 One entity, two names: these rows *are* the Audit/Event Log; `SyncEvent` is the name kept because sync executions dominate the row volume.
 
-- `id`, `type` (inbound-webhook / poll-run / backfill-run / outbound-call / adapter-request / mapping-decision / credential-access)
+- `id`, `type` (poll-run / backfill-run / outbound-call / adapter-request / mapping-decision / credential-access)
 - `relatedRuleId` / `relatedBindingId` / `relatedMappingId` / `relatedCredentialId` — whichever the event `type` concerns (`mapping-decision` events reference the proposal/mapping, `credential-access` events the credential); `originAppId`
 - `idempotencyKey`, `payloadHash`
 - `status` (success / failure / skipped-loop / skipped-policy / conflict) — `skipped-policy` records a change observed but not propagated by policy: a deletion under `deletePropagation = ignore`, a create with no approved `create` operation, or a change to a record whose link is tombstoned `observed-delete` (counterpart deleted)
