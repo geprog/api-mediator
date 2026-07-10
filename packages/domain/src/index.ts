@@ -5,8 +5,8 @@
  *
  * This is a types-only, I/O-free package: no persistence, no HTTP, no OpenAPI
  * parsing (those slices import from here). Phase 1 covers registration + spec
- * ingestion entities and the IR; mapping/sync/adapter entities arrive in later
- * phases.
+ * ingestion entities and the IR; Phase 2 adds the mapping-detection entities and
+ * the LLM structured-output shapes; sync/adapter entities arrive in later phases.
  */
 
 export * from "./enums.js";
@@ -17,3 +17,7 @@ export * from "./api-spec.js";
 export * from "./resource-binding.js";
 export * from "./credential.js";
 export * from "./events.js";
+export * from "./mapping-enums.js";
+export * from "./llm-output.js";
+export * from "./mapping-proposal.js";
+export * from "./mapping-proposal-item.js";
