@@ -16,7 +16,7 @@ import {
   type DbTransaction,
 } from "@mediator/db";
 import type { RegisteredApp } from "@mediator/domain";
-import { eq, like, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { pgTable, text, uuid } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -73,9 +73,36 @@ describe("Event Bus integration (requires Postgres)", () => {
     };
   }
 
-  function dispatcherFor(consumer: EventConsumer<DbTransaction>): OutboxDispatcher<DbTransaction> {
+  /**
+   * A consumer that writes its durable effect **and then** conditionally throws —
+   * so, when it fails, there is a real committed-within-savepoint write for the
+   * savepoint rollback to undo (proving partial-success isolation, not merely a
+   * throw-before-write).
+   */
+  function writeThenMaybeFailConsumer(
+    name: string,
+    failWhile: () => boolean,
+  ): EventConsumer<DbTransaction> {
+    return {
+      name,
+      handles: (type) => type === "SpecIngested",
+      handle: async (event, txn) => {
+        parseSpecIngested(event);
+        await txn.insert(testEffect).values({ eventId: event.id, consumerName: name });
+        if (failWhile()) {
+          throw new Error("transient consumer failure");
+        }
+      },
+    };
+  }
+
+  function dispatcherFor(
+    ...consumers: readonly EventConsumer<DbTransaction>[]
+  ): OutboxDispatcher<DbTransaction> {
     const registry = new ConsumerRegistry<DbTransaction>();
-    registry.register(consumer);
+    for (const consumer of consumers) {
+      registry.register(consumer);
+    }
     return new OutboxDispatcher<DbTransaction>(
       db,
       (txn) => new EventOutboxRepository(txn),
@@ -92,6 +119,24 @@ describe("Event Bus integration (requires Postgres)", () => {
 
   async function ledgerCount(eventId: string): Promise<number> {
     const rows = await db.select().from(processedEvent).where(eq(processedEvent.eventId, eventId));
+    return rows.length;
+  }
+
+  async function effectCountFor(eventId: string, consumerName: string): Promise<number> {
+    const rows = await db
+      .select()
+      .from(testEffect)
+      .where(and(eq(testEffect.eventId, eventId), eq(testEffect.consumerName, consumerName)));
+    return rows.length;
+  }
+
+  async function ledgerCountFor(eventId: string, consumerName: string): Promise<number> {
+    const rows = await db
+      .select()
+      .from(processedEvent)
+      .where(
+        and(eq(processedEvent.eventId, eventId), eq(processedEvent.consumerName, consumerName)),
+      );
     return rows.length;
   }
 
@@ -216,6 +261,48 @@ describe("Event Bus integration (requires Postgres)", () => {
     expect(afterSuccess?.attempts).toBe(1);
     expect(await effectCount(event.id)).toBe(1);
     expect(await ledgerCount(event.id)).toBe(1);
+  });
+
+  it("isolates a failing consumer within the outer tx: the succeeding consumer commits, the failing one rolls back, and retry skips the committed one", async () => {
+    // A succeeds; B writes its effect then throws. Both run under the SAME outer
+    // Postgres transaction, each inside its own savepoint. This proves the
+    // partial-success invariant on a real DB (the FakeTx unit test can't model
+    // SAVEPOINT rollback).
+    const event = createSpecIngested({ apiSpecId: "spec-p", appId: "app-p", role: "PROVIDER" });
+    await tx(db, (txn) => bus.emit(event, txn));
+
+    let bShouldFail = true;
+    const consumerA = effectConsumer("evtbus-test-A");
+    const consumerB = writeThenMaybeFailConsumer("evtbus-test-B", () => bShouldFail);
+    const dispatcher = dispatcherFor(consumerA, consumerB);
+
+    // Pass 1: A commits, B rolls back, row left unpublished for retry.
+    const pass1 = await dispatcher.runOnce();
+    expect(pass1).toStrictEqual({ claimed: 1, published: 0, failed: 1 });
+    // A's effect + ledger row persisted (its savepoint released into the outer tx).
+    expect(await effectCountFor(event.id, "evtbus-test-A")).toBe(1);
+    expect(await ledgerCountFor(event.id, "evtbus-test-A")).toBe(1);
+    // B's effect write AND ledger row were rolled back by its savepoint.
+    expect(await effectCountFor(event.id, "evtbus-test-B")).toBe(0);
+    expect(await ledgerCountFor(event.id, "evtbus-test-B")).toBe(0);
+    const afterPartial = await new EventOutboxRepository(db).findByEventId(event.id);
+    expect(afterPartial?.publishedAt).toBeNull();
+    expect(afterPartial?.attempts).toBe(1);
+    expect(afterPartial?.lastError).toBe("transient consumer failure");
+
+    // Pass 2: B now succeeds; A is skipped by the ledger (no duplicate effect).
+    bShouldFail = false;
+    const pass2 = await dispatcher.runOnce();
+    expect(pass2).toStrictEqual({ claimed: 1, published: 1, failed: 0 });
+    // A was skipped: its effect is not duplicated and its ledger stays at one row.
+    expect(await effectCountFor(event.id, "evtbus-test-A")).toBe(1);
+    expect(await ledgerCountFor(event.id, "evtbus-test-A")).toBe(1);
+    // B ran to completion this time.
+    expect(await effectCountFor(event.id, "evtbus-test-B")).toBe(1);
+    expect(await ledgerCountFor(event.id, "evtbus-test-B")).toBe(1);
+    const afterPublish = await new EventOutboxRepository(db).findByEventId(event.id);
+    expect(afterPublish?.publishedAt).not.toBeNull();
+    expect(afterPublish?.attempts).toBe(1);
   });
 
   it("runSweep executes a registered reconciler", async () => {

@@ -41,8 +41,12 @@ describe("ReconciliationSweep", () => {
     const result = await sweep.runSweep();
 
     expect(ran).toStrictEqual(["a", "b"]);
-    expect(result.outcomes[0]?.status).toBe("error");
-    expect(result.outcomes[0]?.error).toBeInstanceOf(Error);
+    const first = result.outcomes[0];
+    expect(first?.status).toBe("error");
+    // Narrow on the discriminant before reading `error` (only the error variant has it).
+    if (first?.status === "error") {
+      expect(first.error).toBeInstanceOf(Error);
+    }
     expect(result.outcomes[1]).toStrictEqual({ name: "b", status: "ok" });
   });
 

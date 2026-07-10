@@ -22,13 +22,14 @@ export interface Reconciler {
   reconcile(): Promise<void>;
 }
 
-/** The result of running one reconciler within a sweep. */
-export interface ReconcilerOutcome {
-  readonly name: string;
-  readonly status: "ok" | "error";
-  /** Present only when `status` is `"error"`: the error the reconciler threw. */
-  readonly error?: unknown;
-}
+/**
+ * The result of running one reconciler within a sweep — a discriminated union on
+ * `status` so an `ok` outcome cannot carry an `error` and an `error` outcome must
+ * carry one (illegal states unrepresentable).
+ */
+export type ReconcilerOutcome =
+  | { readonly name: string; readonly status: "ok" }
+  | { readonly name: string; readonly status: "error"; readonly error: unknown };
 
 /** The result of one {@link ReconciliationSweep.runSweep} pass. */
 export interface ReconciliationSweepResult {
