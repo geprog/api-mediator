@@ -17,6 +17,7 @@ const BACKEND_ORIGIN = process.env["BACKEND_ORIGIN"] ?? "http://localhost:3333";
 export default defineConfig({
   plugins: [vue()],
   server: {
+    port: Number(process.env.PORT ?? 5173),
     proxy: {
       "/health": { target: BACKEND_ORIGIN, changeOrigin: true },
       "/api": { target: BACKEND_ORIGIN, changeOrigin: true },
