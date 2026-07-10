@@ -58,6 +58,18 @@ export interface HttpConfig {
 }
 
 /**
+ * App-registration defaults. `defaultPollInterval` (milliseconds) is the
+ * conservative fallback stamped onto a `RegisteredApp.capabilities` when a
+ * registration omits `capabilities` entirely (AR-1 criterion 2 / open question
+ * 2): all capability flags default false and the poll interval defaults here. It
+ * is not yet *consumed* in Phase 1 (the Sync Engine's Scheduler is Phase 4); this
+ * is where its landscape-wide default lives.
+ */
+export interface RegistrationConfig {
+  readonly defaultPollInterval: number;
+}
+
+/**
  * Credential Store configuration. `masterKey` is the decoded 32-byte master
  * key (KEK) that wraps each credential's data key (see
  * `docs/architecture/security.md` and `@mediator/credentials`). Held as a
@@ -74,6 +86,7 @@ export interface AppConfig {
   readonly telemetry: TelemetryConfig;
   readonly mappingLlm: MappingLlmConfig;
   readonly credentials: CredentialsConfig;
+  readonly registration: RegistrationConfig;
 }
 
 /** Thrown by {@link loadConfig} when the environment fails validation. */
@@ -187,6 +200,12 @@ const envSchema = z.object({
   MAPPING_LLM_THINKING: booleanFromEnv,
   MAPPING_LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive(),
   MAPPING_LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(3),
+
+  // Registration defaults. The conservative default poll interval (ms) stamped
+  // onto a RegisteredApp's capabilities when a registration omits capabilities
+  // (AR-1 crit 2). Defaults to 300000 ms (300 s); consumed by the Phase-4 Sync
+  // Engine Scheduler.
+  MEDIATOR_DEFAULT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
 });
 
 type RawEnv = z.infer<typeof envSchema>;
@@ -235,6 +254,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
       maxRetries: raw.MAPPING_LLM_MAX_RETRIES,
     },
     credentials: toCredentialsConfig(raw),
+    registration: { defaultPollInterval: raw.MEDIATOR_DEFAULT_POLL_INTERVAL_MS },
   };
 }
 
@@ -244,6 +264,7 @@ function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.telemetry);
   Object.freeze(config.mappingLlm);
   Object.freeze(config.credentials);
+  Object.freeze(config.registration);
   return Object.freeze(config);
 }
 

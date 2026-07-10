@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src"],
+  "exclude": ["**/*.spec.ts"],
+  "references": [{ "path": "../domain/tsconfig.build.json" }]
+}

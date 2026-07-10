@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/domain" },
+    { "path": "./packages/contracts" },
     { "path": "./packages/config" },
     { "path": "./packages/telemetry" },
     { "path": "./packages/ir" },

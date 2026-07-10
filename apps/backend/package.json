@@ -11,13 +11,20 @@
   },
   "dependencies": {
     "@mediator/config": "workspace:*",
+    "@mediator/contracts": "workspace:*",
+    "@mediator/credentials": "workspace:*",
     "@mediator/db": "workspace:*",
+    "@mediator/domain": "workspace:*",
+    "@mediator/event-bus": "workspace:*",
+    "@mediator/ir": "workspace:*",
     "@mediator/telemetry": "workspace:*",
     "fastify": "5.10.0",
-    "pino": "10.3.1"
+    "pino": "10.3.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "drizzle-orm": "0.45.2",
     "tsx": "4.23.0",
     "vitest": "4.1.10"
   }
