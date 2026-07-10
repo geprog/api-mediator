@@ -8,7 +8,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "typecheck": "tsc -b",
+    "dev": "pnpm -r --parallel run dev",
+    "typecheck": "tsc -b && pnpm --filter @mediator/frontend run typecheck",
     "lint": "eslint .",
     "format": "prettier --check .",
     "test": "vitest run",
@@ -24,6 +25,7 @@
     "@vitest/coverage-v8": "4.1.10",
     "@vue/eslint-config-typescript": "14.9.0",
     "eslint": "10.6.0",
+    "eslint-config-prettier": "10.1.8",
     "eslint-plugin-vue": "10.9.2",
     "globals": "17.7.0",
     "prettier": "3.9.5",

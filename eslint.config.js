@@ -1,5 +1,6 @@
 import eslint from "@eslint/js";
 import { defineConfigWithVueTs, vueTsConfigs } from "@vue/eslint-config-typescript";
+import prettierConfig from "eslint-config-prettier/flat";
 import pluginVue from "eslint-plugin-vue";
 import globals from "globals";
 import tseslint from "typescript-eslint";
@@ -10,22 +11,63 @@ import tseslint from "typescript-eslint";
  * - First-party TypeScript is linted with typescript-eslint's type-checked
  *   `strictTypeChecked` preset, plus the three non-negotiable rules from
  *   CLAUDE.md promoted to errors.
- * - Vue SFCs (frontend lands in slice 4) get `eslint-plugin-vue`'s
- *   vue3-recommended rules and `@vue/eslint-config-typescript`, scoped to
- *   `apps/frontend/**\/*.vue` so they never touch backend/package code.
+ * - Vue SFCs get `eslint-plugin-vue`'s vue3-recommended rules and the
+ *   **type-checked** `@vue/eslint-config-typescript` preset, scoped to
+ *   `apps/frontend/**\/*.vue` so they never touch backend/package code. The
+ *   type-checked preset (with type-aware parsing pointed at the frontend
+ *   tsconfig) is what lets `no-floating-promises` and
+ *   `explicit-module-boundary-types` — both type-information rules — actually
+ *   fire inside `<script setup lang="ts">`, matching the backend bar.
  * - Plain JS / config files opt out of type-aware linting.
+ * - `eslint-config-prettier` is applied last to switch off every stylistic rule
+ *   that would fight Prettier (the repo's formatter of record — `pnpm format`).
+ *   This only disables formatting rules; the vue3 correctness rules and the
+ *   three mandated type rules are untouched.
  */
 
 /**
- * The Vue + TS-in-SFC preset ships several unscoped blocks (global parser and
- * rule sets). Confine every block to frontend SFCs so it cannot interfere with
- * the type-checked backend/package linting above. None of the preset's blocks
- * are `ignores`-only, so overriding `files` on each is safe.
+ * The Vue + TS-in-SFC preset is designed to own linting for a whole Vue project
+ * (`.ts` and `.vue` alike). In this monorepo the root `**\/*.ts` block already
+ * owns `.ts`, so every preset block is confined to frontend SFCs — otherwise
+ * the preset's `default-project-service-for-ts-files` block would apply its own
+ * `projectService` to backend/package `.ts` and break their `allowDefaultProject`
+ * wiring.
+ *
+ * The one block that must NOT be scoped to `.vue` but instead dropped is the
+ * `disable-type-checked` block: it exists to switch type-aware rules off for
+ * files that can't be type-checked (`**\/*.js`). Forcing it onto `.vue` (which a
+ * blanket `.map` does) is exactly what silently turned `no-floating-promises`
+ * back *off* for `.vue`. Our own JS is already covered by the `**\/*.js` block
+ * below, so filtering it out here is safe.
+ *
+ * Two extra config objects are folded in before scoping:
+ *  - `languageOptions.parserOptions` enables the type-aware program for `.vue`
+ *    (projectService + the frontend tsconfig via `tsconfigRootDir`, plus `.vue`
+ *    as an extra file extension) — required for the type-checked rules, and a
+ *    robust catch-all for SFCs added after this config is authored.
+ *  - `rules` promotes the same three CLAUDE.md rules to errors as for `.ts`, so
+ *    the mandated bar is identical across `.ts` and `.vue`.
  */
 const vueConfigs = defineConfigWithVueTs(
   pluginVue.configs["flat/recommended"],
-  vueTsConfigs.recommended,
-).map((config) => ({ ...config, files: ["apps/frontend/**/*.vue"] }));
+  vueTsConfigs.recommendedTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+        extraFileExtensions: [".vue"],
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/explicit-module-boundary-types": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+    },
+  },
+)
+  .filter((config) => config.name !== "typescript-eslint/disable-type-checked")
+  .map((config) => ({ ...config, files: ["apps/frontend/**/*.vue"] }));
 
 export default tseslint.config(
   {
@@ -69,4 +111,7 @@ export default tseslint.config(
       globals: { ...globals.node },
     },
   },
+
+  // Must stay last: turns off every ESLint rule that Prettier already enforces.
+  prettierConfig,
 );
