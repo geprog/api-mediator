@@ -56,9 +56,24 @@ importers:
       '@mediator/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@mediator/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@mediator/credentials':
+        specifier: workspace:*
+        version: link:../../packages/credentials
       '@mediator/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@mediator/event-bus':
+        specifier: workspace:*
+        version: link:../../packages/event-bus
+      '@mediator/ir':
+        specifier: workspace:*
+        version: link:../../packages/ir
       '@mediator/telemetry':
         specifier: workspace:*
         version: link:../../packages/telemetry
@@ -68,10 +83,16 @@ importers:
       pino:
         specifier: 10.3.1
         version: 10.3.1
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
       tsx:
         specifier: 4.23.0
         version: 4.23.0
@@ -137,6 +158,19 @@ importers:
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(happy-dom@20.10.6)(vite@8.1.4(@types/node@24.13.3)(esbuild@0.28.1)(tsx@4.23.0)(yaml@2.9.0))
+
+  packages/contracts:
+    dependencies:
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
       vitest:
         specifier: 4.1.10
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(happy-dom@20.10.6)(vite@8.1.4(@types/node@24.13.3)(esbuild@0.28.1)(tsx@4.23.0)(yaml@2.9.0))

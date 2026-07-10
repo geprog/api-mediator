@@ -8,7 +8,12 @@
   "references": [
     { "path": "./tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
+    { "path": "../../packages/contracts/tsconfig.build.json" },
+    { "path": "../../packages/credentials/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
+    { "path": "../../packages/domain/tsconfig.build.json" },
+    { "path": "../../packages/event-bus/tsconfig.build.json" },
+    { "path": "../../packages/ir/tsconfig.build.json" },
     { "path": "../../packages/telemetry/tsconfig.build.json" }
   ]
 }

@@ -90,6 +90,11 @@ export default tseslint.config(
       parserOptions: {
         projectService: {
           allowDefaultProject: ["vitest.config.ts", "packages/*/vitest.config.ts"],
+          // Each workspace package owns a `vitest.config.ts` linted via the
+          // default project; the type-checked preset caps that at 8 files, which
+          // the growing package count exceeds. These are tiny static config
+          // files, so the (documented) perf cost of raising the cap is negligible.
+          maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 30,
         },
         tsconfigRootDir: import.meta.dirname,
       },

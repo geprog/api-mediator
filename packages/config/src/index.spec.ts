@@ -237,5 +237,24 @@ describe("loadConfig", () => {
       expect(config.mappingLlm.temperature).toBe(0);
       expect(config.mappingLlm.maxRetries).toBe(3);
     });
+
+    it("defaults registration.defaultPollInterval to 300000 ms when omitted", () => {
+      const env = baseEnv();
+      delete env.MEDIATOR_DEFAULT_POLL_INTERVAL_MS;
+
+      expect(loadConfig(env).registration).toEqual({ defaultPollInterval: 300000 });
+    });
+
+    it("coerces a provided MEDIATOR_DEFAULT_POLL_INTERVAL_MS from its string value", () => {
+      const config = loadConfig({ ...baseEnv(), MEDIATOR_DEFAULT_POLL_INTERVAL_MS: "60000" });
+
+      expect(config.registration.defaultPollInterval).toBe(60000);
+    });
+
+    it("rejects a non-positive MEDIATOR_DEFAULT_POLL_INTERVAL_MS", () => {
+      expect(() => loadConfig({ ...baseEnv(), MEDIATOR_DEFAULT_POLL_INTERVAL_MS: "0" })).toThrow(
+        /MEDIATOR_DEFAULT_POLL_INTERVAL_MS/,
+      );
+    });
   });
 });

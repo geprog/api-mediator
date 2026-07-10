@@ -1,9 +1,24 @@
 import type { AppConfig } from "@mediator/config";
-import { closeDb, type Database } from "@mediator/db";
+import { EnvKeyProvider, type CredentialStoreLogger } from "@mediator/credentials";
+import {
+  ApiSpecRepository,
+  RegisteredAppRepository,
+  ResourceBindingRepository,
+  closeDb,
+  type Database,
+} from "@mediator/db";
+import { PostgresEventBus } from "@mediator/event-bus";
 import { getActiveTraceContext, shutdownTelemetry } from "@mediator/telemetry";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { pino } from "pino";
 
+import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
+import { DbUnitOfWork } from "./modules/persistence.js";
+import { RegistrationService } from "./modules/registration.js";
+import { ResourceBindingService } from "./modules/resource-bindings.js";
+import { SpecRegistry } from "./modules/spec-registry.js";
+import { registerErrorHandler } from "./http/errors.js";
+import { registerOperatorApi, type OperatorApiDeps } from "./http/operator/api.js";
 import { pingDatabase, registerHealthRoute } from "./http/operator/health.js";
 
 /**
@@ -64,10 +79,50 @@ export function createServerLogger(config: AppConfig): FastifyBaseLogger {
   return pino({ name: serviceName, mixin: traceContextMixin });
 }
 
+/**
+ * Construct the operator `/api` dependency graph with explicit constructor
+ * wiring (no DI framework): the Credential Store's {@link EnvKeyProvider} from
+ * the config master key, the {@link PostgresEventBus}, the transactional
+ * {@link DbUnitOfWork}, the {@link SpecRegistry}, the registration/mutation
+ * services, and the pooled reader repositories.
+ *
+ * The Credential Store logs metadata only — the injected {@link CredentialStoreLogger}
+ * forwards its structured fields (`credentialId`/`appId`/`type`/`scopeCount`,
+ * never a secret) through the shared server logger.
+ */
+function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
+  const { config, db, logger } = deps;
+
+  const keyProvider = new EnvKeyProvider(config.credentials.masterKey);
+  const eventBus = new PostgresEventBus();
+  const credentialLogger: CredentialStoreLogger = {
+    info: (message, fields) => {
+      logger.info(fields, message);
+    },
+  };
+  const unitOfWork = new DbUnitOfWork(db, keyProvider, eventBus, credentialLogger);
+  const specRegistry = new SpecRegistry();
+
+  return {
+    registrar: new RegistrationService({
+      unitOfWork,
+      specRegistry,
+      defaultPollInterval: config.registration.defaultPollInterval,
+    }),
+    bindingConfirmer: new ResourceBindingService({ unitOfWork }),
+    exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
+    appReader: new RegisteredAppRepository(db),
+    specReader: new ApiSpecRepository(db),
+    bindingReader: new ResourceBindingRepository(db),
+  };
+}
+
 export function buildServer(deps: ServerDependencies): RunningServer {
   const app = Fastify({ loggerInstance: deps.logger });
 
   registerHealthRoute(app, { pingDb: () => pingDatabase(deps.db) });
+  registerOperatorApi(app, buildOperatorApiDeps(deps));
+  registerErrorHandler(app);
 
   const shutdown = async (): Promise<void> => {
     await app.close();

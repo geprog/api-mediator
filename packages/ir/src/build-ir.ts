@@ -1,9 +1,42 @@
 import type { Ir } from "@mediator/domain";
-import { bundleFromString, createConfig, detectSpec, parseYaml } from "@redocly/openapi-core";
+import {
+  BaseResolver,
+  bundleFromString,
+  createConfig,
+  detectSpec,
+  parseYaml,
+  type Source,
+} from "@redocly/openapi-core";
 
 import { decomposeDocument } from "./decompose.js";
 import { SpecParseError, UnsupportedSpecVersionError } from "./errors.js";
 import { isRecord, type JsonObject } from "./json.js";
+
+/**
+ * A Redocly resolver that refuses **every external `$ref`** — no network, no
+ * filesystem access during {@link buildIr}.
+ *
+ * Operator-submitted specs are untrusted input. Redocly's default
+ * {@link BaseResolver} fetches external refs while bundling (`http(s)://…` via
+ * `fetch`, `file`/relative paths via `fs.readFile`), which would let a submitted
+ * document trigger outbound network or filesystem I/O from the mediator — an
+ * SSRF-shaped risk, and at odds with the poll-only, no-surprise-egress posture
+ * of `docs/architecture/security.md`. Overriding {@link loadExternalRef} to
+ * reject *before* any I/O closes that hole: the bundler records a resolution
+ * problem and leaves the external `$ref` unexpanded (IR decomposition then drops
+ * it, since only local `#/…` pointers resolve). Local refs never reach this
+ * method — they resolve against the already-parsed root document — so
+ * `#/components/...` resolution keeps working unchanged.
+ */
+class NoExternalRefResolver extends BaseResolver {
+  public override loadExternalRef(absoluteRef: string): Promise<Source> {
+    return Promise.reject(
+      new Error(
+        `External $ref resolution is disabled (no network/filesystem egress during spec ingestion): ${absoluteRef}`,
+      ),
+    );
+  }
+}
 
 /**
  * Parse, dereference, and decompose an OpenAPI **3.0 / 3.1** document into the
@@ -14,17 +47,19 @@ import { isRecord, type JsonObject } from "./json.js";
  * 2. Detect the spec version via Redocly; reject anything that is not OpenAPI
  *    3.x (Swagger 2.0 throws {@link UnsupportedSpecVersionError}), and reject an
  *    unrecognizable document ({@link SpecParseError}, SI-1 crit 9).
- * 3. **Bundle** with `@redocly/openapi-core` (`dereference: false`): external
- *    refs are inlined and every `$ref` becomes a resolvable local `#/…` pointer.
- *    Bundling is structural and lenient — it never runs schema validation, so
- *    Swagger-2.0-origin artifacts, strict-schema violations, and duplicate
- *    `operationId`s all pass through (SI-1 crit 8).
+ * 3. **Bundle** with `@redocly/openapi-core` (`dereference: false`) using a
+ *    {@link NoExternalRefResolver}: local (`#/…`) refs are inlined; external
+ *    (`http(s)`/`file`) refs are **never fetched** — they are left unexpanded
+ *    with no network or filesystem access. Bundling is structural and lenient —
+ *    it never runs schema validation, so Swagger-2.0-origin artifacts,
+ *    strict-schema violations, and duplicate `operationId`s all pass through
+ *    (SI-1 crit 8).
  * 4. Decompose the bundled document into the IR, resolving the local refs during
- *    flattening with cycle guards so no unresolved `$ref` remains (SI-1 crit 1).
+ *    flattening with cycle guards so no unresolved local `$ref` remains (SI-1
+ *    crit 1); any leftover external `$ref` resolves to nothing and is dropped.
  *
- * Returns a `Promise` because Redocly's resolver/bundler is asynchronous
- * (external-ref resolution is I/O); the scenario fixtures are self-contained, so
- * no network or filesystem access occurs for them.
+ * Returns a `Promise` because Redocly's bundler is asynchronous; with external
+ * resolution disabled, `buildIr` performs **no** network or filesystem I/O.
  *
  * @throws {SpecParseError} the input is not a recognizable/parseable OpenAPI doc.
  * @throws {UnsupportedSpecVersionError} the input is a spec but not OpenAPI 3.x.
@@ -78,7 +113,14 @@ async function bundle(original: unknown, parsed: JsonObject): Promise<JsonObject
   const config = await createConfig({});
   let bundled: unknown;
   try {
-    const result = await bundleFromString({ source, config, dereference: false });
+    const result = await bundleFromString({
+      source,
+      config,
+      dereference: false,
+      // Refuse external `$ref` fetches: no network/filesystem egress from an
+      // operator-submitted spec (see NoExternalRefResolver).
+      externalRefResolver: new NoExternalRefResolver(),
+    });
     bundled = result.bundle.parsed;
   } catch (error) {
     throw new SpecParseError(`Failed to parse/bundle OpenAPI document: ${messageOf(error)}`, error);
