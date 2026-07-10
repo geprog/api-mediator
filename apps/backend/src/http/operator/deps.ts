@@ -20,5 +20,11 @@ export interface OperatorApiDeps {
   readonly exclusionsReplacer: ExclusionsReplacer;
 }
 
-/** The `:id` path parameter, shared by every entity-scoped route. */
-export const idParamSchema = z.object({ id: z.string().min(1) });
+/**
+ * The `:id` path parameter, shared by every entity-scoped route. Validated as a
+ * UUID so a malformed id is a clean 400 at the boundary rather than reaching a
+ * Drizzle `eq(<uuid column>, id)` and surfacing as a Postgres
+ * `invalid input syntax for type uuid` 500. A well-formed-but-absent UUID still
+ * falls through to a 404.
+ */
+export const idParamSchema = z.object({ id: z.uuid() });

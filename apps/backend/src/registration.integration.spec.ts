@@ -19,6 +19,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildServer, createServerLogger, type RunningServer } from "./composition-root.js";
+import { providerSpecDocument } from "./testing/sample-specs.testkit.js";
 
 /**
  * End-to-end registration integration test against a live Postgres (compose
@@ -301,5 +302,75 @@ describe("registration API integration (requires Postgres)", () => {
       payload: { analysisExclusions: ["nope"] },
     });
     expect(badExclusion.statusCode).toBe(400);
+  });
+
+  it("upserts a correction of an applicable-but-underived binding ref (real DB regression)", async () => {
+    // The sample provider spec's `issue` list op has no paging params, so
+    // paginationRef is applicable but was NOT derived (no resource_binding_ref
+    // row). Correcting it must INSERT the row — an UPDATE-only silently lost it.
+    const registration = await server.app.inject({
+      method: "POST",
+      url: "/api/apps",
+      payload: {
+        name: "Upsert (integration)",
+        baseUrl: "https://upsert.example.test",
+        capabilities: {
+          supportsPolling: true,
+          supportsDeltaQuery: false,
+          supportsChangeTimestamps: true,
+          defaultPollInterval: 60000,
+        },
+        specs: [{ role: "PROVIDER", document: providerSpecDocument() }],
+      },
+    });
+    expect(registration.statusCode).toBe(201);
+    const registered = registration.json<RegisterAppResponse>();
+    createdAppIds.push(registered.app.id);
+    const specId = registered.specs[0]?.id ?? "";
+
+    const bindingsResponse = await server.app.inject({
+      method: "GET",
+      url: `/api/specs/${specId}/resource-bindings`,
+    });
+    const { bindings } = bindingsResponse.json<{
+      bindings: {
+        id: string;
+        resourceRef: string;
+        refs: { kind: string; applicable: boolean; value: unknown }[];
+      }[];
+    }>();
+    const issue = bindings.find((binding) => binding.resourceRef === "issue");
+    const paginationBefore = issue?.refs.find((ref) => ref.kind === "paginationRef");
+    // Precondition: applicable but not derived — the exact bug scenario.
+    expect(paginationBefore?.applicable).toBe(true);
+    expect(paginationBefore?.value).toBeNull();
+    const issueBindingId = issue?.id ?? "";
+
+    const correction = await server.app.inject({
+      method: "PATCH",
+      url: `/api/resource-bindings/${issueBindingId}`,
+      headers: { "x-operator-id": "upsert-operator" },
+      payload: {
+        refKind: "paginationRef",
+        value: { kind: "parameter", operationId: "getIssue", parameter: "id" },
+      },
+    });
+    expect(correction.statusCode).toBe(200);
+
+    // Re-read straight from Postgres: the row was INSERTED (upsert), with value +
+    // confirmation persisted.
+    const [refRow] = await db
+      .select()
+      .from(resourceBindingRef)
+      .where(
+        and(
+          eq(resourceBindingRef.resourceBindingId, issueBindingId),
+          eq(resourceBindingRef.refKind, "paginationRef"),
+        ),
+      );
+    expect(refRow).toBeDefined();
+    expect(refRow?.value).toEqual({ kind: "parameter", operationId: "getIssue", parameter: "id" });
+    expect(refRow?.confirmedBy).toBe("upsert-operator");
+    expect(refRow?.confirmedAt).not.toBeNull();
   });
 });

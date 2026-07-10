@@ -5,6 +5,7 @@ import type { ApiSpec, AppCapabilities, Ir, RegisteredApp } from "@mediator/doma
 import { buildIr, computeContentHash, IrError } from "@mediator/ir";
 
 import { BadRequestError } from "../app-errors.js";
+import { assertExclusionsInIr } from "./analysis-exclusions.js";
 import type { UnitOfWork } from "./persistence.js";
 import type { SpecRegistry } from "./spec-registry.js";
 
@@ -127,14 +128,9 @@ export class RegistrationService implements Registrar {
   async #parseAll(request: RegisterAppRequest): Promise<ParsedSpec[]> {
     const parsed: ParsedSpec[] = [];
     for (const [index, spec] of request.specs.entries()) {
+      let ir: Ir;
       try {
-        parsed.push({
-          document: spec.document,
-          role: spec.role,
-          analysisExclusions: spec.analysisExclusions ?? [],
-          ir: await buildIr(spec.document),
-          contentHash: computeContentHash(spec.document),
-        });
+        ir = await buildIr(spec.document);
       } catch (error) {
         if (error instanceof IrError) {
           throw new BadRequestError(`Spec at index ${String(index)} could not be parsed.`, [
@@ -143,6 +139,17 @@ export class RegistrationService implements Registrar {
         }
         throw error;
       }
+      const analysisExclusions = spec.analysisExclusions ?? [];
+      // SI-4 crit 4: registration-time exclusions must reference real resource
+      // groups too — the same rule PATCH …/analysis-exclusions enforces.
+      assertExclusionsInIr(ir, analysisExclusions, `specs.${String(index)}.analysisExclusions`);
+      parsed.push({
+        document: spec.document,
+        role: spec.role,
+        analysisExclusions,
+        ir,
+        contentHash: computeContentHash(spec.document),
+      });
     }
     return parsed;
   }

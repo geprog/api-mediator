@@ -35,13 +35,19 @@ describe("GET /api/specs/:id/ir (SI-3)", () => {
     expect(body.ir.some((group) => group.resourceRef === "issue")).toBe(true);
   });
 
-  it("404s an unknown spec id", async () => {
+  it("404s a well-formed but unknown spec id", async () => {
     server = buildTestServer();
     const response = await server.app.inject({
       method: "GET",
       url: "/api/specs/00000000-0000-0000-0000-000000000000/ir",
     });
     expect(response.statusCode).toBe(404);
+  });
+
+  it("400s a malformed (non-UUID) spec id at the validation boundary", async () => {
+    server = buildTestServer();
+    const response = await server.app.inject({ method: "GET", url: "/api/specs/not-a-uuid/ir" });
+    expect(response.statusCode).toBe(400);
   });
 });
 

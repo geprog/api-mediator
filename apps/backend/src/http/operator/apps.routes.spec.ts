@@ -163,6 +163,30 @@ describe("POST /api/apps — registration (AR-1)", () => {
     });
     expect(response.statusCode).toBe(400);
   });
+
+  it("rejects registration-time analysisExclusions referencing a non-IR resource (SI-4 crit 4)", async () => {
+    server = buildTestServer();
+    const response = await server.app.inject({
+      method: "POST",
+      url: "/api/apps",
+      payload: {
+        name: "BadExclusion",
+        baseUrl: "https://x.example",
+        specs: [
+          {
+            role: "PROVIDER",
+            document: providerSpecDocument(),
+            analysisExclusions: ["does-not-exist"],
+          },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    // Atomic: nothing persisted when the exclusion is invalid.
+    expect(server.store.apps.size).toBe(0);
+    expect(server.store.specs.size).toBe(0);
+    expect(server.store.events).toHaveLength(0);
+  });
 });
 
 describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
@@ -214,5 +238,16 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
       url: "/api/apps/00000000-0000-0000-0000-000000000000/specs",
     });
     expect(response.statusCode).toBe(404);
+  });
+
+  it("returns the ErrorResponse envelope for an unmatched route", async () => {
+    server = buildTestServer();
+    const response = await server.app.inject({ method: "GET", url: "/api/does-not-exist" });
+    expect(response.statusCode).toBe(404);
+    expect(response.json<{ statusCode: number; error: string; message: string }>()).toEqual({
+      statusCode: 404,
+      error: "Not Found",
+      message: "Route not found.",
+    });
   });
 });

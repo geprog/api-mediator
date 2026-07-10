@@ -112,6 +112,38 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     expect(updated.refs.find((ref) => ref.kind === "nativeIdRef")?.confirmedBy).toBe("alice");
   });
 
+  it("persists a correction of an applicable-but-underived ref (upsert)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerAndGetBindings(server);
+    const issue = bindings.find((binding) => binding.resourceRef === "issue");
+    // paginationRef is always applicable but the sample list op has no paging
+    // params, so no ref was derived (no row) — the silent-data-loss scenario.
+    const paginationBefore = issue?.refs.find((ref) => ref.kind === "paginationRef");
+    expect(paginationBefore?.applicable).toBe(true);
+    expect(paginationBefore?.value).toBeNull();
+
+    const response = await server.app.inject({
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        refKind: "paginationRef",
+        value: { kind: "parameter", operationId: "getIssue", parameter: "id" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const pagination = response
+      .json<UpdateResourceBindingResponse>()
+      .refs.find((ref) => ref.kind === "paginationRef");
+    expect(pagination?.value).toEqual({
+      kind: "parameter",
+      operationId: "getIssue",
+      parameter: "id",
+    });
+    expect(pagination?.confirmedBy).toBe("operator");
+    expect(pagination?.confirmedAt).not.toBeNull();
+  });
+
   it("corrects a ref to a different IR field and confirms it in one action", async () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
@@ -155,7 +187,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     expect(response.statusCode).toBe(400);
   });
 
-  it("404s an unknown binding id", async () => {
+  it("404s a well-formed but unknown binding id", async () => {
     server = buildTestServer();
     const response = await server.app.inject({
       method: "PATCH",
@@ -163,5 +195,15 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
       payload: { refKind: "nativeIdRef" },
     });
     expect(response.statusCode).toBe(404);
+  });
+
+  it("400s a malformed (non-UUID) binding id at the validation boundary", async () => {
+    server = buildTestServer();
+    const response = await server.app.inject({
+      method: "PATCH",
+      url: "/api/resource-bindings/not-a-uuid",
+      payload: { refKind: "nativeIdRef" },
+    });
+    expect(response.statusCode).toBe(400);
   });
 });

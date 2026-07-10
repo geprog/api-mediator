@@ -1,7 +1,35 @@
-import type { ApiSpec } from "@mediator/domain";
+import type { ApiSpec, Ir } from "@mediator/domain";
 
 import { BadRequestError, NotFoundError } from "../app-errors.js";
+import type { ValidationIssue } from "@mediator/contracts";
 import type { UnitOfWork } from "./persistence.js";
+
+/**
+ * Reject `analysisExclusions` referencing a resource group not present in `ir`
+ * (SI-4 crit 4). Shared by both surfaces that set exclusions — the registration
+ * path and the `PATCH …/analysis-exclusions` edit — so the IR-membership rule is
+ * enforced identically. `issuePath` scopes the reported field path to the caller
+ * (`analysisExclusions` vs. `specs.<i>.analysisExclusions`).
+ */
+export function assertExclusionsInIr(
+  ir: Ir,
+  analysisExclusions: readonly string[],
+  issuePath: string,
+): void {
+  const knownRefs = new Set(ir.map((group) => group.resourceRef));
+  const unknownRefs = analysisExclusions.filter((ref) => !knownRefs.has(ref));
+  if (unknownRefs.length === 0) {
+    return;
+  }
+  const issues: ValidationIssue[] = unknownRefs.map((ref) => ({
+    path: issuePath,
+    message: `resourceRef '${ref}' is not a resource group of this spec's IR`,
+  }));
+  throw new BadRequestError(
+    `Unknown resourceRef(s) in analysisExclusions: ${unknownRefs.join(", ")}.`,
+    issues,
+  );
+}
 
 /** Replaces a spec's `analysisExclusions` list (SI-4). */
 export interface ExclusionsReplacer {
@@ -32,17 +60,7 @@ export class AnalysisExclusionsService implements ExclusionsReplacer {
         throw new NotFoundError(`ApiSpec ${specId} not found.`);
       }
 
-      const knownRefs = new Set(spec.parsedIR.map((group) => group.resourceRef));
-      const unknownRefs = analysisExclusions.filter((ref) => !knownRefs.has(ref));
-      if (unknownRefs.length > 0) {
-        throw new BadRequestError(
-          `Unknown resourceRef(s) in analysisExclusions: ${unknownRefs.join(", ")}.`,
-          unknownRefs.map((ref) => ({
-            path: "analysisExclusions",
-            message: `resourceRef '${ref}' is not a resource group of this spec's IR`,
-          })),
-        );
-      }
+      assertExclusionsInIr(spec.parsedIR, analysisExclusions, "analysisExclusions");
 
       const updated = await stores.apiSpecs.updateAnalysisExclusions(specId, analysisExclusions);
       if (updated === undefined) {

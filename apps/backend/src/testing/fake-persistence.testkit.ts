@@ -5,7 +5,6 @@ import type { CredentialMaterial } from "@mediator/credentials";
 import type { CredentialMetadata, ResourceBindingRefPatch } from "@mediator/db";
 import type {
   ApiSpec,
-  ConfirmableRef,
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
@@ -121,20 +120,30 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
       const refPatch = patch[kind];
       if (refPatch === undefined) continue;
       const current = updated[kind];
-      const value = refPatch.value ?? current?.value;
-      if (value === undefined) continue;
-      const ref: ConfirmableRef = {
-        value,
-        confirmedBy:
-          "confirmedBy" in refPatch
-            ? (refPatch.confirmedBy ?? null)
-            : (current?.confirmedBy ?? null),
-        confirmedAt:
-          "confirmedAt" in refPatch
-            ? (refPatch.confirmedAt ?? null)
-            : (current?.confirmedAt ?? null),
-      };
-      updated[kind] = ref;
+      // Mirror ResourceBindingRepository.update exactly: a correction (value
+      // present) upserts the ref, a pure confirmation updates an existing ref,
+      // and confirming an absent ref is a no-op (real UPDATE matches 0 rows).
+      if (refPatch.value !== undefined) {
+        updated[kind] = {
+          value: refPatch.value,
+          confirmedBy:
+            "confirmedBy" in refPatch
+              ? (refPatch.confirmedBy ?? null)
+              : (current?.confirmedBy ?? null),
+          confirmedAt:
+            "confirmedAt" in refPatch
+              ? (refPatch.confirmedAt ?? null)
+              : (current?.confirmedAt ?? null),
+        };
+      } else if (current !== undefined) {
+        updated[kind] = {
+          value: current.value,
+          confirmedBy:
+            "confirmedBy" in refPatch ? (refPatch.confirmedBy ?? null) : current.confirmedBy,
+          confirmedAt:
+            "confirmedAt" in refPatch ? (refPatch.confirmedAt ?? null) : current.confirmedAt,
+        };
+      }
     }
     this.store.bindings.set(id, updated);
     return Promise.resolve(updated);

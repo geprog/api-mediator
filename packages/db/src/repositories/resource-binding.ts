@@ -54,11 +54,19 @@ export class ResourceBindingRepository {
   }
 
   /**
-   * Confirm or correct a binding's refs. Each named ref's row is updated in
-   * place (per-ref: confirming one leaves the others untouched); a patch entry
-   * carrying only confirmation sets `confirmed_by`/`confirmed_at`, one also
-   * carrying a `value` corrects the ref in the same action. Returns the updated
-   * binding, or `undefined` if no binding with `id` exists.
+   * Confirm or correct a binding's refs (per-ref: confirming one leaves the
+   * others untouched). A patch entry carrying only confirmation sets
+   * `confirmed_by`/`confirmed_at`; one also carrying a `value` corrects the ref.
+   *
+   * A **correction upserts** the ref row: it inserts when `(binding, refKind)`
+   * has no row yet, and updates when it does. This is the RB-3 case where the
+   * operator ratifies an applicable ref the heuristic produced no guess for
+   * (no existing row) — an UPDATE-only there would silently match zero rows and
+   * persist nothing. A pure confirmation (no `value`) stays an UPDATE, since a
+   * ref with no value cannot be inserted (`value` is NOT NULL) — the service
+   * layer already rejects confirming a not-yet-derived ref without a correction.
+   *
+   * Returns the updated binding, or `undefined` if no binding with `id` exists.
    */
   public async update(
     id: string,
@@ -73,12 +81,30 @@ export class ResourceBindingRepository {
       if (Object.keys(set).length === 0) {
         continue;
       }
-      await this.db
-        .update(resourceBindingRef)
-        .set(set)
-        .where(
-          and(eq(resourceBindingRef.resourceBindingId, id), eq(resourceBindingRef.refKind, kind)),
-        );
+      if (refPatch.value !== undefined) {
+        // Correction → upsert on the (binding, kind) unique index.
+        await this.db
+          .insert(resourceBindingRef)
+          .values({
+            resourceBindingId: id,
+            refKind: kind,
+            value: refPatch.value,
+            confirmedBy: "confirmedBy" in refPatch ? refPatch.confirmedBy : null,
+            confirmedAt: "confirmedAt" in refPatch ? refPatch.confirmedAt : null,
+          })
+          .onConflictDoUpdate({
+            target: [resourceBindingRef.resourceBindingId, resourceBindingRef.refKind],
+            set,
+          });
+      } else {
+        // Pure confirmation → update the existing row's confirmation columns.
+        await this.db
+          .update(resourceBindingRef)
+          .set(set)
+          .where(
+            and(eq(resourceBindingRef.resourceBindingId, id), eq(resourceBindingRef.refKind, kind)),
+          );
+      }
     }
     return this.getById(id);
   }
