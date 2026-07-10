@@ -43,6 +43,7 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
   const proposalId = randomUUID();
   const failedProposalId = randomUUID();
   const cascadeProposalId = randomUUID();
+  const precisionProposalId = randomUUID();
   const createdAt = new Date("2026-07-10T00:00:00.000Z");
 
   const ir: Ir = [
@@ -170,7 +171,7 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
 
   afterAll(async () => {
     // Delete proposals first (their items cascade); specs are FK'd with no action.
-    for (const id of [proposalId, failedProposalId, cascadeProposalId]) {
+    for (const id of [proposalId, failedProposalId, cascadeProposalId, precisionProposalId]) {
       await db.delete(mappingProposal).where(eq(mappingProposal.id, id));
     }
     await db.delete(apiSpec).where(eq(apiSpec.appId, appId));
@@ -186,16 +187,22 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
 
     const readItems = await repo.listItems(proposalId);
     const byId = new Map(readItems.map((item) => [item.id, item]));
-    expect(byId.get(operationItem.id)).toStrictEqual(operationItem);
-    expect(byId.get(identityFieldItem.id)).toStrictEqual(identityFieldItem);
-    expect(byId.get(unmappedItem.id)).toStrictEqual(unmappedItem);
+    const readOperation = byId.get(operationItem.id);
+    const readIdentityField = byId.get(identityFieldItem.id);
+    const readUnmapped = byId.get(unmappedItem.id);
+    expect(readOperation).toStrictEqual(operationItem);
+    expect(readIdentityField).toStrictEqual(identityFieldItem);
+    expect(readUnmapped).toStrictEqual(unmappedItem);
 
     // The absent/null distinctions survive a real DB round-trip.
-    expect("transformSuggestion" in (byId.get(operationItem.id) as MappingProposalItem)).toBe(true);
-    expect(byId.get(operationItem.id)?.transformSuggestion).toBeNull();
-    expect("transformSuggestion" in (byId.get(unmappedItem.id) as MappingProposalItem)).toBe(false);
-    expect("targetRef" in (byId.get(unmappedItem.id) as MappingProposalItem)).toBe(false);
-    expect("phase" in (byId.get(identityFieldItem.id) as MappingProposalItem)).toBe(false);
+    expect(readOperation).toBeDefined();
+    expect(readUnmapped).toBeDefined();
+    expect(readIdentityField).toBeDefined();
+    expect(readOperation && "transformSuggestion" in readOperation).toBe(true);
+    expect(readOperation?.transformSuggestion).toBeNull();
+    expect(readUnmapped && "transformSuggestion" in readUnmapped).toBe(false);
+    expect(readUnmapped && "targetRef" in readUnmapped).toBe(false);
+    expect(readIdentityField && "phase" in readIdentityField).toBe(false);
   });
 
   it("is queryable by source spec id", async () => {
@@ -243,6 +250,46 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
     expect(
       (await repo.getById(proposalId))?.shortlistResult?.candidatePairs[0]?.analysisFailed,
     ).toBe(true);
+  });
+
+  it("round-trips confidenceScore through the double precision column exactly", async () => {
+    const repo = new MappingProposalRepository(db);
+    // Non-binary-exact values a float32 (`real`) column would truncate; float8
+    // preserves them bit-for-bit, so readback === the original JS number.
+    const opConfidence = 0.7;
+    const fieldConfidence = 0.123456789;
+    const altConfidence = 0.987654321;
+
+    const precisionProposal: MappingProposal = { ...proposal, id: precisionProposalId };
+    const precisionOp: MappingProposalItem = {
+      ...operationItem,
+      id: randomUUID(),
+      proposalId: precisionProposalId,
+      confidenceScore: opConfidence,
+    };
+    const precisionField: MappingProposalItem = {
+      ...identityFieldItem,
+      id: randomUUID(),
+      proposalId: precisionProposalId,
+      confidenceScore: fieldConfidence,
+      ambiguousAlternatives: [
+        {
+          targetRef: { resourceRef: "tasks", target: { kind: "field", path: "userEmail" } },
+          confidence: altConfidence,
+        },
+      ],
+    };
+    await tx(db, (txn) =>
+      new MappingProposalRepository(txn).create(precisionProposal, [precisionOp, precisionField]),
+    );
+
+    const readItems = await repo.listItems(precisionProposalId);
+    const byId = new Map(readItems.map((item) => [item.id, item]));
+    // Exact equality (not toBeCloseTo): the double precision column and the jsonb
+    // alternative both preserve full float64 fidelity.
+    expect(byId.get(precisionOp.id)?.confidenceScore).toBe(opConfidence);
+    expect(byId.get(precisionField.id)?.confidenceScore).toBe(fieldConfidence);
+    expect(byId.get(precisionField.id)?.ambiguousAlternatives[0]?.confidence).toBe(altConfidence);
   });
 
   it("ON DELETE CASCADE removes a proposal's items when the proposal is deleted", async () => {

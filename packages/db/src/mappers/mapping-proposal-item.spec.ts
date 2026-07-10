@@ -93,10 +93,15 @@ describe("mapMappingProposalItemRow — phase, targetRef, confidence", () => {
     expect(item.phase).toBe("response");
   });
 
-  it("reads confidence_score back as a plain number", () => {
-    const item = mapMappingProposalItemRow(itemRow({ confidenceScore: 0.42 }));
-    expect(typeof item.confidenceScore).toBe("number");
-    expect(item.confidenceScore).toBe(0.42);
+  it("reads confidence_score back as a plain number, preserving full float64 precision", () => {
+    // Non-binary-exact values that a float32 (`real`) column would truncate; the
+    // `double precision` column preserves them (the DB-boundary proof is in the
+    // integration spec — the mapper itself is an identity pass-through).
+    for (const confidenceScore of [0.42, 0.7, 0.123456789]) {
+      const item = mapMappingProposalItemRow(itemRow({ confidenceScore }));
+      expect(typeof item.confidenceScore).toBe("number");
+      expect(item.confidenceScore).toBe(confidenceScore);
+    }
   });
 });
 

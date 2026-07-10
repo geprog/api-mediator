@@ -1,5 +1,5 @@
 {
-  "id": "d7cd1288-811b-474e-b35d-9ee1ad6947b7",
+  "id": "e338b0ce-861c-4794-bd4f-5c011d58266d",
   "prevId": "627278cd-7c3b-42d6-8717-b2a2792687fb",
   "version": "7",
   "dialect": "postgresql",
@@ -469,7 +469,7 @@
         },
         "confidence_score": {
           "name": "confidence_score",
-          "type": "real",
+          "type": "double precision",
           "primaryKey": false,
           "notNull": true
         },

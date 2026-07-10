@@ -19,7 +19,8 @@ export type MappingProposalItemInsert = typeof mappingProposalItem.$inferInsert;
  *   item (`unmapped = true`). This is what makes the concept's absent-vs-null
  *   distinction round-trip through one column.
  *
- * `confidence_score` comes back from the `real` column as a plain `number`.
+ * `confidence_score` comes back from the `double precision` column as a plain
+ * `number`, round-tripped exactly (no float32 truncation).
  */
 export function mapMappingProposalItemRow(row: MappingProposalItemRow): MappingProposalItem {
   const transformSuggestion =

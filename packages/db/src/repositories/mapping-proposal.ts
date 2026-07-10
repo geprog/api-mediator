@@ -47,7 +47,13 @@ export class MappingProposalRepository {
     return row === undefined ? undefined : mapMappingProposalRow(row);
   }
 
-  /** A proposal's items, in insertion (id) order. */
+  /**
+   * A proposal's items. The order is **unspecified** — there is no `ORDER BY`,
+   * and the ids are random UUIDs, so callers must not rely on ordering; they key
+   * by item id (as the tests and the Phase-3 review flow do). If the Phase-3
+   * review UI ever needs a stable display order, add an explicit ordinal column
+   * then rather than relying on incidental row order here.
+   */
   public async listItems(proposalId: string): Promise<MappingProposalItem[]> {
     const rows = await this.db
       .select()

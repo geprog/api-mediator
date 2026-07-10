@@ -1,12 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  doublePrecision,
   index,
   integer,
   jsonb,
   pgEnum,
   pgTable,
-  real,
   text,
   timestamp,
   uniqueIndex,
@@ -360,8 +360,11 @@ export const mappingProposal = pgTable(
  * mapper reconstructs the absent-vs-null distinction from `unmapped` (see
  * `src/mappers/mapping-proposal-item.ts`).
  *
- * `confidence_score` is `real` (float4): the mapper reads it back as a plain
- * `number`.
+ * `confidence_score` is `double precision` (float8): it round-trips every JS
+ * `number` exactly and matches the domain `number` type — and the same precision
+ * the nested `ambiguousAlternatives[].confidence` values ride at inside the
+ * `jsonb` column, so a confidence is never stored at two fidelities. The mapper
+ * reads it back as a plain `number`.
  */
 export const mappingProposalItem = pgTable(
   "mapping_proposal_item",
@@ -379,7 +382,7 @@ export const mappingProposalItem = pgTable(
     // Nullable: NULL for an operation item (domain `null`) and for an unmapped
     // item (domain absent); the mapper disambiguates via `unmapped`.
     transformSuggestion: jsonb("transform_suggestion").$type<TransformSuggestion>(),
-    confidenceScore: real("confidence_score").notNull(),
+    confidenceScore: doublePrecision("confidence_score").notNull(),
     ambiguousAlternatives: jsonb("ambiguous_alternatives")
       .$type<ProposalItemAlternative[]>()
       .notNull()

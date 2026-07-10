@@ -20,7 +20,7 @@ CREATE TABLE "mapping_proposal_item" (
 	"target_ref" jsonb,
 	"phase" "mapping_phase",
 	"transform_suggestion" jsonb,
-	"confidence_score" real NOT NULL,
+	"confidence_score" double precision NOT NULL,
 	"ambiguous_alternatives" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"unmapped" boolean NOT NULL,
 	"rationale" text NOT NULL,
