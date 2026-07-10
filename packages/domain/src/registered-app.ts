@@ -30,11 +30,19 @@ export type AppCapabilities = z.infer<typeof appCapabilitiesSchema>;
 /**
  * `baseUrl` is optional and its **absence is meaningful**: a consumer-only app
  * (one that registered only a `CONSUMER` spec) has no reachable base URL because
- * the mediator itself hosts its endpoint via the Adapter Engine. It is modeled
- * as a truly optional key (omitted, never present-as-`undefined`) so "absent"
- * stays distinct from an explicit `undefined` under `exactOptionalPropertyTypes`
- * — Zod preserves key absence through `parse`, so a document without `baseUrl`
- * yields an object without the `baseUrl` key.
+ * the mediator itself hosts its endpoint via the Adapter Engine.
+ *
+ * Modeled with `.optional()`, which infers `string | undefined` — so the *type*
+ * does not by itself keep "absent" distinct from an explicit `undefined`: a
+ * present `baseUrl: undefined` is a valid value of this field, and Zod v4 carries
+ * such a present-`undefined` key through `parse`. The guarantee is narrower and
+ * runtime-only: parsing an input that **omits** `baseUrl` yields an object that
+ * also omits the key (Zod does not materialize an absent optional as
+ * `undefined`). Persistence relies on that omission guarantee, not on the type —
+ * the `@mediator/db` row→domain mappers run a NULL `base_url` through
+ * {@link stripUndefined} so it becomes a truly *absent* key rather than
+ * `baseUrl: undefined`, keeping "absent" distinct under
+ * `exactOptionalPropertyTypes`.
  */
 export const registeredAppSchema = z.object({
   id: z.string(),

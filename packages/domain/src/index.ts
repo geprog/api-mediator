@@ -10,6 +10,7 @@
  */
 
 export * from "./enums.js";
+export * from "./exact-optional.js";
 export * from "./ir.js";
 export * from "./registered-app.js";
 export * from "./api-spec.js";

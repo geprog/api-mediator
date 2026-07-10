@@ -19,6 +19,15 @@ export type Database = NodePgDatabase<typeof schema> & { readonly $client: Pool 
 export type DbTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 /**
+ * A handle a repository can issue queries through: either the pooled
+ * {@link Database} or a {@link DbTransaction} opened inside {@link tx}. Both are
+ * `PgDatabase` bindings over the same schema, so the query builders
+ * (`insert`/`select`/`update`/`delete`) are identical — a repository takes this
+ * union and works unchanged whether or not it runs in a transaction.
+ */
+export type DbHandle = Database | DbTransaction;
+
+/**
  * The transactional capability {@link tx} depends on: run a callback inside a
  * transaction, commit when it resolves, roll back when it rejects. A real
  * {@link Database} satisfies this; tests can supply an in-memory fake without a
