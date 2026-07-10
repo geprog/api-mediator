@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   index,
   integer,
   jsonb,
   pgEnum,
   pgTable,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -17,10 +19,19 @@ import type {
   AppCapabilities,
   ConfirmableRef,
   CredentialType,
+  GeneratedBy,
   Ir,
   IrRefTarget,
+  MappingPhase,
+  MappingProposalItemKind,
+  MappingProposalStatus,
+  ProposalElementRef,
+  ProposalItemAlternative,
   RegisteredAppStatus,
   ResourceBinding,
+  ReviewState,
+  ShortlistResult,
+  TransformSuggestion,
 } from "@mediator/domain";
 
 /**
@@ -91,6 +102,34 @@ export const resourceBindingRefKindEnum = pgEnum(
   "resource_binding_ref_kind",
   RESOURCE_BINDING_REF_KINDS,
 );
+
+// ── Phase-2 mapping enums (pinned to @mediator/domain unions) ─────────────────
+
+export const mappingProposalStatusEnum = pgEnum("mapping_proposal_status", [
+  "pending",
+  "partially_approved",
+  "approved",
+  "rejected",
+  "failed",
+] as const satisfies readonly MappingProposalStatus[]);
+
+export const mappingProposalItemKindEnum = pgEnum("mapping_proposal_item_kind", [
+  "operation",
+  "field",
+  "parameter",
+] as const satisfies readonly MappingProposalItemKind[]);
+
+export const reviewStateEnum = pgEnum("review_state", [
+  "pending",
+  "accepted",
+  "edited",
+  "rejected",
+] as const satisfies readonly ReviewState[]);
+
+export const mappingPhaseEnum = pgEnum("mapping_phase", [
+  "request",
+  "response",
+] as const satisfies readonly MappingPhase[]);
 
 // ── Tables ───────────────────────────────────────────────────────────────────
 
@@ -260,4 +299,94 @@ export const processedEvent = pgTable(
     // column also serves the `isProcessed(consumer, event)` lookup.
     uniqueIndex("processed_event_consumer_event_uq").on(table.consumerName, table.eventId),
   ],
+);
+
+// ── Phase-2 mapping-detection tables (proposal persistence) ──────────────────
+
+/**
+ * `MappingProposal` — the output of one Mapping Engine run over a *directional*
+ * pair of specs (`docs/architecture/data-model.md` `MappingProposal`, PP-1). Its
+ * `MappingProposalItem`s hang off `mapping_proposal_item` below.
+ *
+ * `shortlist_result` is **nullable**: a stage-1 (shortlist) failure never
+ * produced a valid shortlist, so a `status = 'failed'` proposal carries NULL here
+ * and has no items (PP-1 criterion 4). A successful run stores the mechanically-
+ * enriched `ShortlistResult` (candidate pairs + no-counterpart set + per-pair
+ * `analysisFailed` markers, PP-3). There is deliberately **no** `review_required`
+ * column on the item table below — that flag is DERIVED (`isReviewRequired`).
+ */
+export const mappingProposal = pgTable(
+  "mapping_proposal",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceSpecId: uuid("source_spec_id")
+      .notNull()
+      .references(() => apiSpec.id),
+    targetSpecId: uuid("target_spec_id")
+      .notNull()
+      .references(() => apiSpec.id),
+    generatedBy: jsonb("generated_by").$type<GeneratedBy>().notNull(),
+    // Nullable: NULL for a stage-1 `failed` proposal (nothing reviewable).
+    shortlistResult: jsonb("shortlist_result").$type<ShortlistResult>(),
+    status: mappingProposalStatusEnum("status").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // "proposals produced for this spec" (as source of a directional analysis).
+    index("mapping_proposal_source_spec_id_idx").on(table.sourceSpecId),
+    // "the directional proposal for this ordered spec pair".
+    index("mapping_proposal_source_target_idx").on(table.sourceSpecId, table.targetSpecId),
+  ],
+);
+
+/**
+ * `MappingProposalItem` — a single candidate correspondence within a proposal
+ * (`docs/architecture/data-model.md` `MappingProposalItem`, PP-2). One row per
+ * operation/field/parameter correspondence; the fields that only apply to some
+ * kinds (`phase`, `transform_suggestion`) are nullable.
+ *
+ * **CASCADE deviation.** `proposal_id` is `ON DELETE CASCADE` — items are wholly
+ * owned by their proposal and have no independent existence or audit value once
+ * the proposal is gone. This deliberately deviates from the Phase-1 registration
+ * entities, which are retained rather than deleted (an `ApiSpec` is `archived`,
+ * never dropped, so archived mappings still pin it for audit). A proposal is a
+ * pre-approval review artifact, not an audit-pinned entity, so deleting a
+ * proposal genuinely removes its items rather than orphaning them.
+ *
+ * `transform_suggestion` is a single nullable column encoding the domain's THREE
+ * states with help from `unmapped`: an **object** for a mapped field/parameter
+ * item; **NULL + `unmapped = false`** for a mapped `operation` item (domain
+ * `null`); **NULL + `unmapped = true`** for an unmapped item (domain absent). The
+ * mapper reconstructs the absent-vs-null distinction from `unmapped` (see
+ * `src/mappers/mapping-proposal-item.ts`).
+ *
+ * `confidence_score` is `real` (float4): the mapper reads it back as a plain
+ * `number`.
+ */
+export const mappingProposalItem = pgTable(
+  "mapping_proposal_item",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    proposalId: uuid("proposal_id")
+      .notNull()
+      .references(() => mappingProposal.id, { onDelete: "cascade" }),
+    kind: mappingProposalItemKindEnum("kind").notNull(),
+    sourceRef: jsonb("source_ref").$type<ProposalElementRef>().notNull(),
+    // Nullable: absent when `unmapped = true` (no counterpart).
+    targetRef: jsonb("target_ref").$type<ProposalElementRef>(),
+    // Nullable: only on `kind = field` items of consumer-provider proposals.
+    phase: mappingPhaseEnum("phase"),
+    // Nullable: NULL for an operation item (domain `null`) and for an unmapped
+    // item (domain absent); the mapper disambiguates via `unmapped`.
+    transformSuggestion: jsonb("transform_suggestion").$type<TransformSuggestion>(),
+    confidenceScore: real("confidence_score").notNull(),
+    ambiguousAlternatives: jsonb("ambiguous_alternatives")
+      .$type<ProposalItemAlternative[]>()
+      .notNull()
+      .default([]),
+    unmapped: boolean("unmapped").notNull(),
+    rationale: text("rationale").notNull(),
+    reviewState: reviewStateEnum("review_state").notNull(),
+  },
+  (table) => [index("mapping_proposal_item_proposal_id_idx").on(table.proposalId)],
 );

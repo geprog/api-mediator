@@ -1,0 +1,123 @@
+import type {
+  MappingProposal,
+  MappingProposalItem,
+  MappingProposalStatus,
+  ReviewState,
+  ShortlistResult,
+} from "@mediator/domain";
+import { eq } from "drizzle-orm";
+
+import type { DbHandle } from "../client.js";
+import { mapMappingProposalRow, toMappingProposalInsert } from "../mappers/mapping-proposal.js";
+import {
+  mapMappingProposalItemRow,
+  toMappingProposalItemInsert,
+} from "../mappers/mapping-proposal-item.js";
+import { mappingProposal, mappingProposalItem } from "../schema.js";
+
+/**
+ * Persistence for `MappingProposal` and its wholly-owned `MappingProposalItem`
+ * rows. Accepts/returns `@mediator/domain` types through the mappers; Drizzle's
+ * inferred optionality never leaks out. Constructor-bound to a {@link DbHandle}
+ * (the pooled db or a `tx()` transaction) so `create` composes inside the
+ * caller's transaction, matching the Phase-1 repository convention.
+ *
+ * These rows are **reviewable proposals, never executable mappings** (PP-1): no
+ * `ApprovedMapping`, `SyncRule`, or `AdapterBinding` is created here.
+ */
+export class MappingProposalRepository {
+  public constructor(private readonly db: DbHandle) {}
+
+  /**
+   * Persist a proposal together with all its items in one call (two inserts),
+   * inside the caller's transaction. A `failed` proposal supplies an empty
+   * `items` array (PP-1 criterion 4) — the item insert is then skipped. Ids are
+   * caller-supplied on the domain objects (as in Phase 1); the caller commits.
+   */
+  public async create(proposal: MappingProposal, items: MappingProposalItem[]): Promise<void> {
+    await this.db.insert(mappingProposal).values(toMappingProposalInsert(proposal));
+    if (items.length > 0) {
+      await this.db.insert(mappingProposalItem).values(items.map(toMappingProposalItemInsert));
+    }
+  }
+
+  /** The proposal row for `id` (its items are read via {@link listItems}). */
+  public async getById(id: string): Promise<MappingProposal | undefined> {
+    const [row] = await this.db.select().from(mappingProposal).where(eq(mappingProposal.id, id));
+    return row === undefined ? undefined : mapMappingProposalRow(row);
+  }
+
+  /** A proposal's items, in insertion (id) order. */
+  public async listItems(proposalId: string): Promise<MappingProposalItem[]> {
+    const rows = await this.db
+      .select()
+      .from(mappingProposalItem)
+      .where(eq(mappingProposalItem.proposalId, proposalId));
+    return rows.map(mapMappingProposalItemRow);
+  }
+
+  /**
+   * The proposals produced *for* this spec (as the source of a directional
+   * analysis), served by the `source_spec_id` index.
+   */
+  public async listBySourceSpecId(specId: string): Promise<MappingProposal[]> {
+    const rows = await this.db
+      .select()
+      .from(mappingProposal)
+      .where(eq(mappingProposal.sourceSpecId, specId));
+    return rows.map(mapMappingProposalRow);
+  }
+
+  /**
+   * Transition a proposal's `status` (e.g. the Phase-3 review outcomes). Returns
+   * the updated proposal, or `undefined` when no proposal with `id` exists.
+   */
+  public async updateStatus(
+    id: string,
+    status: MappingProposalStatus,
+  ): Promise<MappingProposal | undefined> {
+    const [row] = await this.db
+      .update(mappingProposal)
+      .set({ status })
+      .where(eq(mappingProposal.id, id))
+      .returning();
+    return row === undefined ? undefined : mapMappingProposalRow(row);
+  }
+
+  /**
+   * Replace a proposal's whole `shortlist_result` jsonb. The engine enriches the
+   * `shortlistResult` during a run — computing the no-counterpart set and marking
+   * a candidate pair `analysisFailed` after a stage-2 detail failure (PP-3) — and
+   * writes the updated value back verbatim (updating the whole jsonb is the agreed
+   * mechanism; there is no partial-jsonb update path). Returns the updated
+   * proposal, or `undefined` when no proposal with `id` exists.
+   */
+  public async setShortlistResult(
+    id: string,
+    shortlistResult: ShortlistResult,
+  ): Promise<MappingProposal | undefined> {
+    const [row] = await this.db
+      .update(mappingProposal)
+      .set({ shortlistResult })
+      .where(eq(mappingProposal.id, id))
+      .returning();
+    return row === undefined ? undefined : mapMappingProposalRow(row);
+  }
+
+  /**
+   * Mutate a single item's `reviewState`. Item review is a Phase-3 concern; this
+   * minimal setter is provided for completeness. Returns the updated item, or
+   * `undefined` when no item with `itemId` exists.
+   */
+  public async updateItemReviewState(
+    itemId: string,
+    reviewState: ReviewState,
+  ): Promise<MappingProposalItem | undefined> {
+    const [row] = await this.db
+      .update(mappingProposalItem)
+      .set({ reviewState })
+      .where(eq(mappingProposalItem.id, itemId))
+      .returning();
+    return row === undefined ? undefined : mapMappingProposalItemRow(row);
+  }
+}
