@@ -177,3 +177,98 @@ describe("deriveResourceBindings — Gitea `issue` (RB-1 crit 6, 8)", () => {
     expect(withoutDelta.deltaCursorRef).toBeUndefined();
   });
 });
+
+// ── Synthetic specs ───────────────────────────────────────────────────────────
+// The scenario fixtures have no `cursor` pagination parameter and no deletion-
+// marker field, so small in-test OAS3 documents exercise those derivation paths.
+
+function widgetsSpec(options: {
+  collectionParams: readonly string[];
+  fields: readonly string[];
+}): unknown {
+  const properties: Record<string, unknown> = { id: { type: "integer" } };
+  for (const field of options.fields) properties[field] = { type: "string" };
+  return {
+    openapi: "3.0.0",
+    info: { title: "widgets", version: "1" },
+    paths: {
+      "/widgets": {
+        get: {
+          operationId: "listWidgets",
+          tags: ["widget"],
+          parameters: options.collectionParams.map((name) => ({
+            name,
+            in: "query",
+            schema: { type: "string" },
+          })),
+          responses: {
+            "200": {
+              description: "ok",
+              content: {
+                "application/json": {
+                  schema: { type: "array", items: { $ref: "#/components/schemas/Widget" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: { Widget: { type: "object", properties } },
+    },
+  };
+}
+
+describe("deriveResourceBindings — pagination-vs-delta cursor precedence", () => {
+  it("assigns a lone `cursor` param to paginationRef, never also deltaCursorRef", async () => {
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["cursor"], fields: [] }));
+    const binding = bindingFor(
+      deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
+      "widget",
+    );
+    expect(binding.paginationRef?.value).toEqual({
+      kind: "parameter",
+      operationId: "listWidgets",
+      parameter: "cursor",
+    });
+    expect(binding.deltaCursorRef).toBeUndefined();
+  });
+
+  it("derives deltaCursorRef from a distinct `since` param alongside a `cursor` page param", async () => {
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["cursor", "since"], fields: [] }));
+    const binding = bindingFor(
+      deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
+      "widget",
+    );
+    expect(binding.paginationRef?.value).toEqual({
+      kind: "parameter",
+      operationId: "listWidgets",
+      parameter: "cursor",
+    });
+    expect(binding.deltaCursorRef?.value).toEqual({
+      kind: "parameter",
+      operationId: "listWidgets",
+      parameter: "since",
+    });
+  });
+});
+
+describe("deriveResourceBindings — deltaDeletionRef (RB-1 crit 6)", () => {
+  it("derives deltaDeletionRef from a deletion-marker field iff supportsDeltaQuery", async () => {
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["page"], fields: ["deletedAt"] }));
+
+    const withDelta = bindingFor(
+      deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
+      "widget",
+    );
+    expect(withDelta.deltaDeletionRef?.value).toEqual({ kind: "field", path: "deletedAt" });
+    expect(withDelta.deltaDeletionRef?.confirmedBy).toBeNull();
+
+    const withoutDelta = bindingFor(
+      deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: false }), "spec-widgets"),
+      "widget",
+    );
+    expect(withoutDelta.deltaDeletionRef).toBeUndefined();
+  });
+});

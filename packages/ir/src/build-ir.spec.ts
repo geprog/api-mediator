@@ -155,6 +155,42 @@ describe("buildIr — error cases (SI-1 crit 9 + version gate)", () => {
   });
 });
 
+describe("buildIr — path-prefix fallback grouping (SI-1 crit 2, 6)", () => {
+  // Every scenario operation carries a tag, so a tag-less synthetic document is
+  // used to exercise the path-prefix fallback branch of resource grouping.
+  const untaggedSpec = {
+    openapi: "3.0.0",
+    info: { title: "untagged", version: "1" },
+    paths: {
+      "/widgets/{id}": {
+        get: { operationId: "getWidget", responses: { "200": { description: "ok" } } },
+      },
+      "/widgets": {
+        get: { operationId: "listWidgets", responses: { "200": { description: "ok" } } },
+      },
+    },
+  };
+
+  it("groups tag-less operations by their first non-parameter path segment", async () => {
+    const ir = await buildIr(untaggedSpec);
+    expect(ir.map((group) => group.resourceRef)).toEqual(["widgets"]);
+    const widgets = groupByRef(ir, "widgets");
+    expect(widgets.operations.map((operation) => operation.path).sort()).toEqual([
+      "/widgets",
+      "/widgets/{id}",
+    ]);
+  });
+
+  it("derives a stable resourceRef across re-parses of the same document", async () => {
+    const first = await buildIr(untaggedSpec);
+    const second = await buildIr(untaggedSpec);
+    expect(first.map((group) => group.resourceRef)).toEqual(
+      second.map((group) => group.resourceRef),
+    );
+    expect(first[0]?.resourceRef).toBe("widgets");
+  });
+});
+
 describe("buildIr — domain schema conformance", () => {
   it("produces an IR that validates against the domain Ir Zod schema", () => {
     expect(() => irSchema.parse(vikunjaIr)).not.toThrow();

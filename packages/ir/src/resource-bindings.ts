@@ -115,9 +115,20 @@ function deriveBinding(
   const changeTimestampRef = capabilities.supportsChangeTimestamps
     ? fieldRef(representationFields, CHANGE_TIMESTAMP_FIELD_NAMES)
     : undefined;
+  // `paginationRef` takes precedence over `deltaCursorRef`: `"cursor"` is a
+  // candidate for both (an opaque paging cursor vs. a changed-since delta
+  // watermark are different things), so the single parameter already claimed as
+  // the pagination cursor is excluded here — a delta watermark must come from a
+  // distinct parameter (`since`/`updatedSince`/…). This keeps one parameter from
+  // being confusingly assigned to both refs of the same resource.
+  const paginationParam = parameterNameOf(paginationRef);
   const deltaCursorRef =
     capabilities.supportsDeltaQuery && collectionRead
-      ? parameterRef(collectionRead, DELTA_CURSOR_PARAM_NAMES)
+      ? parameterRef(
+          collectionRead,
+          DELTA_CURSOR_PARAM_NAMES,
+          paginationParam === undefined ? undefined : new Set([paginationParam]),
+        )
       : undefined;
   const deltaDeletionRef = capabilities.supportsDeltaQuery
     ? fieldRef(representationFields, DELETION_MARKER_FIELD_NAMES)
@@ -192,8 +203,10 @@ function fieldRef(
 function parameterRef(
   operation: IrOperation,
   candidateNames: readonly string[],
+  exclude?: ReadonlySet<string>,
 ): ConfirmableRef | undefined {
   for (const candidate of candidateNames) {
+    if (exclude?.has(candidate)) continue;
     const match = operation.parameters.find((parameter) => parameter.name === candidate);
     if (match) {
       return unconfirmed({
@@ -204,6 +217,11 @@ function parameterRef(
     }
   }
   return undefined;
+}
+
+/** The parameter name a parameter ref points at, if any. */
+function parameterNameOf(ref: ConfirmableRef | undefined): string | undefined {
+  return ref?.value.kind === "parameter" ? ref.value.parameter : undefined;
 }
 
 function unconfirmed(value: IrRefTarget): ConfirmableRef {
