@@ -9,6 +9,7 @@
     { "path": "./packages/db" },
     { "path": "./packages/credentials" },
     { "path": "./packages/event-bus" },
+    { "path": "./packages/llm" },
     { "path": "./apps/backend" },
     { "path": "./apps/e2e" }
   ]
