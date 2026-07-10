@@ -7,6 +7,7 @@
     { "path": "./packages/ir" },
     { "path": "./packages/db" },
     { "path": "./packages/credentials" },
+    { "path": "./packages/event-bus" },
     { "path": "./apps/backend" },
     { "path": "./apps/e2e" }
   ]

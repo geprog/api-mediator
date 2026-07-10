@@ -17,6 +17,8 @@ export {
   apiSpecStatusEnum,
   credential,
   credentialTypeEnum,
+  eventOutbox,
+  processedEvent,
   registeredApp,
   registeredAppStatusEnum,
   resourceBinding,
@@ -30,16 +32,20 @@ export {
 export {
   mapApiSpecRow,
   mapCredentialMetadataRow,
+  mapEventOutboxRow,
   mapRegisteredAppRow,
   mapResourceBinding,
   toApiSpecInsert,
   toCredentialInsert,
+  toEventOutboxInsert,
   toRegisteredAppInsert,
   toResourceBindingInsert,
   toResourceBindingRefInserts,
   toResourceBindingRefUpdate,
   type ConfirmableRefPatch,
   type CredentialMetadata,
+  type OutboxInsert,
+  type OutboxRecord,
   type ResourceBindingRefPatch,
 } from "./mappers/index.js";
 
@@ -47,6 +53,10 @@ export {
 export {
   ApiSpecRepository,
   CredentialRepository,
+  EventOutboxRepository,
+  ProcessedEventRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  type OutboxOps,
+  type ProcessedEventOps,
 } from "./repositories/index.js";

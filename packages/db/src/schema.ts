@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -185,4 +186,78 @@ export const credential = pgTable(
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }).notNull(),
   },
   (table) => [index("credential_app_id_idx").on(table.appId)],
+);
+
+// ── Event Bus (transactional outbox + consumer idempotency ledger) ────────────
+
+/**
+ * `event_outbox` — the transactional outbox that makes the Event Bus durable and
+ * at-least-once (overview.md *Components* / *Event Bus*). A producer writes its
+ * event here **inside the same transaction** as the state change that produced it
+ * (`EventBus.emit(event, tx)`), so the event and its cause commit or roll back
+ * together — the bus never records a change that didn't happen, and never loses
+ * one that did. The dispatcher later claims unpublished rows, delivers them to
+ * registered consumers, and stamps `published_at`.
+ *
+ * `payload` holds only the event's **type-specific** fields; the envelope
+ * (`id`/`type`/`occurred_at`) lives in dedicated columns so the dispatcher's
+ * "unpublished, ready" scan and the `event_id` uniqueness are plain SQL, not
+ * jsonb probing. `event_id` is the domain event id (`DomainEventEnvelope.id`) and
+ * is UNIQUE, so emitting the same event twice is a no-op (idempotent emit).
+ *
+ * A row with `published_at IS NULL AND attempts >= <ceiling>` is a **parked
+ * (dead-letter)** event: it exhausted its retry budget and is skipped by the
+ * dispatcher's ready scan (the ceiling is the dispatcher's, not the schema's, so
+ * it stays a plain `attempts` comparison).
+ */
+export const eventOutbox = pgTable(
+  "event_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The domain event id (`DomainEventEnvelope.id`); UNIQUE → idempotent emit.
+    eventId: text("event_id").notNull(),
+    type: text("type").notNull(),
+    // Only the type-specific payload fields (the envelope is columnar).
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    // NULL until a dispatch run has delivered the row to every registered
+    // consumer for its type; set once, never cleared in normal operation.
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("event_outbox_event_id_uq").on(table.eventId),
+    // The dispatcher's claim query: unpublished rows in arrival order. A partial
+    // index keeps it tight — published rows (the vast majority over time) are not
+    // indexed, and the leading `created_at` matches the `ORDER BY created_at`.
+    index("event_outbox_unpublished_idx")
+      .on(table.createdAt)
+      .where(sql`${table.publishedAt} IS NULL`),
+  ],
+);
+
+/**
+ * `processed_event` — the consumer-side idempotency ledger that makes consumers
+ * dedupe by event id (overview.md: "idempotent consumers (deduplicating by event
+ * id)"). One row per `(consumer_name, event_id)` that a consumer has successfully
+ * handled; the dispatcher inserts it **in the same transaction as the handler's
+ * own writes**, so "handled" and "its effects" commit atomically. Before invoking
+ * a consumer the dispatcher checks for this row and skips if present, so an
+ * at-least-once redelivery runs the committed side effect exactly once.
+ */
+export const processedEvent = pgTable(
+  "processed_event",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    consumerName: text("consumer_name").notNull(),
+    eventId: text("event_id").notNull(),
+    processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The dedup key: a consumer handles each event id at most once. Its leading
+    // column also serves the `isProcessed(consumer, event)` lookup.
+    uniqueIndex("processed_event_consumer_event_uq").on(table.consumerName, table.eventId),
+  ],
 );

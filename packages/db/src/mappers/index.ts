@@ -24,3 +24,11 @@ export {
   type CredentialMetadata,
   type CredentialMetadataRow,
 } from "./credential.js";
+export {
+  mapEventOutboxRow,
+  toEventOutboxInsert,
+  type EventOutboxInsertRow,
+  type EventOutboxRow,
+  type OutboxInsert,
+  type OutboxRecord,
+} from "./event-outbox.js";

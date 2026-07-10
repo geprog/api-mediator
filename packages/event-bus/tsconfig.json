@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "vitest.integration.config.ts"],
+  "references": [
+    { "path": "./tsconfig.build.json" },
+    { "path": "../domain/tsconfig.build.json" },
+    { "path": "../db/tsconfig.build.json" }
+  ]
+}
