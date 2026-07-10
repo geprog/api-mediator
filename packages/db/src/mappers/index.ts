@@ -32,3 +32,15 @@ export {
   type OutboxInsert,
   type OutboxRecord,
 } from "./event-outbox.js";
+export {
+  mapMappingProposalRow,
+  toMappingProposalInsert,
+  type MappingProposalInsert,
+  type MappingProposalRow,
+} from "./mapping-proposal.js";
+export {
+  mapMappingProposalItemRow,
+  toMappingProposalItemInsert,
+  type MappingProposalItemInsert,
+  type MappingProposalItemRow,
+} from "./mapping-proposal-item.js";
