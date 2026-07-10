@@ -57,11 +57,23 @@ export interface HttpConfig {
   readonly port: number;
 }
 
+/**
+ * Credential Store configuration. `masterKey` is the decoded 32-byte master
+ * key (KEK) that wraps each credential's data key (see
+ * `docs/architecture/security.md` and `@mediator/credentials`). Held as a
+ * `Buffer` so consumers never re-parse the encoding; it is validated to exactly
+ * 32 bytes at load time so a misconfigured deployment fails fast.
+ */
+export interface CredentialsConfig {
+  readonly masterKey: Buffer;
+}
+
 export interface AppConfig {
   readonly http: HttpConfig;
   readonly database: DatabaseConfig;
   readonly telemetry: TelemetryConfig;
   readonly mappingLlm: MappingLlmConfig;
+  readonly credentials: CredentialsConfig;
 }
 
 /** Thrown by {@link loadConfig} when the environment fails validation. */
@@ -114,6 +126,32 @@ export function isPostgresConnectionUrl(value: string): boolean {
  */
 const booleanFromEnv = z.enum(["true", "false"]).transform((value) => value === "true");
 
+/** The Credential Store master key (KEK) length: 32 bytes for AES-256-GCM. */
+const MASTER_KEY_LENGTH_BYTES = 32;
+/** Standard (padded) base64 — rejects whitespace and non-base64 characters. */
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** Human-readable validation message for an invalid `CREDENTIAL_MASTER_KEY`. */
+export const CREDENTIAL_MASTER_KEY_MESSAGE =
+  "must be a base64-encoded 32-byte key (e.g. `openssl rand -base64 32`)";
+
+/**
+ * Decode `CREDENTIAL_MASTER_KEY` from standard base64 into exactly 32 bytes, or
+ * return `null` when it is not canonical base64 or not 32 bytes. The re-encode
+ * comparison rejects the inputs Node's lenient base64 decoder would otherwise
+ * silently truncate, so validation is precise rather than best-effort.
+ */
+function decodeMasterKey(value: string): Buffer | null {
+  if (!BASE64_PATTERN.test(value)) {
+    return null;
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value || decoded.length !== MASTER_KEY_LENGTH_BYTES) {
+    return null;
+  }
+  return decoded;
+}
+
 const envSchema = z.object({
   // Operator API/UI HTTP server. Default 3333 is kept clear of Grafana's 3000
   // (GRAFANA_PORT) to avoid a dev clash.
@@ -121,6 +159,13 @@ const envSchema = z.object({
 
   // Database
   DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
+
+  // Credential Store master key (KEK) — required, no default. Production must set
+  // a real secret; `.env.example` ships a dev-only sample. Validated to exactly
+  // 32 base64-decoded bytes so a misconfigured key fails fast at startup.
+  CREDENTIAL_MASTER_KEY: z
+    .string()
+    .refine((v) => decodeMasterKey(v) !== null, { error: CREDENTIAL_MASTER_KEY_MESSAGE }),
 
   // Telemetry — empty endpoint means telemetry is disabled (a supported state).
   OTEL_EXPORTER_OTLP_ENDPOINT: z
@@ -166,6 +211,15 @@ function toTelemetryConfig(raw: RawEnv): TelemetryConfig {
   };
 }
 
+function toCredentialsConfig(raw: RawEnv): CredentialsConfig {
+  const masterKey = decodeMasterKey(raw.CREDENTIAL_MASTER_KEY);
+  if (masterKey === null) {
+    // Unreachable: the schema refine already validated encoding and length.
+    throw new ConfigValidationError(`CREDENTIAL_MASTER_KEY ${CREDENTIAL_MASTER_KEY_MESSAGE}`);
+  }
+  return { masterKey };
+}
+
 function toAppConfig(raw: RawEnv): AppConfig {
   return {
     http: { port: raw.HTTP_PORT },
@@ -180,6 +234,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
       requestTimeoutMs: raw.MAPPING_LLM_REQUEST_TIMEOUT_MS,
       maxRetries: raw.MAPPING_LLM_MAX_RETRIES,
     },
+    credentials: toCredentialsConfig(raw),
   };
 }
 
@@ -188,6 +243,7 @@ function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.database);
   Object.freeze(config.telemetry);
   Object.freeze(config.mappingLlm);
+  Object.freeze(config.credentials);
   return Object.freeze(config);
 }
 

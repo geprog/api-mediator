@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { ConfigValidationError, loadConfig } from "./index.js";
 
+/** A valid dev master key: 32 bytes, standard base64 (44 chars, padded). */
+const DEV_MASTER_KEY = Buffer.alloc(32, 7).toString("base64");
+
 /**
  * A minimal, fully-valid environment. Individual tests clone and mutate this so
  * each assertion isolates one variable. Values are dev-plausible but arbitrary.
@@ -9,6 +12,7 @@ import { ConfigValidationError, loadConfig } from "./index.js";
 function baseEnv(): NodeJS.ProcessEnv {
   return {
     DATABASE_URL: "postgres://mediator:mediator@localhost:5432/api_mediator",
+    CREDENTIAL_MASTER_KEY: DEV_MASTER_KEY,
     OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
     OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
     OTEL_SERVICE_NAME: "api-mediator",
@@ -42,6 +46,9 @@ describe("loadConfig", () => {
       requestTimeoutMs: 300000,
       maxRetries: 3,
     });
+    // The master key is decoded to its exact 32 bytes.
+    expect(config.credentials.masterKey).toBeInstanceOf(Buffer);
+    expect(config.credentials.masterKey).toStrictEqual(Buffer.alloc(32, 7));
   });
 
   it("returns a deeply-frozen config object", () => {
@@ -52,6 +59,7 @@ describe("loadConfig", () => {
     expect(Object.isFrozen(config.database)).toBe(true);
     expect(Object.isFrozen(config.telemetry)).toBe(true);
     expect(Object.isFrozen(config.mappingLlm)).toBe(true);
+    expect(Object.isFrozen(config.credentials)).toBe(true);
   });
 
   describe("HTTP_PORT", () => {
@@ -85,6 +93,49 @@ describe("loadConfig", () => {
     const env = { ...baseEnv(), DATABASE_URL: "mysql://localhost:3306/db" };
 
     expect(() => loadConfig(env)).toThrow(/DATABASE_URL/);
+  });
+
+  describe("CREDENTIAL_MASTER_KEY", () => {
+    it("throws a helpful error when it is missing (no default — fail fast)", () => {
+      const env = baseEnv();
+      delete env.CREDENTIAL_MASTER_KEY;
+
+      expect(() => loadConfig(env)).toThrow(ConfigValidationError);
+      expect(() => loadConfig(env)).toThrow(/CREDENTIAL_MASTER_KEY/);
+    });
+
+    it("rejects a key that decodes to fewer than 32 bytes", () => {
+      const env = { ...baseEnv(), CREDENTIAL_MASTER_KEY: Buffer.alloc(16, 7).toString("base64") };
+
+      expect(() => loadConfig(env)).toThrow(/CREDENTIAL_MASTER_KEY/);
+    });
+
+    it("rejects a key that decodes to more than 32 bytes", () => {
+      const env = { ...baseEnv(), CREDENTIAL_MASTER_KEY: Buffer.alloc(48, 7).toString("base64") };
+
+      expect(() => loadConfig(env)).toThrow(/CREDENTIAL_MASTER_KEY/);
+    });
+
+    it("rejects a key that is not valid base64", () => {
+      const env = { ...baseEnv(), CREDENTIAL_MASTER_KEY: "not valid base64 !!!" };
+
+      expect(() => loadConfig(env)).toThrow(/CREDENTIAL_MASTER_KEY/);
+    });
+
+    it("never echoes the key value in the validation message", () => {
+      const secretish = "こんにちは-not-base64";
+      const env = { ...baseEnv(), CREDENTIAL_MASTER_KEY: secretish };
+
+      let message = "";
+      try {
+        loadConfig(env);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toContain("CREDENTIAL_MASTER_KEY");
+      expect(message).not.toContain(secretish);
+    });
   });
 
   it("aggregates every missing/invalid variable in one error", () => {
