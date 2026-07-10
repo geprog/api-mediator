@@ -76,7 +76,7 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
         v-for="binding in bindings"
         :key="binding.id"
         class="binding-card"
-        :data-testid="`binding-${binding.id}`"
+        :data-testid="`binding-resource-${binding.resourceRef}`"
       >
         <template #title>
           <span>{{ binding.resourceRef }}</span>
