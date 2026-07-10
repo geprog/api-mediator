@@ -10,11 +10,15 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@mediator/contracts": "workspace:*",
+    "@mediator/domain": "workspace:*",
     "@primeuix/themes": "2.0.3",
+    "@tanstack/vue-query": "5.101.2",
     "pinia": "3.0.4",
     "primevue": "4.5.5",
     "vue": "3.5.39",
-    "vue-router": "4.6.4"
+    "vue-router": "4.6.4",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
