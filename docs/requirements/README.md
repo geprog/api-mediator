@@ -14,13 +14,17 @@ oracle for unit and e2e tests: if a criterion can't be turned into a test, it is
 
 ## Roles
 
-The concept defines three human roles. Phase 1 involves only the first:
+The concept defines three human roles. Phase 1 involves only the first; **Phase 2 is
+system-driven** — the Mapping Engine reacts to `SpecIngested`, with the operator's only inputs being
+the active provider (configuration) and `analysisExclusions` (captured in Phase 1):
 
 - **operator** (landscape operator) — may mutate: register apps, store credentials, confirm/correct
-  `ResourceBinding`s, set `analysisExclusions`.
+  `ResourceBinding`s, set `analysisExclusions`, select the active `LLMMappingProvider`.
 - **viewer** — read-only: app list, spec IR. (Full auth wiring lands in Phase 3; Phase 1 stories
   state the read/mutate split so it is testable once auth exists.)
-- **mapping reviewer** / **consumer-app developer** — Phase 3 / Phase 5, not exercised here.
+- **mapping reviewer** / **consumer-app developer** — Phase 3 / Phase 5. Phase 2 *produces* what the
+  mapping reviewer will act on (`MappingProposal`s), but does not itself exercise that role — no
+  review/approval happens until Phase 3.
 
 ## Phase 1 — Registration + Spec ingestion + IR
 
@@ -117,3 +121,107 @@ Each has a recommended default the stories adopt; confirm or override.
     *Outbound load discipline* calls these "operational configuration on the app registration", but
     the Phase 1 `RegisteredApp` model does not include them. *Recommended:* defer capture to
     Phase 4; keep the registration schema forward-compatible. (AR-1)
+
+---
+
+## Phase 2 — Mapping detection (the "core bet")
+
+The second vertical slice, and the product's central bet: **`SpecIngested` → enumerate candidate
+spec pairs → stage-1 shortlist → stage-2 detail → validate → persist `MappingProposal`s for
+review.** It stands up the LLM-assisted Mapping Engine end to end for a *newly ingested* spec, but
+executes nothing and approves nothing — every output is a **reviewable proposal** whose human
+approval is Phase 3. The two-stage design (recall-biased shortlist per spec pair, detail only on
+shortlisted pairs) is what keeps a full landscape pass near ~1,000 LLM calls instead of ~38,000
+(see [overview.md](../architecture/overview.md) *Scale assumption*).
+
+Mechanical behaviors (enumeration rules, output shapes, validation-before-persist, the two failure
+blast radii, set-difference enrichment) are specified so a **FakeProvider**-backed test asserts them
+deterministically; **accuracy** (does a real model find the right pairs?) is separated out into the
+eval harness, which **scores** produced proposals against `scenarios/*/ground-truth.yaml` rather than
+asserting pass/fail.
+
+| File | Stories | Realizes (concept component) |
+|---|---|---|
+| [phase-2-candidate-enumeration.md](phase-2-candidate-enumeration.md) | CE-1 … CE-4 | Mapping Engine (*Candidate pair selection* + `analysisExclusions` scoping) |
+| [phase-2-llm-provider.md](phase-2-llm-provider.md) | LP-1 … LP-4 | `LLMMappingProvider` (Ollama + Fake) + `generatedBy` |
+| [phase-2-two-stage-detection.md](phase-2-two-stage-detection.md) | TD-1 … TD-5 | Mapping Engine (shortlist → detail, validation/retry, blast radii, confidence) |
+| [phase-2-proposal-persistence.md](phase-2-proposal-persistence.md) | PP-1 … PP-3 | `MappingProposal` / `MappingProposalItem` / `shortlistResult` |
+| [phase-2-detection-trigger.md](phase-2-detection-trigger.md) | DT-1 … DT-2 | Event Bus consumer (`SpecIngested` → detection) |
+| [phase-2-eval-harness.md](phase-2-eval-harness.md) | EH-1 … EH-3 | Detection quality scoring vs. ground truth |
+
+21 stories total.
+
+### Suggested implementation order (Phase 2, blocking edges)
+
+1. **LP-1** (the `LLMMappingProvider` interface + the two context types) and **LP-3** (FakeProvider)
+   — foundational; every mechanical test below runs on the fake.
+2. **CE-1 … CE-4** (candidate enumeration + `analysisExclusions` scoping) — pure over registry state,
+   needs no provider; produces the in-scope resource sets stage 1 consumes.
+3. **TD-1** (stage-1 shortlist) → **TD-2** (stage-2 detail) → **TD-3** (validate + capped retry) →
+   **TD-4** (two blast radii) → **TD-5** (confidence → `reviewRequired`).
+4. **PP-1 / PP-2 / PP-3** (persist proposal, items, mechanically-enriched `shortlistResult`) — realize
+   TD-4's `failed`/`analysisFailed` and TD-5's flag on persisted rows; **LP-4** (`generatedBy`) lands
+   with PP-1.
+5. **DT-1** (consume `SpecIngested`, auto-run detection) → **DT-2** (offload off the dispatcher
+   transaction, idempotent, reconcilable) — depends on Phase-1 EB-1/EB-2 and all of CE/TD/PP.
+6. **LP-2** (real Ollama provider) and **EH-1 … EH-3** (eval harness) — LP-2 backs the harness; the
+   harness scores accuracy last, once the mechanical path is proven on the fake.
+
+### Phase boundary map (Phase 2 → owning later phase)
+
+Named once so each story can point at "the owning later phase":
+
+| Deferred concern | Owning phase |
+|---|---|
+| Review/approval of proposal items; turning accepted items into `ApprovedMapping` / `FieldMapping` / `OperationMapping` / `ParameterMapping` | **Phase 3** ([mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)) |
+| The manual "analyze this resource pair anyway" **escape-hatch UI action** (the persisted `shortlistResult` that *enables* it is Phase 2 — PP-3) | **Phase 3** |
+| Confirming `identityCandidate` → `FieldMapping.isIdentityKey`, `action` → `OperationMapping.action`, `targetLookupParamRef` | **Phase 3** |
+| Instantiating `SyncRule`s; sync polling/backfill/`RecordLink`/`SyncFieldState` | **Phase 4** ([sync-engine.md](../architecture/sync-engine.md)) |
+| Instantiating `AdapterEndpoint`/`AdapterBinding`; adapter serving/composition | **Phase 5** ([adapter-engine.md](../architecture/adapter-engine.md)) |
+| `SpecDiff`, incremental delta re-analysis on spec change, re-mapping, `priorFeedback`, `analysisExclusions` re-inclusion trigger, re-pinning, successor adoption | **Phase 6** ([extensibility.md](../architecture/extensibility.md); [mapping-engine.md](../architecture/mapping-engine.md) *Re-mapping on spec change*, *Scoping down*) |
+
+Phase 2 does a **full analysis of a newly-ingested spec's pairs**, never incremental delta analysis.
+
+### Open questions for a human (Phase 2 — concept silent or underspecified)
+
+Each has a recommended default the stories adopt; confirm or override.
+
+1. **Confidence threshold for `reviewRequired`.** The concept gives "e.g. `< 0.7`"
+   ([mapping-engine.md](../architecture/mapping-engine.md) *Confidence & ambiguity*) but fixes no
+   value. *Recommended:* default `0.7`, config-defined. (TD-5)
+2. **Corrective-retry cap.** Concept says "e.g. 3 attempts per call." *Recommended:* default `3` per
+   call, config-defined. (TD-3)
+3. **Does detection auto-run on every `SpecIngested`?** **Adopted (not open):** yes — the flow states
+   a mapping orchestrator picks up `SpecIngested` and enumerates
+   ([app-registration-and-mapping-detection.md](../flows/app-registration-and-mapping-detection.md)
+   step 4). Flagged only to confirm there is **no** operator "run detection" trigger in Phase 2; the
+   sole operator-initiated detail run (the escape hatch) is Phase 3. (DT-1)
+4. **How does the eval harness invoke the engine — directly or via the bus?** Concept is silent.
+   *Recommended:* invoke the **detection engine directly** over the fixture specs, bypassing the
+   Event Bus/`SpecIngested` trigger, so a score is a function of inputs + provider only and is
+   independent of trigger wiring. (EH-1)
+5. **`reviewRequired` — persisted field or derived?** *Concept gap:* `reviewRequired` is named in
+   [glossary.md](../glossary.md) and [mapping-engine.md](../architecture/mapping-engine.md), but is
+   **not** among `MappingProposalItem`'s listed fields in
+   [data-model.md](../architecture/data-model.md). *Recommended:* persist it on `MappingProposalItem`
+   (or derive deterministically from `confidenceScore` < threshold at read time) — either is testable;
+   a human should confirm which, and whether `data-model.md` should list the field. (TD-5)
+6. **Transform vocabulary vs. ground-truth `direct`.** *Concept gap:* `MappingSuggestionSet.transform`
+   and `FieldMapping.transform` enumerate `rename` | `coerce` | `aggregate` | `expression` — with **no
+   identity/none/`direct` member** — yet a same-name, value-preserving field pair (`title`→`title`,
+   `email`→`email`) is extremely common, and the scenario ground-truths use `direct` for exactly that
+   (and their header even claims to "mirror data-model.md `FieldMapping`", which it does not).
+   *Recommended:* represent a value-preserving same-name pair as `rename` (name-change-optional,
+   value-preserving) and have the eval harness score ground-truth `direct` against that bucket; a
+   human should decide whether to add an explicit identity kind to the concept or clarify that
+   `rename` covers the no-rename case. (EH-3)
+7. **Peer-peer shortlist failure: one `failed` proposal row or two?** A peer pair's two directional
+   proposals share one shortlist; if that shortlist fails, "the whole spec-pair run" fails
+   ([mapping-engine.md](../architecture/mapping-engine.md)), but the concept does not say whether that
+   is recorded as one or two `failed` `MappingProposal` rows. *Recommended:* persist **two** `failed`
+   proposals (one per direction) so the review UI has a per-direction referent; confirm. (TD-4, PP-1)
+8. **Reconciliation's definition of "analyzed."** The sweep re-triggers "an ingested spec with no
+   analysis run" ([overview.md](../architecture/overview.md)). *Recommended:* a persisted
+   `MappingProposal` — **including a `failed` one** — counts as "analyzed," so a recorded shortlist
+   failure is not re-looped indefinitely; a spec with *zero* proposals for a pair it should have is
+   what the sweep re-triggers. (DT-2)
