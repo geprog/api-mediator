@@ -27,3 +27,7 @@ scenarios/
 docker-compose.yml
 CLAUDE.md
 DEVELOPMENT.md
+
+# Operator/deployment config owned outside the app toolchain — Grafana
+# dashboard exports (ops/grafana/) must stay byte-faithful to what Grafana emits.
+ops/grafana/
