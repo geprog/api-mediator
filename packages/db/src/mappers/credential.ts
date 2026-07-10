@@ -11,14 +11,14 @@ export type CredentialInsert = typeof credential.$inferInsert;
  * so no read path can surface credential material — the write-only invariant
  * (CR-2) is enforced in the type system, not just by convention.
  *
- * `lastRotatedAt` is `Date | null` because the column is nullable; the Phase-1
- * store path always sets it to creation time, so in practice it is a `Date`.
+ * `lastRotatedAt` is a non-null `Date`: the column is NOT NULL and the domain
+ * contract (`Credential.lastRotatedAt: Date`) always sets it at creation.
  */
 export interface CredentialMetadata {
   id: string;
   type: CredentialType;
   scopes: string[];
-  lastRotatedAt: Date | null;
+  lastRotatedAt: Date;
 }
 
 /** The column subset a metadata read selects (excludes `encrypted_payload`). */
@@ -26,7 +26,7 @@ export interface CredentialMetadataRow {
   id: string;
   type: CredentialType;
   scopes: string[];
-  lastRotatedAt: Date | null;
+  lastRotatedAt: Date;
 }
 
 /** Domain → insert. Carries `encryptedPayload` in (write path); never out. */

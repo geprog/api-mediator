@@ -180,7 +180,9 @@ export const credential = pgTable(
     type: credentialTypeEnum("type").notNull(),
     encryptedPayload: text("encrypted_payload").notNull(),
     scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
-    lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
+    // NOT NULL: the domain contract is `Credential.lastRotatedAt: Date`, always
+    // set at creation by `CredentialStore.store` (data-model.md `Credential`).
+    lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }).notNull(),
   },
   (table) => [index("credential_app_id_idx").on(table.appId)],
 );

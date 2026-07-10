@@ -1,0 +1,1 @@
+ALTER TABLE "credential" ALTER COLUMN "last_rotated_at" SET NOT NULL;
