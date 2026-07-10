@@ -1,18 +1,18 @@
 /**
- * Placeholder entry point for the shared-kernel `@mediator/domain` package.
+ * `@mediator/domain` — the shared kernel and single naming authority for the
+ * API Mediator. Every glossary entity is defined here **once**, as a Zod schema
+ * plus its inferred TypeScript type, so the whole system imports one vocabulary.
  *
- * Slice 1 only proves the typecheck + build + unit-test pipeline; the real
- * glossary entities (`ApprovedMapping`, `RecordLink`, `SyncFieldState`, …)
- * land in Phase 1. The exported helper carries an explicit return type so the
- * `@typescript-eslint/explicit-module-boundary-types` rule has something to
- * enforce.
+ * This is a types-only, I/O-free package: no persistence, no HTTP, no OpenAPI
+ * parsing (those slices import from here). Phase 1 covers registration + spec
+ * ingestion entities and the IR; mapping/sync/adapter entities arrive in later
+ * phases.
  */
-export const DOMAIN_PACKAGE = "domain" as const;
 
-/**
- * Returns the package identifier. Exists purely to exercise the strict
- * toolchain (explicit return type on an exported function).
- */
-export function domainPackageName(): typeof DOMAIN_PACKAGE {
-  return DOMAIN_PACKAGE;
-}
+export * from "./enums.js";
+export * from "./ir.js";
+export * from "./registered-app.js";
+export * from "./api-spec.js";
+export * from "./resource-binding.js";
+export * from "./credential.js";
+export * from "./events.js";
