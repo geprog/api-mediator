@@ -28,11 +28,12 @@ import { apiSpec, mappingProposal, mappingProposalItem, registeredApp } from "./
  * `pnpm --filter @mediator/db test:integration`.
  *
  * Proves the whole slice end-to-end against a fresh migrated schema (chain
- * 0000→0005): a peer-peer proposal with an operation item, an identity-key field
- * item, and an unmapped item round-trips with items; a `failed` proposal carries
- * a NULL `shortlist_result` and no items; `updateStatus` and `setShortlistResult`
- * (marking a pair `analysisFailed`) persist; and `ON DELETE CASCADE` removes a
- * proposal's items when the proposal is deleted.
+ * 0000→0006): a peer-peer proposal with an operation item, an identity-key field
+ * item (carrying the `identityCandidate` + `targetLookupParamRef` detection
+ * metadata, PP-2), and an unmapped item round-trips with items; a `failed`
+ * proposal carries a NULL `shortlist_result` and no items; `updateStatus` and
+ * `setShortlistResult` (marking a pair `analysisFailed`) persist; and
+ * `ON DELETE CASCADE` removes a proposal's items when the proposal is deleted.
  */
 describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
   let db: Database;
@@ -123,6 +124,8 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
   };
 
   // The identity-key-derived field pairing (email ↔ email, value-preserving).
+  // It carries the peer-peer detection metadata (identityCandidate = true + the
+  // suggested lookup parameter) — persisted so Phase-3 can pre-select the key.
   const identityFieldItem: MappingProposalItem = {
     id: randomUUID(),
     proposalId,
@@ -141,6 +144,8 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
     unmapped: false,
     rationale: "shared identity value",
     reviewState: "pending",
+    identityCandidate: true,
+    targetLookupParamRef: "email",
   };
 
   const unmappedItem: MappingProposalItem = {
@@ -203,6 +208,14 @@ describe("Phase-2 proposal persistence integration (requires Postgres)", () => {
     expect(readUnmapped && "transformSuggestion" in readUnmapped).toBe(false);
     expect(readUnmapped && "targetRef" in readUnmapped).toBe(false);
     expect(readIdentityField && "phase" in readIdentityField).toBe(false);
+
+    // The peer-peer detection metadata survives the real DB round-trip on the
+    // identity field item, and is absent on the operation and unmapped items.
+    expect(readIdentityField?.identityCandidate).toBe(true);
+    expect(readIdentityField?.targetLookupParamRef).toBe("email");
+    expect(readOperation && "identityCandidate" in readOperation).toBe(false);
+    expect(readOperation && "targetLookupParamRef" in readOperation).toBe(false);
+    expect(readUnmapped && "identityCandidate" in readUnmapped).toBe(false);
   });
 
   it("is queryable by source spec id", async () => {

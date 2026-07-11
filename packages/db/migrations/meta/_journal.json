@@ -43,6 +43,13 @@
       "when": 1783695641669,
       "tag": "0005_create_proposal_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783756880141,
+      "tag": "0006_parallel_crystal",
+      "breakpoints": true
     }
   ]
 }

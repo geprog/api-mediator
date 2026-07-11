@@ -96,6 +96,20 @@ export type ProposalItemAlternative = z.infer<typeof proposalItemAlternativeSche
  *   `unmapped ⇒ absent` one below.
  * - `reviewState` — the initial persisted value is `pending` (Phase-3 review
  *   moves it); it is a required column, not defaulted here.
+ * - `identityCandidate` / `targetLookupParamRef` — **peer-peer field detection
+ *   metadata**, meaningful *only* on a `kind = field` item with **no** `phase`
+ *   (a peer-peer field item). They persist the stage-2 LLM suggestion verbatim
+ *   (`peerPeerFieldSuggestionSchema.identityCandidate` / `.targetLookupParamRef`,
+ *   see `llm-output.ts` and `docs/architecture/mapping-engine.md`) so Phase-3
+ *   review can *pre-select* the identity key and its lookup parameter without
+ *   re-running the LLM (see `docs/flows/mapping-review-and-approval.md` step 6).
+ *   They are **review-time defaults only** — `FieldMapping.isIdentityKey` is still
+ *   set exclusively by explicit reviewer confirmation. The superRefine makes them
+ *   *unrepresentable* anywhere else: an operation/parameter item, or a
+ *   consumer-provider (phased) field item, carries neither — the same mutual
+ *   exclusivity the `MappingSuggestionSet` discriminated union enforces on the LLM
+ *   output (the adapter never correlates records across apps, so a phased field
+ *   has no identity key).
  *
  * `reviewRequired` is **not** a stored field — it is derived from
  * `confidenceScore` against a configurable threshold (see {@link isReviewRequired}
@@ -115,6 +129,12 @@ export const mappingProposalItemSchema = z
     unmapped: z.boolean(),
     rationale: z.string(),
     reviewState: reviewStateSchema,
+    // Peer-peer field detection metadata — mirrors `peerPeerFieldSuggestionSchema`
+    // exactly (an optional boolean flag + an optional lookup-parameter ref string).
+    // The superRefine below confines them to a peer-peer (no-phase) `kind = field`
+    // item; a present value on any other item is a validation error.
+    identityCandidate: z.boolean().optional(),
+    targetLookupParamRef: z.string().optional(),
   })
   .superRefine((item, ctx) => {
     if (item.unmapped) {
@@ -160,6 +180,29 @@ export const mappingProposalItemSchema = z
         code: "custom",
         message: "a mapped kind = field item requires a transformSuggestion object",
         path: ["transformSuggestion"],
+      });
+    }
+    // `identityCandidate` / `targetLookupParamRef` are peer-peer field detection
+    // metadata: only a `kind = field` item with NO `phase` (a peer-peer field
+    // item) may carry them. This makes them unrepresentable on operation/parameter
+    // items and on consumer-provider (phased) field items — mirroring the
+    // `MappingSuggestionSet` discriminated union, where only a peer-peer field
+    // suggestion carries these keys. A present `false` is still "carried here" and
+    // is likewise rejected on the wrong item (hence the `!== undefined` test).
+    const isPeerPeerFieldItem = item.kind === "field" && item.phase === undefined;
+    if (item.identityCandidate !== undefined && !isPeerPeerFieldItem) {
+      ctx.addIssue({
+        code: "custom",
+        message: "identityCandidate is only meaningful on a peer-peer (no-phase) kind = field item",
+        path: ["identityCandidate"],
+      });
+    }
+    if (item.targetLookupParamRef !== undefined && !isPeerPeerFieldItem) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "targetLookupParamRef is only meaningful on a peer-peer (no-phase) kind = field item",
+        path: ["targetLookupParamRef"],
       });
     }
   });

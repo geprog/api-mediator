@@ -173,6 +173,10 @@ suite("runDetectionForSpec persistence integration (requires Postgres)", () => {
         i.sourceRef.target.path === "title",
     );
     expect(title?.transformSuggestion).toEqual({ transform: "rename" });
+    // The peer-peer identity suggestion (identityCandidate + targetLookupParamRef)
+    // was threaded onto the field item and persisted through the real DB round-trip.
+    expect(title?.identityCandidate).toBe(true);
+    expect(title?.targetLookupParamRef).toBe("filter");
     // The absent/null distinctions survived a real DB round-trip.
     const op = items.find((i) => i.kind === "operation");
     expect(op?.transformSuggestion).toBeNull();

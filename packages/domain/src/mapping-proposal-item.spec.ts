@@ -195,6 +195,90 @@ describe("MappingProposalItem schema", () => {
   });
 });
 
+describe("MappingProposalItem — identityCandidate / targetLookupParamRef (peer-peer detection metadata)", () => {
+  it("accepts identityCandidate + targetLookupParamRef on a peer-peer field item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      ...peerPeerFieldItem(),
+      identityCandidate: true,
+      targetLookupParamRef: "filter",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.identityCandidate).toBe(true);
+      expect(result.data.targetLookupParamRef).toBe("filter");
+    }
+  });
+
+  it("accepts a present identityCandidate = false on a peer-peer field item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      ...peerPeerFieldItem(),
+      identityCandidate: false,
+    });
+    expect(result.success).toBe(true);
+    // A present `false` survives — the flag is a tri-state (absent / false / true).
+    if (result.success) expect(result.data.identityCandidate).toBe(false);
+  });
+
+  it("rejects identityCandidate on an operation item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      ...operationItem(),
+      identityCandidate: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a present identityCandidate = false on an operation item", () => {
+    // Even a present `false` is unrepresentable off a peer-peer field item.
+    const result = mappingProposalItemSchema.safeParse({
+      ...operationItem(),
+      identityCandidate: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects targetLookupParamRef on a parameter item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      id: "item-param",
+      proposalId: "prop-1",
+      kind: "parameter",
+      sourceRef: {
+        resourceRef: "issues",
+        target: { kind: "parameter", operationId: "get", parameter: "id" },
+      },
+      targetRef: {
+        resourceRef: "tasks",
+        target: { kind: "parameter", operationId: "get", parameter: "taskId" },
+      },
+      transformSuggestion: { transform: "coerce", detail: "string→int" },
+      confidenceScore: 0.7,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "path id",
+      reviewState: "pending",
+      targetLookupParamRef: "filter",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects identityCandidate on a consumer-provider (phase-bearing) field item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      ...peerPeerFieldItem(),
+      phase: "response",
+      identityCandidate: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects targetLookupParamRef on a consumer-provider (phase-bearing) field item", () => {
+    const result = mappingProposalItemSchema.safeParse({
+      ...peerPeerFieldItem(),
+      phase: "request",
+      targetLookupParamRef: "filter",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("isReviewRequired (derived, TD-5)", () => {
   it("flags an item strictly below the threshold, not one at or above it", () => {
     expect(isReviewRequired({ confidenceScore: 0.6 }, 0.7)).toBe(true);

@@ -18,6 +18,10 @@ export type MappingProposalItemInsert = typeof mappingProposalItem.$inferInsert;
  *   `operation` item (`unmapped = false`) but an **absent** key for an unmapped
  *   item (`unmapped = true`). This is what makes the concept's absent-vs-null
  *   distinction round-trip through one column.
+ * - `identity_candidate` / `target_lookup_param_ref` — peer-peer field detection
+ *   metadata; a NULL column becomes an **absent** key, while a stored `false`/value
+ *   round-trips (a present `false` is preserved — `?? undefined` only collapses
+ *   NULL, not `false`).
  *
  * `confidence_score` comes back from the `double precision` column as a plain
  * `number`, round-tripped exactly (no float32 truncation).
@@ -39,6 +43,9 @@ export function mapMappingProposalItemRow(row: MappingProposalItemRow): MappingP
     unmapped: row.unmapped,
     rationale: row.rationale,
     reviewState: row.reviewState,
+    // NULL → absent; a stored `false`/value survives (only NULL collapses).
+    identityCandidate: row.identityCandidate ?? undefined,
+    targetLookupParamRef: row.targetLookupParamRef ?? undefined,
   });
 }
 
@@ -46,7 +53,8 @@ export function mapMappingProposalItemRow(row: MappingProposalItemRow): MappingP
  * Domain → insert. An absent `targetRef`/`phase` becomes a NULL column, and both
  * the absent (unmapped) and `null` (operation) `transformSuggestion` states
  * collapse to a NULL column — the read path reconstructs which one it was from
- * `unmapped`.
+ * `unmapped`. An absent `identityCandidate`/`targetLookupParamRef` likewise becomes
+ * a NULL column, while a present `false`/value is written verbatim.
  */
 export function toMappingProposalItemInsert(item: MappingProposalItem): MappingProposalItemInsert {
   return {
@@ -62,5 +70,9 @@ export function toMappingProposalItemInsert(item: MappingProposalItem): MappingP
     unmapped: item.unmapped,
     rationale: item.rationale,
     reviewState: item.reviewState,
+    // Absent → NULL; a present `false`/value is written verbatim (`?? null` only
+    // maps the absent/undefined case, leaving a stored `false` intact).
+    identityCandidate: item.identityCandidate ?? null,
+    targetLookupParamRef: item.targetLookupParamRef ?? null,
   };
 }

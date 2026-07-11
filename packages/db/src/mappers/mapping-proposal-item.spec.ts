@@ -37,6 +37,8 @@ function itemRow(overrides: Partial<MappingProposalItemRow> = {}): MappingPropos
     unmapped: false,
     rationale: "same concept",
     reviewState: "pending",
+    identityCandidate: null,
+    targetLookupParamRef: null,
     ...overrides,
   };
 }
@@ -91,6 +93,28 @@ describe("mapMappingProposalItemRow — phase, targetRef, confidence", () => {
   it("keeps a set phase (consumer-provider field item)", () => {
     const item = mapMappingProposalItemRow(itemRow({ phase: "response" }));
     expect(item.phase).toBe("response");
+  });
+
+  it("omits NULL identityCandidate/targetLookupParamRef (non-identity field item)", () => {
+    const item = mapMappingProposalItemRow(
+      itemRow({ identityCandidate: null, targetLookupParamRef: null }),
+    );
+    expect("identityCandidate" in item).toBe(false);
+    expect("targetLookupParamRef" in item).toBe(false);
+  });
+
+  it("round-trips identityCandidate=true + targetLookupParamRef (identity field item)", () => {
+    const item = mapMappingProposalItemRow(
+      itemRow({ identityCandidate: true, targetLookupParamRef: "filter" }),
+    );
+    expect(item.identityCandidate).toBe(true);
+    expect(item.targetLookupParamRef).toBe("filter");
+  });
+
+  it("preserves a stored identityCandidate=false (not collapsed to absent)", () => {
+    const item = mapMappingProposalItemRow(itemRow({ identityCandidate: false }));
+    expect("identityCandidate" in item).toBe(true);
+    expect(item.identityCandidate).toBe(false);
   });
 
   it("reads confidence_score back as a plain number, preserving full float64 precision", () => {
@@ -166,6 +190,63 @@ describe("toMappingProposalItemInsert", () => {
       { targetRef: fieldRef("label"), confidence: 0.4 },
     ]);
   });
+
+  it("identity field item: identityCandidate/targetLookupParamRef are written verbatim", () => {
+    const insert = toMappingProposalItemInsert({
+      id: "item-identity",
+      proposalId: "prop-1",
+      kind: "field",
+      sourceRef: fieldRef("email"),
+      targetRef: fieldRef("email"),
+      transformSuggestion: renameSuggestion,
+      confidenceScore: 0.95,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "shared identity value",
+      reviewState: "pending",
+      identityCandidate: true,
+      targetLookupParamRef: "filter",
+    });
+    expect(insert.identityCandidate).toBe(true);
+    expect(insert.targetLookupParamRef).toBe("filter");
+  });
+
+  it("non-identity field item: absent identityCandidate/targetLookupParamRef become NULL columns", () => {
+    const insert = toMappingProposalItemInsert({
+      id: "item-field",
+      proposalId: "prop-1",
+      kind: "field",
+      sourceRef: fieldRef("title"),
+      targetRef: fieldRef("name"),
+      transformSuggestion: renameSuggestion,
+      confidenceScore: 0.9,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "same concept",
+      reviewState: "pending",
+    });
+    expect(insert.identityCandidate).toBeNull();
+    expect(insert.targetLookupParamRef).toBeNull();
+  });
+
+  it("preserves a present identityCandidate=false (not collapsed to a NULL column)", () => {
+    const insert = toMappingProposalItemInsert({
+      id: "item-field-false",
+      proposalId: "prop-1",
+      kind: "field",
+      sourceRef: fieldRef("title"),
+      targetRef: fieldRef("name"),
+      transformSuggestion: renameSuggestion,
+      confidenceScore: 0.9,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "same concept",
+      reviewState: "pending",
+      identityCandidate: false,
+    });
+    expect(insert.identityCandidate).toBe(false);
+    expect(insert.targetLookupParamRef).toBeNull();
+  });
 });
 
 describe("insert → row → domain round-trip preserves the three transformSuggestion states", () => {
@@ -187,6 +268,8 @@ describe("insert → row → domain round-trip preserves the three transformSugg
       unmapped: item.unmapped,
       rationale: item.rationale,
       reviewState: item.reviewState,
+      identityCandidate: insert.identityCandidate ?? null,
+      targetLookupParamRef: insert.targetLookupParamRef ?? null,
     };
   }
 
@@ -236,6 +319,24 @@ describe("insert → row → domain round-trip preserves the three transformSugg
         unmapped: true,
         rationale: "no counterpart",
         reviewState: "rejected",
+      },
+    ],
+    [
+      "peer-peer identity field (identityCandidate=true + targetLookupParamRef)",
+      {
+        id: "rt-identity",
+        proposalId: "prop-1",
+        kind: "field",
+        sourceRef: fieldRef("email"),
+        targetRef: fieldRef("email"),
+        transformSuggestion: renameSuggestion,
+        confidenceScore: 0.95,
+        ambiguousAlternatives: [],
+        unmapped: false,
+        rationale: "shared identity value",
+        reviewState: "pending",
+        identityCandidate: true,
+        targetLookupParamRef: "filter",
       },
     ],
   ];

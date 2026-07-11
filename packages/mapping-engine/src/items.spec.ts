@@ -63,8 +63,24 @@ describe("buildItems — peer-peer (PP-2)", () => {
     );
     expect(title?.transformSuggestion).toEqual({ transform: "rename" });
     expect(title && "phase" in title).toBe(false);
-    // identityCandidate / targetLookupParamRef are NOT carried onto the item.
-    expect(title && "identityCandidate" in title).toBe(false);
+  });
+
+  it("threads the identity suggestion onto the identity field item (identityCandidate + targetLookupParamRef)", () => {
+    // The scenario-1 Gitea↔Vikunja title↔title pairing is the flagged identity
+    // candidate — its suggestion survives construction as detection metadata.
+    const title = byKind(items, "field").find(
+      (item) => item.sourceRef.target.kind === "field" && item.sourceRef.target.path === "title",
+    );
+    expect(title?.identityCandidate).toBe(true);
+    expect(title?.targetLookupParamRef).toBe("filter");
+  });
+
+  it("a non-identity peer-peer field item carries no identity detection metadata", () => {
+    const body = byKind(items, "field").find(
+      (item) => item.sourceRef.target.kind === "field" && item.sourceRef.target.path === "body",
+    );
+    expect(body && "identityCandidate" in body).toBe(false);
+    expect(body && "targetLookupParamRef" in body).toBe(false);
   });
 
   it("normalizes ambiguousAlternatives to { targetRef, confidence }", () => {
@@ -105,6 +121,13 @@ describe("buildItems — consumer-provider (PP-2)", () => {
     const params = byKind(items, "parameter");
     expect(params).toHaveLength(1);
     expect(params[0] && "phase" in params[0]).toBe(false);
+  });
+
+  it("consumer-provider field items never carry identity detection metadata", () => {
+    for (const field of byKind(items, "field")) {
+      expect("identityCandidate" in field).toBe(false);
+      expect("targetLookupParamRef" in field).toBe(false);
+    }
   });
 
   it("a pass-through parameter (no proposed transform) carries a null transformSuggestion", () => {
