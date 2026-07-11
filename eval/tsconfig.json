@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "vitest.config.ts"],
+  "references": [
+    { "path": "./tsconfig.build.json" },
+    { "path": "../packages/config/tsconfig.build.json" },
+    { "path": "../packages/domain/tsconfig.build.json" },
+    { "path": "../packages/ir/tsconfig.build.json" },
+    { "path": "../packages/llm/tsconfig.build.json" },
+    { "path": "../packages/mapping-engine/tsconfig.build.json" }
+  ]
+}

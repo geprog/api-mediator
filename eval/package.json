@@ -1,0 +1,31 @@
+{
+  "name": "@mediator/eval",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "eval": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@mediator/config": "workspace:*",
+    "@mediator/domain": "workspace:*",
+    "@mediator/ir": "workspace:*",
+    "@mediator/llm": "workspace:*",
+    "@mediator/mapping-engine": "workspace:*",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "tsx": "4.23.0",
+    "vitest": "4.1.10"
+  }
+}

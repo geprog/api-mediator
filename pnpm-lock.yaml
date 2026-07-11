@@ -170,6 +170,37 @@ importers:
         specifier: 3.3.7
         version: 3.3.7(typescript@6.0.3)
 
+  eval:
+    dependencies:
+      '@mediator/config':
+        specifier: workspace:*
+        version: link:../packages/config
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../packages/domain
+      '@mediator/ir':
+        specifier: workspace:*
+        version: link:../packages/ir
+      '@mediator/llm':
+        specifier: workspace:*
+        version: link:../packages/llm
+      '@mediator/mapping-engine':
+        specifier: workspace:*
+        version: link:../packages/mapping-engine
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      tsx:
+        specifier: 4.23.0
+        version: 4.23.0
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(happy-dom@20.10.6)(vite@8.1.4(@types/node@24.13.3)(esbuild@0.28.1)(tsx@4.23.0)(yaml@2.9.0))
+
   packages/config:
     dependencies:
       zod:

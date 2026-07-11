@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["**/*.spec.ts", "**/fixtures.ts"],
+  "references": [
+    { "path": "../packages/config/tsconfig.build.json" },
+    { "path": "../packages/domain/tsconfig.build.json" },
+    { "path": "../packages/ir/tsconfig.build.json" },
+    { "path": "../packages/llm/tsconfig.build.json" },
+    { "path": "../packages/mapping-engine/tsconfig.build.json" }
+  ]
+}
