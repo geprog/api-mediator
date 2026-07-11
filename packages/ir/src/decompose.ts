@@ -27,8 +27,13 @@ import {
  * {@link ../build-ir}) into the domain {@link Ir} (mapping-engine.md
  * "Spec decomposition"):
  *
- * 1. Operations are grouped into resource groups by `tags` (first tag), falling
- *    back to a path-prefix heuristic when an operation carries no tag.
+ * 1. Operations are grouped into resource groups by their **path resource
+ *    noun** — the last non-parameter path segment — so a spec's real resources
+ *    fall into fine, cleanly separated groups (`issues`, `comments`, `labels`,
+ *    …) rather than collapsing under one coarse `tags` blob. Action sub-paths
+ *    (single write verbs like `.../{id}/lock`) merge into their parent resource,
+ *    and paths with no usable noun fall back to the `tags`/path-prefix heuristic
+ *    (see {@link groupOperations}).
  * 2. Each operation records method, path, summary/description, parameters, and
  *    its inline-flattened request/response schemas plus its `operationId`.
  * 3. A group's referenced component schemas are flattened to top-level fields;
@@ -42,33 +47,28 @@ import {
  */
 export function decomposeDocument(root: JsonObject): Ir {
   const context: Context = { root };
-  const groupsInOrder: string[] = [];
-  const operationsByGroup = new Map<string, RawOperation[]>();
+  const rawOperations = collectOperations(root);
+  return groupOperations(rawOperations).map((group) =>
+    decomposeGroup(group.resourceRef, group.operations, context),
+  );
+}
 
+/** Flatten `paths` into the operations to group, in stable document order. */
+function collectOperations(root: JsonObject): RawOperation[] {
+  const collected: RawOperation[] = [];
   const paths = getRecord(root, "paths");
-  if (paths) {
-    for (const [path, node] of Object.entries(paths)) {
-      const pathItem = asRecord(node);
-      if (!pathItem) continue;
-      const pathParameters = getArray(pathItem, "parameters") ?? [];
-      for (const method of HTTP_METHODS) {
-        const operation = getRecord(pathItem, method);
-        if (!operation) continue;
-        const resourceRef = resourceRefFor(operation, path);
-        let list = operationsByGroup.get(resourceRef);
-        if (!list) {
-          list = [];
-          operationsByGroup.set(resourceRef, list);
-          groupsInOrder.push(resourceRef);
-        }
-        list.push({ method, path, operation, pathParameters });
-      }
+  if (!paths) return collected;
+  for (const [path, node] of Object.entries(paths)) {
+    const pathItem = asRecord(node);
+    if (!pathItem) continue;
+    const pathParameters = getArray(pathItem, "parameters") ?? [];
+    for (const method of HTTP_METHODS) {
+      const operation = getRecord(pathItem, method);
+      if (!operation) continue;
+      collected.push({ method, path, operation, pathParameters, noun: resourceNounOf(path) });
     }
   }
-
-  return groupsInOrder.map((resourceRef) =>
-    decomposeGroup(resourceRef, operationsByGroup.get(resourceRef) ?? [], context),
-  );
+  return collected;
 }
 
 // ── Internal types ───────────────────────────────────────────────────────────
@@ -82,6 +82,20 @@ interface RawOperation {
   readonly path: string;
   readonly operation: JsonObject;
   readonly pathParameters: readonly unknown[];
+  /** The operation's resource noun (last non-parameter segment), or `undefined`. */
+  readonly noun: string | undefined;
+}
+
+/** An operation paired with its group key (resource noun or fallback). */
+interface KeyedOperation {
+  readonly operation: RawOperation;
+  readonly key: string;
+}
+
+/** One resolved resource group: its stable `resourceRef` and its operations. */
+interface GroupedOperations {
+  readonly resourceRef: string;
+  readonly operations: RawOperation[];
 }
 
 /** A schema resolved to its object form, with the component name if it had one. */
@@ -120,22 +134,117 @@ const MAX_REF_DEPTH = 16;
 // ── Resource grouping ────────────────────────────────────────────────────────
 
 /**
- * The stable `resourceRef` of an operation: its first `tags` entry, or — when it
- * carries no tag — the first non-parameter path segment (path-prefix heuristic).
- * Both are stable across re-parses of the same document (SI-1 crit 6).
+ * Group operations into resource-level IR units by their **path resource noun**,
+ * merging action sub-paths into their parent resource (mapping-engine.md "Spec
+ * decomposition"). Grouping by the noun keeps a spec's real resources cleanly
+ * separated (`issues`, `comments`, `labels`, `milestones`, …) instead of letting
+ * one coarse `tags` value collapse dozens of unrelated operations into a single
+ * blob — which starved mapping-detection recall and bloated prompts:
+ *
+ * 1. **Resource noun** of an operation = its last non-parameter path segment
+ *    (`{…}` segments are parameters). `GET /repos/{owner}/{repo}/issues` and
+ *    `GET /repos/{owner}/{repo}/issues/{index}` both have noun `issues`;
+ *    `.../issues/{index}/comments` has noun `comments`; `.../{index}/lock` has
+ *    noun `lock`.
+ * 2. Operations are grouped by that noun across the whole spec.
+ * 3. A noun-group is a **real resource** when it has at least one collection-list
+ *    GET — a GET whose own resource noun equals the group noun (grouping is by
+ *    noun, so any GET in the group qualifies). A group with none is an **action**
+ *    (single write verbs like `lock`, `unlock`, `pin`, `start`, `stop`) and each
+ *    of its operations is merged into its **parent noun** — the last non-parameter
+ *    segment before the operation's own noun (`POST .../issues/{index}/lock` →
+ *    `issues`). An operation with no parent noun keeps its own noun as its group.
+ * 4. Each group's `resourceRef` is its noun, and groups plus their operations
+ *    preserve document order (first appearance), so `resourceRef`s are stable
+ *    across re-parses of the same document (SI-1 crit 6).
+ * 5. A path with **no usable noun** (e.g. a single `/`, or an RPC-style flat API)
+ *    falls back to the legacy `tags`/path-prefix heuristic ({@link fallbackRef}),
+ *    so non-RESTful specs still group sensibly and odd paths never crash.
  */
-function resourceRefFor(operation: JsonObject, path: string): string {
+function groupOperations(rawOperations: readonly RawOperation[]): GroupedOperations[] {
+  const keyed: KeyedOperation[] = rawOperations.map((operation) => ({
+    operation,
+    key: operation.noun ?? fallbackRef(operation.operation, operation.path),
+  }));
+
+  // A key is a real resource iff some operation under it is a collection-list
+  // GET — a GET whose resource noun equals the key. Fallback keys (noun-less
+  // paths) never satisfy this and so are treated as actions with no parent,
+  // which keeps them as their own group.
+  const realKeys = new Set<string>();
+  for (const { operation, key } of keyed) {
+    if (operation.method === "get" && operation.noun === key) realKeys.add(key);
+  }
+
+  const order: string[] = [];
+  const operationsByRef = new Map<string, RawOperation[]>();
+  for (const { operation, key } of keyed) {
+    const resourceRef = realKeys.has(key) ? key : (parentNounOf(operation.path) ?? key);
+    let list = operationsByRef.get(resourceRef);
+    if (!list) {
+      list = [];
+      operationsByRef.set(resourceRef, list);
+      order.push(resourceRef);
+    }
+    list.push(operation);
+  }
+
+  return order.map((resourceRef) => ({
+    resourceRef,
+    operations: operationsByRef.get(resourceRef) ?? [],
+  }));
+}
+
+/** A path's resource noun: its last non-parameter segment, or `undefined`. */
+function resourceNounOf(path: string): string | undefined {
+  const segments = pathSegments(path);
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
+    if (segment !== undefined && !isParameterSegment(segment)) return segment;
+  }
+  return undefined;
+}
+
+/** The last non-parameter segment *before* a path's resource noun, if any. */
+function parentNounOf(path: string): string | undefined {
+  const segments = pathSegments(path);
+  let nounIndex = -1;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
+    if (segment !== undefined && !isParameterSegment(segment)) {
+      nounIndex = i;
+      break;
+    }
+  }
+  for (let i = nounIndex - 1; i >= 0; i--) {
+    const segment = segments[i];
+    if (segment !== undefined && !isParameterSegment(segment)) return segment;
+  }
+  return undefined;
+}
+
+/**
+ * The legacy fallback `resourceRef` for an operation whose path yields no noun:
+ * its first `tags` entry, else the first non-parameter path segment, else
+ * `"default"`. Both are stable across re-parses (SI-1 crit 6).
+ */
+function fallbackRef(operation: JsonObject, path: string): string {
   const tags = getArray(operation, "tags");
   if (tags) {
     for (const tag of tags) {
       if (typeof tag === "string" && tag.length > 0) return tag;
     }
   }
-  const segment = path
-    .split("/")
-    .filter((part) => part.length > 0)
-    .find((part) => !part.startsWith("{"));
+  const segment = pathSegments(path).find((part) => !isParameterSegment(part));
   return segment ?? "default";
+}
+
+function isParameterSegment(segment: string): boolean {
+  return segment.startsWith("{");
+}
+
+function pathSegments(path: string): string[] {
+  return path.split("/").filter((segment) => segment.length > 0);
 }
 
 function decomposeGroup(

@@ -4,7 +4,7 @@ import type { Locator, Page } from "@playwright/test";
  * Page object for the spec view (SI-3 + RB-3): the IR viewer and the
  * `ResourceBinding` confirmation panel. Ref locators are scoped to a single
  * resource's binding card (`binding-resource-<resourceRef>`) so a test can assert
- * on the `issue` resource without colliding with the other groups' bindings.
+ * on the `issues` resource without colliding with the other groups' bindings.
  */
 export class SpecPage {
   readonly #page: Page;

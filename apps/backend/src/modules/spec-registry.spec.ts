@@ -47,13 +47,13 @@ describe("SpecRegistry.ingestSpec", () => {
     expect(spec.contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(store.specs.get(spec.id)).toBeDefined();
 
-    // Bindings derived for the `issue` group, all unconfirmed.
+    // Bindings derived for the `issues` group, all unconfirmed.
     const bindings = [...store.bindings.values()].filter((b) => b.apiSpecId === spec.id);
-    const issue = bindings.find((b) => b.resourceRef === "issue");
-    expect(issue?.nativeIdRef?.value).toEqual({ kind: "field", path: "id" });
-    expect(issue?.nativeIdRef?.confirmedBy).toBeNull();
+    const issues = bindings.find((b) => b.resourceRef === "issues");
+    expect(issues?.nativeIdRef?.value).toEqual({ kind: "field", path: "id" });
+    expect(issues?.nativeIdRef?.confirmedBy).toBeNull();
     // supportsChangeTimestamps=true → changeTimestampRef derived.
-    expect(issue?.changeTimestampRef?.value).toEqual({ kind: "field", path: "updated" });
+    expect(issues?.changeTimestampRef?.value).toEqual({ kind: "field", path: "updated" });
 
     // Exactly one SpecIngested emitted, pointing at the stored spec.
     expect(store.events).toHaveLength(1);
