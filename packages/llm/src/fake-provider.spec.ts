@@ -107,3 +107,27 @@ describe("FakeProvider — provenance and misuse", () => {
     );
   });
 });
+
+describe("FakeProvider — token-usage seam (deliverable 7)", () => {
+  it("reports synthetic zero usage after a successful call", async () => {
+    const provider = new FakeProvider({
+      shortlistKey: () => "pair",
+      shortlist: { pair: [validShortlist] },
+    });
+    expect(provider.lastUsage).toBeUndefined();
+    await provider.shortlistResourcePairs(shortlistContext);
+    expect(provider.lastUsage).toEqual({ promptEvalCount: 0, evalCount: 0 });
+  });
+
+  it("still reports usage after a malformed (validation-failing) attempt", async () => {
+    const provider = new FakeProvider({
+      shortlistKey: () => "pair",
+      shortlist: { pair: [malformedShortlist] },
+    });
+    await expect(provider.shortlistResourcePairs(shortlistContext)).rejects.toBeInstanceOf(
+      LLMOutputValidationError,
+    );
+    // The attempt "reached the model" and consumed (synthetic) tokens.
+    expect(provider.lastUsage).toEqual({ promptEvalCount: 0, evalCount: 0 });
+  });
+});

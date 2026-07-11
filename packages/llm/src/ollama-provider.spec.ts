@@ -168,6 +168,61 @@ describe("OllamaProvider — transport failures (LP-2)", () => {
   });
 });
 
+describe("OllamaProvider — token-usage seam (deliverable 7)", () => {
+  it("extracts prompt/eval counts and total_duration (ns→ms) from the envelope", async () => {
+    const client: OllamaHttpClient = {
+      chat: () =>
+        Promise.resolve({
+          message: { role: "assistant", content: JSON.stringify(validShortlist) },
+          prompt_eval_count: 128,
+          eval_count: 64,
+          total_duration: 2_000_000, // 2 ms in nanoseconds
+        }),
+    };
+    const provider = new OllamaProvider({ config, client });
+    await provider.shortlistResourcePairs(shortlistContext);
+    expect(provider.lastUsage).toEqual({
+      promptEvalCount: 128,
+      evalCount: 64,
+      totalDurationMs: 2,
+    });
+  });
+
+  it("records usage even when the answer fails validation (tokens were spent)", async () => {
+    const client: OllamaHttpClient = {
+      chat: () =>
+        Promise.resolve({
+          message: { role: "assistant", content: JSON.stringify(malformedShortlist) },
+          prompt_eval_count: 10,
+          eval_count: 5,
+        }),
+    };
+    const provider = new OllamaProvider({ config, client });
+    await expect(provider.shortlistResourcePairs(shortlistContext)).rejects.toBeInstanceOf(
+      LLMOutputValidationError,
+    );
+    expect(provider.lastUsage).toEqual({ promptEvalCount: 10, evalCount: 5 });
+  });
+
+  it("resets usage to undefined after a transport failure", async () => {
+    const client: OllamaHttpClient = {
+      chat: () => Promise.reject(new Error("ECONNREFUSED")),
+    };
+    const provider = new OllamaProvider({ config, client });
+    await expect(provider.shortlistResourcePairs(shortlistContext)).rejects.toBeInstanceOf(
+      LLMTransportError,
+    );
+    expect(provider.lastUsage).toBeUndefined();
+  });
+
+  it("defaults missing counters to zero rather than throwing", async () => {
+    const { client } = replyClient(JSON.stringify(validShortlist));
+    const provider = new OllamaProvider({ config, client });
+    await provider.shortlistResourcePairs(shortlistContext);
+    expect(provider.lastUsage).toEqual({ promptEvalCount: 0, evalCount: 0 });
+  });
+});
+
 describe("createFetchOllamaClient — default fetch client", () => {
   const request: OllamaChatRequest = {
     model: "test-model",

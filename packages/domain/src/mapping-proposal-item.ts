@@ -81,10 +81,19 @@ export type ProposalItemAlternative = z.infer<typeof proposalItemAlternativeSche
  * - `transformSuggestion` — three distinct states, kept distinct under
  *   `exactOptionalPropertyTypes`: **absent** when `unmapped`; `null` for a
  *   mapped `kind = operation` item (operations carry no transform); a
- *   {@link TransformSuggestion} object for a mapped field/parameter item. The
- *   operation-`null` / field-object population rule is applied by the engine; the
- *   schema enforces only the hard `unmapped ⇒ absent` invariant so the two empty
- *   states never contradict for an unmapped operation item.
+ *   {@link TransformSuggestion} object for a mapped `kind = field` item. The
+ *   superRefine makes the two structural halves of that rule invariants rather
+ *   than mere engine conventions: an `operation` item **never** carries a
+ *   transform object (it is `null` when mapped, absent when unmapped — so an
+ *   engine bug that puts a transform on an operation item is *unrepresentable*),
+ *   and a **mapped `field`** item **always** carries a {@link TransformSuggestion}
+ *   object (a field suggestion always names a transform). `parameter` items are
+ *   deliberately looser: a `ParameterSuggestion.transform` is optional, so a
+ *   **pass-through** parameter (a mapped parameter the model proposed with no
+ *   transform — e.g. the `owner → project` parameter in the concept's example)
+ *   carries `null`, while a transforming one carries the object; the only hard
+ *   rule the schema enforces for a mapped parameter is the shared
+ *   `unmapped ⇒ absent` one below.
  * - `reviewState` — the initial persisted value is `pending` (Phase-3 review
  *   moves it); it is a required column, not defaulted here.
  *
@@ -129,6 +138,28 @@ export const mappingProposalItemSchema = z
         code: "custom",
         message: "phase is only meaningful on kind = field items",
         path: ["phase"],
+      });
+    }
+    // An operation item never carries a transform object — this is what makes an
+    // engine bug (an operation item smuggling a transform) unrepresentable.
+    const hasTransformObject =
+      item.transformSuggestion !== undefined && item.transformSuggestion !== null;
+    if (item.kind === "operation" && hasTransformObject) {
+      ctx.addIssue({
+        code: "custom",
+        message: "kind = operation items carry no transformSuggestion (null when mapped)",
+        path: ["transformSuggestion"],
+      });
+    }
+    // A mapped field item always carries a transformSuggestion object — a field
+    // suggestion always names a transform, so a mapped field with null/absent
+    // transform is malformed. (Mapped parameters may pass through with null;
+    // unmapped items are handled by the `unmapped ⇒ absent` rule above.)
+    if (item.kind === "field" && !item.unmapped && !hasTransformObject) {
+      ctx.addIssue({
+        code: "custom",
+        message: "a mapped kind = field item requires a transformSuggestion object",
+        path: ["transformSuggestion"],
       });
     }
   });

@@ -134,6 +134,58 @@ describe("MappingProposalItem schema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects an operation item carrying a transformSuggestion object (unrepresentable)", () => {
+    // An operation item must never carry a transform — the superRefine makes the
+    // engine bug that put one here impossible to represent.
+    const result = mappingProposalItemSchema.safeParse({
+      ...operationItem(),
+      transformSuggestion: { transform: "rename" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a mapped field item whose transformSuggestion is null", () => {
+    // A mapped field always transforms (a field suggestion always names one), so
+    // a null transform on a mapped field is malformed.
+    const result = mappingProposalItemSchema.safeParse({
+      ...peerPeerFieldItem(),
+      transformSuggestion: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a mapped field item with no transformSuggestion at all", () => {
+    const withoutTransform: Record<string, unknown> = { ...peerPeerFieldItem() };
+    delete withoutTransform["transformSuggestion"];
+    const result = mappingProposalItemSchema.safeParse(withoutTransform);
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a mapped parameter item that passes through with a null transformSuggestion", () => {
+    // A pass-through parameter (ParameterSuggestion.transform is optional) carries
+    // null — the parameter branch is deliberately looser than the field branch.
+    const result = mappingProposalItemSchema.safeParse({
+      id: "item-param-passthrough",
+      proposalId: "prop-1",
+      kind: "parameter",
+      sourceRef: {
+        resourceRef: "issues",
+        target: { kind: "parameter", operationId: "get", parameter: "owner" },
+      },
+      targetRef: {
+        resourceRef: "tasks",
+        target: { kind: "parameter", operationId: "get", parameter: "project" },
+      },
+      transformSuggestion: null,
+      confidenceScore: 0.7,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "owner scopes issues; project scopes tasks",
+      reviewState: "pending",
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects a confidenceScore outside 0..1", () => {
     const result = mappingProposalItemSchema.safeParse({
       ...peerPeerFieldItem(),

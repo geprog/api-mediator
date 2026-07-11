@@ -2,10 +2,17 @@ import type { MappingSuggestionSet, ResourceShortlist } from "@mediator/domain";
 
 import type {
   LLMMappingProvider,
+  LlmUsage,
   MappingPromptContext,
   ShortlistPromptContext,
 } from "./provider.js";
 import { validateShortlistContent, validateSuggestionSetContent } from "./schemas.js";
+
+/**
+ * Synthetic, deterministic zero usage the fake reports for every call — enough
+ * for the engine to thread a usage record without any real model timing.
+ */
+const FAKE_USAGE: LlmUsage = { promptEvalCount: 0, evalCount: 0 };
 
 /**
  * `FakeProvider` (LP-3) — a deterministic, network-free `LLMMappingProvider` for
@@ -80,6 +87,8 @@ function defaultDetailKey(context: MappingPromptContext): string {
 export class FakeProvider implements LLMMappingProvider {
   public readonly providerId: string;
   public readonly model: string;
+  /** Synthetic usage of the most recent call — see {@link LLMMappingProvider.lastUsage}. */
+  public lastUsage: LlmUsage | undefined = undefined;
   private readonly shortlistScript: Readonly<Record<string, readonly ScriptedOutput[]>>;
   private readonly detailScript: Readonly<Record<string, readonly ScriptedOutput[]>>;
   private readonly shortlistKey: (context: ShortlistPromptContext) => string;
@@ -100,6 +109,10 @@ export class FakeProvider implements LLMMappingProvider {
   // never a synchronous throw.
   public shortlistResourcePairs(context: ShortlistPromptContext): Promise<ResourceShortlist> {
     return Promise.resolve().then(() => {
+      // Report synthetic usage even on a malformed (validation-failing) attempt —
+      // it "reached the model" and, like the real provider, the thrown error must
+      // not erase the attempt's usage.
+      this.lastUsage = FAKE_USAGE;
       const key = this.shortlistKey(context);
       const raw = this.nextScripted("shortlist", key, this.shortlistScript[key]);
       return validateShortlistContent(JSON.stringify(raw));
@@ -108,6 +121,7 @@ export class FakeProvider implements LLMMappingProvider {
 
   public generateMappingProposal(context: MappingPromptContext): Promise<MappingSuggestionSet> {
     return Promise.resolve().then(() => {
+      this.lastUsage = FAKE_USAGE;
       const key = this.detailKey(context);
       const raw = this.nextScripted("detail", key, this.detailScript[key]);
       return validateSuggestionSetContent(JSON.stringify(raw), context.variant);

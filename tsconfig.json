@@ -10,6 +10,7 @@
     { "path": "./packages/credentials" },
     { "path": "./packages/event-bus" },
     { "path": "./packages/llm" },
+    { "path": "./packages/mapping-engine" },
     { "path": "./apps/backend" },
     { "path": "./apps/e2e" }
   ]

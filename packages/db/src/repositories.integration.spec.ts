@@ -149,6 +149,12 @@ describe("Phase-1 repositories integration (requires Postgres)", () => {
     const specs = await new ApiSpecRepository(db).listByAppId(appId);
     expect(specs).toStrictEqual([spec]);
 
+    // listActive() returns the landscape's active specs (the Mapping Engine's
+    // candidate-enumeration counterpart set) — never a non-active one.
+    const active = await new ApiSpecRepository(db).listActive();
+    expect(active.every((s) => s.status === "active")).toBe(true);
+    expect(active.some((s) => s.id === specId)).toBe(true);
+
     const bindings = await new ResourceBindingRepository(db).listByApiSpecId(specId);
     const byRef = new Map(bindings.map((binding) => [binding.resourceRef, binding]));
     expect(byRef.get("issues")).toStrictEqual(issuesBinding);

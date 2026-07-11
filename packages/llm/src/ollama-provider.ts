@@ -5,6 +5,7 @@ import { LLMTransportError } from "./errors.js";
 import { buildDetailPrompt, buildShortlistPrompt, type ChatMessage } from "./prompt.js";
 import type {
   LLMMappingProvider,
+  LlmUsage,
   MappingPromptContext,
   ShortlistPromptContext,
 } from "./provider.js";
@@ -82,6 +83,25 @@ function extractContent(payload: unknown): string {
 }
 
 /**
+ * Read the token/timing counters from an Ollama `/api/chat` response envelope
+ * into an {@link LlmUsage}. The counters are best-effort: a model/version that
+ * omits one yields `0` for that count (never throws — usage is observability, not
+ * a business-critical path). `total_duration` is nanoseconds in the envelope, so
+ * it is divided down to milliseconds; it is omitted from the result when absent.
+ */
+function extractUsage(payload: unknown): LlmUsage {
+  const envelope = isRecord(payload) ? payload : {};
+  const promptEvalCount =
+    typeof envelope["prompt_eval_count"] === "number" ? envelope["prompt_eval_count"] : 0;
+  const evalCount = typeof envelope["eval_count"] === "number" ? envelope["eval_count"] : 0;
+  const totalDurationNs =
+    typeof envelope["total_duration"] === "number" ? envelope["total_duration"] : undefined;
+  return totalDurationNs === undefined
+    ? { promptEvalCount, evalCount }
+    : { promptEvalCount, evalCount, totalDurationMs: totalDurationNs / 1_000_000 };
+}
+
+/**
  * The default `fetch`-based {@link OllamaHttpClient}. POSTs to `${baseUrl}/api/chat`
  * and returns the parsed JSON body; every failure mode (network, non-2xx, invalid
  * body) becomes an {@link LLMTransportError}.
@@ -119,6 +139,8 @@ export function createFetchOllamaClient(
 export class OllamaProvider implements LLMMappingProvider {
   public readonly providerId = "ollama";
   public readonly model: string;
+  /** Usage/timing of the most recent call — see {@link LLMMappingProvider.lastUsage}. */
+  public lastUsage: LlmUsage | undefined = undefined;
   private readonly config: MappingLlmConfig;
   private readonly client: OllamaHttpClient;
 
@@ -156,6 +178,9 @@ export class OllamaProvider implements LLMMappingProvider {
       stream: false,
     };
 
+    // Reset before the call so a transport failure leaves no stale usage behind.
+    this.lastUsage = undefined;
+
     const controller = new AbortController();
     const timer = setTimeout(() => {
       controller.abort();
@@ -176,6 +201,10 @@ export class OllamaProvider implements LLMMappingProvider {
       clearTimeout(timer);
     }
 
-    return extractContent(payload);
+    const content = extractContent(payload);
+    // Record usage before the caller validates: a validation-failing attempt
+    // still consumed tokens, so its usage must survive the thrown error.
+    this.lastUsage = extractUsage(payload);
+    return content;
   }
 }
