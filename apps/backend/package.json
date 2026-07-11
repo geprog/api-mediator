@@ -17,7 +17,10 @@
     "@mediator/domain": "workspace:*",
     "@mediator/event-bus": "workspace:*",
     "@mediator/ir": "workspace:*",
+    "@mediator/llm": "workspace:*",
+    "@mediator/mapping-engine": "workspace:*",
     "@mediator/telemetry": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
     "fastify": "5.10.0",
     "pino": "10.3.1",
     "zod": "4.4.3"

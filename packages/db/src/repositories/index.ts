@@ -5,3 +5,10 @@ export { CredentialRepository } from "./credential.js";
 export { EventOutboxRepository, type OutboxOps } from "./event-outbox.js";
 export { ProcessedEventRepository, type ProcessedEventOps } from "./processed-event.js";
 export { MappingProposalRepository } from "./mapping-proposal.js";
+export {
+  DetectionJobRepository,
+  type ClaimedDetectionJob,
+  type DetectionJob,
+  type DetectionJobEnqueueOps,
+  type DetectionJobWorkerOps,
+} from "./detection-job.js";

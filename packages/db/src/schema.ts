@@ -131,6 +131,19 @@ export const mappingPhaseEnum = pgEnum("mapping_phase", [
   "response",
 ] as const satisfies readonly MappingPhase[]);
 
+/**
+ * The lifecycle of a `mapping_detection_job` (below). This is an **infrastructure**
+ * enum — a durability/scheduling concern, not a glossary entity — so it is defined
+ * here rather than pinned to a `@mediator/domain` union: `pending` (enqueued, not
+ * yet claimed), `running` (claimed by the worker, in flight), `completed` (the
+ * engine finished a detection run for the spec), `failed` (parked after exhausting
+ * the worker's attempt ceiling).
+ */
+export const DETECTION_JOB_STATUSES = ["pending", "running", "completed", "failed"] as const;
+/** One `mapping_detection_job` lifecycle state. */
+export type DetectionJobStatus = (typeof DETECTION_JOB_STATUSES)[number];
+export const detectionJobStatusEnum = pgEnum("detection_job_status", DETECTION_JOB_STATUSES);
+
 // ── Tables ───────────────────────────────────────────────────────────────────
 
 /** `RegisteredApp` — an application in the landscape (data-model.md). */
@@ -403,4 +416,61 @@ export const mappingProposalItem = pgTable(
     targetLookupParamRef: text("target_lookup_param_ref"),
   },
   (table) => [index("mapping_proposal_item_proposal_id_idx").on(table.proposalId)],
+);
+
+// ── Phase-2 detection-trigger (durable async detection job) ───────────────────
+
+/**
+ * `mapping_detection_job` — the durable record of intent to run mapping detection
+ * for one `ApiSpec`. It exists so the `SpecIngested` consumer can **record intent
+ * and commit fast** inside the Event Bus dispatcher transaction, while the slow
+ * LLM/network detection (~1,000 calls landscape-wide, seconds–minutes) runs
+ * **outside** that transaction in a separate durable worker (`DetectionWorker`) —
+ * the dispatcher never holds a row lock across the analysis (DT-2).
+ *
+ * The lifecycle (`detection_job_status`) is `pending → running → completed|failed`.
+ * `attempts` is bumped each time the worker claims the job; a job that fails the
+ * detection run enough times to reach the worker's attempt ceiling is parked as
+ * `failed` (surfaced, not silently retried forever). `started_at`/`finished_at`
+ * bracket a run; a job left `running` by a process crash is reclaimed (its
+ * `started_at` is older than the worker's stale timeout) and re-run — detection is
+ * idempotent-safe to re-run.
+ *
+ * Two partial indexes carry the two hot paths:
+ *  - `..._pending_idx` — the worker's claim query (`pending` rows in arrival order).
+ *  - `..._active_spec_uq` — a **partial UNIQUE** index over `(api_spec_id)` where the
+ *    job is un-finished (`pending`/`running`), so `enqueue` is idempotent per spec:
+ *    an `INSERT … ON CONFLICT DO NOTHING` never double-enqueues a spec that already
+ *    has a job in flight (the consumer under at-least-once delivery, or the
+ *    reconciler, both stay a no-op). A `completed`/`failed` job leaves the set, so a
+ *    later re-analysis of the same spec (Phase 6) can enqueue afresh.
+ */
+export const mappingDetectionJob = pgTable(
+  "mapping_detection_job",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    apiSpecId: uuid("api_spec_id")
+      .notNull()
+      .references(() => apiSpec.id),
+    status: detectionJobStatusEnum("status").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // NULL until the worker claims the job; set on each claim, cleared when the job
+    // is returned to `pending` for a retry.
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    // NULL until the job reaches a terminal state (`completed`/`failed`).
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => [
+    // The worker's claim query: pending rows in arrival order. Partial so the vast
+    // majority of rows (terminal jobs) are not indexed.
+    index("mapping_detection_job_pending_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.status} = 'pending'`),
+    // At most one un-finished (pending|running) job per spec → idempotent enqueue.
+    uniqueIndex("mapping_detection_job_active_spec_uq")
+      .on(table.apiSpecId)
+      .where(sql`${table.status} in ('pending', 'running')`),
+  ],
 );
