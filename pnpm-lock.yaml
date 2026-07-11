@@ -74,9 +74,18 @@ importers:
       '@mediator/ir':
         specifier: workspace:*
         version: link:../../packages/ir
+      '@mediator/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
+      '@mediator/mapping-engine':
+        specifier: workspace:*
+        version: link:../../packages/mapping-engine
       '@mediator/telemetry':
         specifier: workspace:*
         version: link:../../packages/telemetry
+      '@opentelemetry/api':
+        specifier: 1.9.1
+        version: 1.9.1
       fastify:
         specifier: 5.10.0
         version: 5.10.0

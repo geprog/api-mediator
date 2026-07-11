@@ -25,5 +25,8 @@ export default defineConfig({
     name: "backend-integration",
     environment: "node",
     include: ["src/**/*.integration.spec.ts"],
+    // Serialize integration spec FILES (defense-in-depth alongside the
+    // `runMigrations` advisory lock): every file migrates the same database.
+    fileParallelism: false,
   },
 });

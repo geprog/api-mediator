@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   ApiSpecRepository,
   type Database,
@@ -14,7 +16,12 @@ import {
   runMigrations,
   tx,
 } from "@mediator/db";
-import type { ApiSpec, RegisteredApp } from "@mediator/domain";
+import type {
+  ApiSpec,
+  MappingProposal,
+  MappingProposalItem,
+  RegisteredApp,
+} from "@mediator/domain";
 import { FakeProvider } from "@mediator/llm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -212,5 +219,64 @@ suite("runDetectionForSpec persistence integration (requires Postgres)", () => {
     expect(forward?.status).toBe("failed");
     expect(forward?.shortlistResult).toBeNull();
     expect(forward === undefined ? [] : await repo.listItems(forward.id)).toEqual([]);
+  });
+
+  it("persistAll is atomic: a failure on a later proposal rolls back the earlier one", async () => {
+    await db.delete(mappingProposal);
+    const store = createDbProposalStore(db);
+
+    const goodId = randomUUID();
+    const good: MappingProposal = {
+      id: goodId,
+      sourceSpecId: SPEC_GITEA,
+      targetSpecId: SPEC_VIKUNJA,
+      generatedBy: { providerId: "fake", model: "fake-model", promptVersion: "v1" },
+      shortlistResult: {
+        candidatePairs: [
+          {
+            sourceResource: "issues",
+            targetResource: "tasks",
+            confidence: 0.8,
+            rationale: "x",
+            analysisFailed: false,
+          },
+        ],
+        noCounterpartResources: [],
+      },
+      status: "pending",
+      createdAt: CREATED_AT,
+    };
+    const goodItem: MappingProposalItem = {
+      id: randomUUID(),
+      proposalId: goodId,
+      kind: "operation",
+      sourceRef: {
+        resourceRef: "issues",
+        target: { kind: "operation", operationId: "listIssues" },
+      },
+      targetRef: { resourceRef: "tasks", target: { kind: "operation", operationId: "listTasks" } },
+      transformSuggestion: null,
+      confidenceScore: 0.5,
+      ambiguousAlternatives: [],
+      unmapped: false,
+      rationale: "list ↔ list",
+      reviewState: "pending",
+    };
+    // The second proposal targets a non-existent spec → FK violation on its insert.
+    const bad: MappingProposal = { ...good, id: randomUUID(), targetSpecId: randomUUID() };
+
+    await expect(
+      store.persistAll([
+        { proposal: good, items: [goodItem] },
+        { proposal: bad, items: [] },
+      ]),
+    ).rejects.toThrow();
+
+    // All-or-nothing: the good proposal (and its item) were rolled back with the
+    // bad one — zero proposals for the spec, so a re-run produces the set once.
+    const repo = new MappingProposalRepository(db);
+    expect(await repo.listBySourceSpecId(SPEC_GITEA)).toEqual([]);
+    expect(await repo.getById(goodId)).toBeUndefined();
+    expect(await repo.listItems(goodId)).toEqual([]);
   });
 });

@@ -26,5 +26,10 @@ export default defineConfig({
     name: "db-integration",
     environment: "node",
     include: ["src/**/*.integration.spec.ts"],
+    // Run the integration spec FILES serially (defense-in-depth alongside the
+    // `runMigrations` advisory lock): both files migrate the same database in
+    // `beforeAll`, and serializing them avoids any DDL/migrations-table race even
+    // before the cross-process lock kicks in.
+    fileParallelism: false,
   },
 });

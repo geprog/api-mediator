@@ -11,6 +11,7 @@ import { createDb } from "@mediator/db";
 
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
+import { buildDetectionBackground } from "./modules/detection/background.js";
 
 /**
  * Dev binds loopback: the operator API is a host-local surface (the second,
@@ -27,7 +28,19 @@ const logger = createServerLogger(config);
 const db = createDb(config.database.url, (error) => {
   logger.error({ error: error.message }, "database pool error (idle client) — swallowed");
 });
-const { app, shutdown } = buildServer({ config, db, logger });
+const { app, shutdown: shutdownServer } = buildServer({ config, db, logger });
+
+// The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers
+// `SpecIngested` to the detection consumer, which enqueues a job), the durable
+// `DetectionWorker` (runs the LLM detection off the dispatcher transaction), and
+// the periodic reconciliation sweep. Started after `listen`, stopped before the
+// server closes its db pool.
+const detection = buildDetectionBackground({ config, db, logger });
+
+async function shutdown(): Promise<void> {
+  detection.stop();
+  await shutdownServer();
+}
 
 async function handleSignal(signal: NodeJS.Signals): Promise<void> {
   app.log.info({ signal }, "shutdown signal received");
@@ -52,6 +65,7 @@ process.once("SIGINT", (signal) => {
 
 try {
   await app.listen({ port: config.http.port, host: HOST });
+  detection.start();
 } catch (error) {
   app.log.error(
     { error: error instanceof Error ? error.message : String(error) },

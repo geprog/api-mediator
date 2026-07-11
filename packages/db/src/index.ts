@@ -11,13 +11,16 @@ export { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 
 // Schema (tables, pg enums, ref-kind vocabulary).
 export {
+  DETECTION_JOB_STATUSES,
   RESOURCE_BINDING_REF_KINDS,
   apiSpec,
   apiSpecRoleEnum,
   apiSpecStatusEnum,
   credential,
   credentialTypeEnum,
+  detectionJobStatusEnum,
   eventOutbox,
+  mappingDetectionJob,
   mappingPhaseEnum,
   mappingProposal,
   mappingProposalItem,
@@ -30,6 +33,7 @@ export {
   resourceBindingRef,
   resourceBindingRefKindEnum,
   reviewStateEnum,
+  type DetectionJobStatus,
   type ResourceBindingRefKind,
 } from "./schema.js";
 
@@ -67,11 +71,16 @@ export {
 export {
   ApiSpecRepository,
   CredentialRepository,
+  DetectionJobRepository,
   EventOutboxRepository,
   MappingProposalRepository,
   ProcessedEventRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  type ClaimedDetectionJob,
+  type DetectionJob,
+  type DetectionJobEnqueueOps,
+  type DetectionJobWorkerOps,
   type OutboxOps,
   type ProcessedEventOps,
 } from "./repositories/index.js";

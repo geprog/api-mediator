@@ -50,6 +50,13 @@
       "when": 1783756880141,
       "tag": "0006_parallel_crystal",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783761739623,
+      "tag": "0007_unique_vision",
+      "breakpoints": true
     }
   ]
 }
