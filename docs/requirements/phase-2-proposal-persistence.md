@@ -83,6 +83,13 @@ Phase 3.
 6. **Given** the validation-before-persist rule (TD-3), **when** items are persisted, **then** they
    originate **only** from a validated `MappingSuggestionSet` — no item is ever persisted from
    unvalidated free-text output.
+7. **Given** a **peer-peer** `kind = field` item, **when** persisted, **then** the LLM's
+   `identityCandidate` suggestion (and the suggested `targetLookupParamRef`, when present) is stored
+   on the item as review-time detection metadata, so Phase-3 can pre-select the identity key without
+   re-running the LLM ([data-model.md](../architecture/data-model.md) `MappingProposalItem`;
+   [mapping-engine.md](../architecture/mapping-engine.md); [mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)
+   step 6); it is **absent** on `operation`/`parameter` items and on consumer-provider (phased) field
+   items.
 
 ### Out of scope
 

@@ -16,7 +16,6 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@mediator/config": "workspace:*",
     "@mediator/db": "workspace:*",
     "@mediator/domain": "workspace:*",
     "@mediator/llm": "workspace:*"

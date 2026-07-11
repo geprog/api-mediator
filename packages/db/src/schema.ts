@@ -365,6 +365,13 @@ export const mappingProposal = pgTable(
  * the nested `ambiguousAlternatives[].confidence` values ride at inside the
  * `jsonb` column, so a confidence is never stored at two fidelities. The mapper
  * reads it back as a plain `number`.
+ *
+ * `identity_candidate` (boolean) and `target_lookup_param_ref` (text) are the
+ * peer-peer field detection metadata (PP-2): both nullable, set only on a
+ * peer-peer `kind = field` item. A NULL column is the domain **absent** key
+ * (`stripUndefined`); a stored `false`/value round-trips as-is. The domain schema
+ * makes them unrepresentable on any other item, so their being NULL there is an
+ * invariant, not just a convention.
  */
 export const mappingProposalItem = pgTable(
   "mapping_proposal_item",
@@ -390,6 +397,10 @@ export const mappingProposalItem = pgTable(
     unmapped: boolean("unmapped").notNull(),
     rationale: text("rationale").notNull(),
     reviewState: reviewStateEnum("review_state").notNull(),
+    // Peer-peer field detection metadata (PP-2). Nullable → domain absent key;
+    // a stored `false`/value round-trips. Only ever set on a peer-peer field item.
+    identityCandidate: boolean("identity_candidate"),
+    targetLookupParamRef: text("target_lookup_param_ref"),
   },
   (table) => [index("mapping_proposal_item_proposal_id_idx").on(table.proposalId)],
 );

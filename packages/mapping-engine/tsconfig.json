@@ -7,7 +7,6 @@
   "include": ["src", "vitest.integration.config.ts"],
   "references": [
     { "path": "./tsconfig.build.json" },
-    { "path": "../config/tsconfig.build.json" },
     { "path": "../db/tsconfig.build.json" },
     { "path": "../domain/tsconfig.build.json" },
     { "path": "../llm/tsconfig.build.json" }

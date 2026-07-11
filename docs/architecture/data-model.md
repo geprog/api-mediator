@@ -65,6 +65,7 @@ A single candidate correspondence within a proposal.
 - `unmapped` (bool) — true when no counterpart was found for this source element; `targetRef` and `transformSuggestion` are absent in that case and the item is surfaced as "needs manual mapping or is intentionally unmapped"
 - `rationale` — short explanation from the LLM
 - `reviewState` (pending / accepted / edited / rejected)
+- `identityCandidate`, `targetLookupParamRef` — **peer-peer field items only**: the LLM's `identityCandidate` suggestion (plus the suggested `targetLookupParamRef` where the target's collection read offers a lookup parameter), persisted as review-time detection metadata so the review UI can *pre-select* the identity key without re-running the LLM (see [mapping-engine.md](mapping-engine.md) and step 6 of [flows/mapping-review-and-approval.md](../flows/mapping-review-and-approval.md)). These are suggestions only — the confirmed `FieldMapping.isIdentityKey`/`targetLookupParamRef` are set solely by explicit reviewer confirmation. Absent on `operation`/`parameter` items and on consumer-provider (phase-bearing) field items — the adapter never correlates records across apps.
 
 ### ApprovedMapping
 

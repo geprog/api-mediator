@@ -309,9 +309,6 @@ importers:
 
   packages/mapping-engine:
     dependencies:
-      '@mediator/config':
-        specifier: workspace:*
-        version: link:../config
       '@mediator/db':
         specifier: workspace:*
         version: link:../db

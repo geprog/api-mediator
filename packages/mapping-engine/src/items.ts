@@ -26,10 +26,15 @@ import {
  * tightened schema): **absent** when `unmapped`; **`null`** for a mapped operation
  * (operations carry no transform); a {@link TransformSuggestion} **object** for a
  * mapped field; and for a parameter, an object when the suggestion names a
- * transform, else `null` (a pass-through parameter). The `identityCandidate` /
- * `targetLookupParamRef` flags on a peer-peer field suggestion are NOT carried
- * onto the item — the persisted `MappingProposalItem` has no such fields; they are
- * confirmed into `FieldMapping.isIdentityKey` at Phase-3 review.
+ * transform, else `null` (a pass-through parameter).
+ *
+ * The `identityCandidate` / `targetLookupParamRef` flags on a **peer-peer** field
+ * suggestion ARE threaded onto the item as review-time detection metadata (PP-2),
+ * so Phase-3 can pre-select the identity key without re-running the LLM (see
+ * `docs/flows/mapping-review-and-approval.md` step 6). They are suggestions only —
+ * `FieldMapping.isIdentityKey` is still set solely by explicit reviewer
+ * confirmation. **Consumer-provider** field items never carry them (the domain
+ * schema rejects them on a phased field item): the adapter never correlates records.
  */
 
 /** The two resource refs a directional detail analysis produces items across. */
@@ -98,9 +103,30 @@ function buildOperationItem(
 }
 
 /**
+ * Peer-peer field detection metadata threaded onto the item (PP-2). Both values
+ * are the stage-2 `PeerPeerFieldSuggestion`'s own fields; both are **`undefined`**
+ * on a consumer-provider field item, which the domain schema forbids from carrying
+ * them. Modeled with explicit `| undefined` value types (not optional keys) so the
+ * call sites can pass a possibly-absent suggestion field without tripping
+ * `exactOptionalPropertyTypes` — `stripUndefined` below turns an `undefined` into
+ * a truly absent key.
+ */
+interface FieldDetectionMetadata {
+  readonly identityCandidate: boolean | undefined;
+  readonly targetLookupParamRef: string | undefined;
+}
+
+/** A consumer-provider field item carries no peer-peer detection metadata. */
+const NO_FIELD_DETECTION: FieldDetectionMetadata = {
+  identityCandidate: undefined,
+  targetLookupParamRef: undefined,
+};
+
+/**
  * Build a `kind = field` item. `phase` is passed only for a consumer-provider set
  * (it is absent on peer-peer field items). A mapped field always carries a
- * transform object (a field suggestion always names a transform).
+ * transform object (a field suggestion always names a transform). `detection`
+ * carries the peer-peer identity suggestion (empty on consumer-provider).
  */
 function buildFieldItem(
   suggestion: {
@@ -117,6 +143,7 @@ function buildFieldItem(
     readonly unmapped: boolean;
   },
   phase: MappingPhase | undefined,
+  detection: FieldDetectionMetadata,
   refs: ItemResourceRefs,
   deps: ItemBuildDeps,
 ): MappingProposalItem {
@@ -141,6 +168,9 @@ function buildFieldItem(
     unmapped: !mapped,
     rationale: suggestion.rationale,
     reviewState: "pending" as const,
+    // Peer-peer identity suggestion (undefined → absent key on the item).
+    identityCandidate: detection.identityCandidate,
+    targetLookupParamRef: detection.targetLookupParamRef,
   });
 }
 
@@ -197,11 +227,25 @@ export function buildItems(
 
   if (suggestionSet.variant === "peer-peer") {
     for (const suggestion of suggestionSet.fieldMappings) {
-      items.push(buildFieldItem(suggestion, undefined, refs, deps));
+      // Thread the peer-peer identity suggestion (identityCandidate + optional
+      // targetLookupParamRef) onto the field item as review-time detection metadata.
+      items.push(
+        buildFieldItem(
+          suggestion,
+          undefined,
+          {
+            identityCandidate: suggestion.identityCandidate,
+            targetLookupParamRef: suggestion.targetLookupParamRef,
+          },
+          refs,
+          deps,
+        ),
+      );
     }
   } else {
     for (const suggestion of suggestionSet.fieldMappings) {
-      items.push(buildFieldItem(suggestion, suggestion.phase, refs, deps));
+      // Consumer-provider field items never carry identity detection metadata.
+      items.push(buildFieldItem(suggestion, suggestion.phase, NO_FIELD_DETECTION, refs, deps));
     }
     for (const suggestion of suggestionSet.parameterMappings) {
       items.push(buildParameterItem(suggestion, refs, deps));
