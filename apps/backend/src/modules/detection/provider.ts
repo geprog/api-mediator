@@ -1,5 +1,5 @@
 import type { MappingLlmConfig } from "@mediator/config";
-import { OllamaProvider, type LLMMappingProvider } from "@mediator/llm";
+import { AnthropicProvider, OllamaProvider, type LLMMappingProvider } from "@mediator/llm";
 
 /** Thrown when `config.mappingLlm.provider` names a provider that is not wired. */
 export class UnsupportedMappingProviderError extends Error {
@@ -11,14 +11,17 @@ export class UnsupportedMappingProviderError extends Error {
 
 /**
  * Build the active {@link LLMMappingProvider} from config (LP-2 wiring). Provider
- * selection is config-driven (`config.mappingLlm.provider`): `ollama` is the only
- * one wired today, but the interface stays pluggable — a new provider is one more
- * `case` here, nothing else in the engine changes.
+ * selection is config-driven (`config.mappingLlm.provider`): `ollama` (self-hosted)
+ * and `anthropic` (Claude Messages API) are wired today, and the interface stays
+ * pluggable — a new provider is one more `case` here, nothing else in the engine
+ * changes.
  */
 export function createMappingProvider(config: MappingLlmConfig): LLMMappingProvider {
   switch (config.provider) {
     case "ollama":
       return new OllamaProvider({ config });
+    case "anthropic":
+      return new AnthropicProvider({ config });
     default:
       throw new UnsupportedMappingProviderError(config.provider);
   }

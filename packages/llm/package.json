@@ -16,6 +16,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.111.0",
     "@mediator/config": "workspace:*",
     "@mediator/domain": "workspace:*",
     "zod": "4.4.3"

@@ -50,6 +50,13 @@ export interface MappingLlmConfig {
   readonly thinking: boolean;
   readonly requestTimeoutMs: number;
   readonly maxRetries: number;
+  /**
+   * API key for the Anthropic provider (`ANTHROPIC_API_KEY`). Optional: only the
+   * `anthropic` provider needs it, and it is absent when unset so an Ollama-only
+   * deployment never has to supply one. The `AnthropicProvider` fails fast when it
+   * is missing.
+   */
+  readonly anthropicApiKey?: string;
 }
 
 /** The operator API/UI HTTP surface served by `apps/backend`. */
@@ -201,6 +208,11 @@ const envSchema = z.object({
   MAPPING_LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive(),
   MAPPING_LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(3),
 
+  // API key for the Anthropic provider. Optional at the env layer (only the
+  // `anthropic` provider consumes it); the AnthropicProvider fails fast if it is
+  // required but absent.
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+
   // Registration defaults. The conservative default poll interval (ms) stamped
   // onto a RegisteredApp's capabilities when a registration omits capabilities
   // (AR-1 crit 2). Defaults to 300000 ms (300 s); consumed by the Phase-4 Sync
@@ -252,6 +264,8 @@ function toAppConfig(raw: RawEnv): AppConfig {
       thinking: raw.MAPPING_LLM_THINKING,
       requestTimeoutMs: raw.MAPPING_LLM_REQUEST_TIMEOUT_MS,
       maxRetries: raw.MAPPING_LLM_MAX_RETRIES,
+      // Conditional spread, never an explicit `undefined` (exactOptionalPropertyTypes).
+      ...(raw.ANTHROPIC_API_KEY !== undefined ? { anthropicApiKey: raw.ANTHROPIC_API_KEY } : {}),
     },
     credentials: toCredentialsConfig(raw),
     registration: { defaultPollInterval: raw.MEDIATOR_DEFAULT_POLL_INTERVAL_MS },
