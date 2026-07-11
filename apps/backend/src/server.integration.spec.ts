@@ -3,6 +3,7 @@ import { createDb, type Database } from "@mediator/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildServer, createServerLogger, type RunningServer } from "./composition-root.js";
+import { operatorAccountsEnv } from "./testing/auth.testkit.js";
 
 /**
  * Live-database integration test for the operator API skeleton. Requires the
@@ -19,7 +20,10 @@ describe("operator API /health integration (requires Postgres)", () => {
   let db: Database;
 
   beforeAll(() => {
-    const config = loadConfig();
+    const config = loadConfig({
+      ...process.env,
+      OPERATOR_ACCOUNTS: process.env.OPERATOR_ACCOUNTS ?? operatorAccountsEnv(),
+    });
     const logger = createServerLogger(config);
     db = createDb(config.database.url, (error) => {
       logger.error({ error: error.message }, "database pool error (idle client) — swallowed");

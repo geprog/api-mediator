@@ -87,6 +87,37 @@ export interface CredentialsConfig {
   readonly masterKey: Buffer;
 }
 
+/**
+ * The two operator-API authorization roles (see `docs/glossary.md`
+ * `Operator / Viewer` and `docs/architecture/security.md`). `operator` may
+ * mutate the landscape; `viewer` is read-only. Deliberately exactly two — the
+ * single-tenant deployment model has no tenant hierarchy or finer permissions.
+ */
+export const operatorRoleSchema = z.enum(["operator", "viewer"]);
+export type OperatorRole = z.infer<typeof operatorRoleSchema>;
+
+/**
+ * One seeded local operator account. The password is held **only** as a salted
+ * hash (`@mediator/credentials` scrypt encoding) — never in plaintext — so the
+ * "no plaintext at rest" invariant holds even in the process environment: the
+ * mediator receives a hash, not a password (`docs/architecture/security.md`
+ * *Operator authentication & authorization*).
+ */
+export interface OperatorAccount {
+  readonly username: string;
+  readonly role: OperatorRole;
+  readonly passwordHash: string;
+}
+
+/**
+ * Operator-authentication configuration. Phase 3 ships the local-accounts
+ * provider seeded from `OPERATOR_ACCOUNTS`; a later SSO/OIDC provider replaces
+ * the provider without touching this shape's consumers.
+ */
+export interface AuthConfig {
+  readonly accounts: readonly OperatorAccount[];
+}
+
 export interface AppConfig {
   readonly http: HttpConfig;
   readonly database: DatabaseConfig;
@@ -94,6 +125,7 @@ export interface AppConfig {
   readonly mappingLlm: MappingLlmConfig;
   readonly credentials: CredentialsConfig;
   readonly registration: RegistrationConfig;
+  readonly auth: AuthConfig;
 }
 
 /** Thrown by {@link loadConfig} when the environment fails validation. */
@@ -172,53 +204,143 @@ function decodeMasterKey(value: string): Buffer | null {
   return decoded;
 }
 
-const envSchema = z.object({
-  // Operator API/UI HTTP server. Default 3333 is kept clear of Grafana's 3000
-  // (GRAFANA_PORT) to avoid a dev clash.
-  HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3333),
+/** Human-readable validation message for a missing/invalid `OPERATOR_ACCOUNTS`. */
+export const OPERATOR_ACCOUNTS_MESSAGE =
+  "must be a comma-separated list of `username:role:passwordHash` entries (role = operator|viewer; passwordHash = a salted scrypt hash, never a plaintext password)";
 
-  // Database
-  DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
+/**
+ * Structural check that a seeded password hash looks like the salted scrypt
+ * encoding produced by `@mediator/credentials`
+ * (`scrypt$N$r$p$keyLen$saltBase64$hashBase64`). Deliberately shallow — the auth
+ * provider does the real constant-time verification — and kept import-free so
+ * `@mediator/config` stays a leaf package (credentials depends on config, not
+ * the reverse).
+ */
+const ENCODED_HASH_PATTERN =
+  /^scrypt\$[0-9]+\$[0-9]+\$[0-9]+\$[0-9]+\$[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}$/;
 
-  // Credential Store master key (KEK) — required, no default. Production must set
-  // a real secret; `.env.example` ships a dev-only sample. Validated to exactly
-  // 32 base64-decoded bytes so a misconfigured key fails fast at startup.
-  CREDENTIAL_MASTER_KEY: z
-    .string()
-    .refine((v) => decodeMasterKey(v) !== null, { error: CREDENTIAL_MASTER_KEY_MESSAGE }),
+/** The outcome of parsing the `OPERATOR_ACCOUNTS` string into typed accounts. */
+type AccountsResult =
+  | { readonly ok: true; readonly accounts: OperatorAccount[] }
+  | { readonly ok: false; readonly message: string };
 
-  // Telemetry — empty endpoint means telemetry is disabled (a supported state).
-  OTEL_EXPORTER_OTLP_ENDPOINT: z
-    .string()
-    .default("")
-    .refine((v) => v === "" || isUrlWithProtocol(v, HTTP_PROTOCOLS), {
-      error: "must be empty (telemetry disabled) or an http(s):// URL",
+/**
+ * Parse `OPERATOR_ACCOUNTS` (`username:role:passwordHash`, comma-separated) into
+ * typed {@link OperatorAccount}s. A username and role contain no `:`; the hash's
+ * base64/`$` alphabet contains no `:` either, so splitting each entry on its
+ * first two colons is unambiguous. Error messages reference entries by 1-based
+ * index only — never echoing the entry — so a mistyped value can never leak into
+ * a config error or log.
+ */
+function parseOperatorAccounts(raw: string): AccountsResult {
+  const entries = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      message: `${OPERATOR_ACCOUNTS_MESSAGE} — at least one account is required`,
+    };
+  }
+
+  const accounts: OperatorAccount[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    const position = `account #${String(index + 1)}`;
+    const firstColon = entry.indexOf(":");
+    const secondColon = firstColon === -1 ? -1 : entry.indexOf(":", firstColon + 1);
+    if (firstColon <= 0 || secondColon === -1 || secondColon === entry.length - 1) {
+      return { ok: false, message: `${position} is not \`username:role:passwordHash\`` };
+    }
+    const username = entry.slice(0, firstColon);
+    const role = operatorRoleSchema.safeParse(entry.slice(firstColon + 1, secondColon));
+    if (!role.success) {
+      return { ok: false, message: `${position} has an invalid role (expected operator|viewer)` };
+    }
+    const passwordHash = entry.slice(secondColon + 1);
+    if (!ENCODED_HASH_PATTERN.test(passwordHash)) {
+      return {
+        ok: false,
+        message: `${position} passwordHash is not a salted scrypt hash (never put a plaintext password here)`,
+      };
+    }
+    if (seen.has(username)) {
+      return { ok: false, message: `${position} duplicates operator username "${username}"` };
+    }
+    seen.add(username);
+    accounts.push({ username, role: role.data, passwordHash });
+  }
+  return { ok: true, accounts };
+}
+
+const envSchema = z
+  .object({
+    // Operator API/UI HTTP server. Default 3333 is kept clear of Grafana's 3000
+    // (GRAFANA_PORT) to avoid a dev clash.
+    HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3333),
+
+    // Database
+    DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
+
+    // Credential Store master key (KEK) — required, no default. Production must set
+    // a real secret; `.env.example` ships a dev-only sample. Validated to exactly
+    // 32 base64-decoded bytes so a misconfigured key fails fast at startup.
+    CREDENTIAL_MASTER_KEY: z
+      .string()
+      .refine((v) => decodeMasterKey(v) !== null, { error: CREDENTIAL_MASTER_KEY_MESSAGE }),
+
+    // Telemetry — empty endpoint means telemetry is disabled (a supported state).
+    OTEL_EXPORTER_OTLP_ENDPOINT: z
+      .string()
+      .default("")
+      .refine((v) => v === "" || isUrlWithProtocol(v, HTTP_PROTOCOLS), {
+        error: "must be empty (telemetry disabled) or an http(s):// URL",
+      }),
+    OTEL_EXPORTER_OTLP_PROTOCOL: z.enum(["http/protobuf"]).default("http/protobuf"),
+    OTEL_SERVICE_NAME: z.string().min(1).default("api-mediator"),
+
+    // Mapping LLM provider
+    MAPPING_LLM_PROVIDER: z.string().min(1).default("ollama"),
+    OLLAMA_BASE_URL: z.string().refine((v) => isUrlWithProtocol(v, HTTP_PROTOCOLS), {
+      error: "must be an http(s):// URL",
     }),
-  OTEL_EXPORTER_OTLP_PROTOCOL: z.enum(["http/protobuf"]).default("http/protobuf"),
-  OTEL_SERVICE_NAME: z.string().min(1).default("api-mediator"),
+    MAPPING_LLM_MODEL: z.string().min(1),
+    MAPPING_LLM_TEMPERATURE: z.coerce.number().min(0).default(0),
+    MAPPING_LLM_THINKING: booleanFromEnv,
+    MAPPING_LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive(),
+    MAPPING_LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(3),
 
-  // Mapping LLM provider
-  MAPPING_LLM_PROVIDER: z.string().min(1).default("ollama"),
-  OLLAMA_BASE_URL: z.string().refine((v) => isUrlWithProtocol(v, HTTP_PROTOCOLS), {
-    error: "must be an http(s):// URL",
-  }),
-  MAPPING_LLM_MODEL: z.string().min(1),
-  MAPPING_LLM_TEMPERATURE: z.coerce.number().min(0).default(0),
-  MAPPING_LLM_THINKING: booleanFromEnv,
-  MAPPING_LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive(),
-  MAPPING_LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(3),
+    // API key for the Anthropic provider. Optional at the env layer (only the
+    // `anthropic` provider consumes it); the AnthropicProvider fails fast if it is
+    // required but absent.
+    ANTHROPIC_API_KEY: z.string().min(1).optional(),
 
-  // API key for the Anthropic provider. Optional at the env layer (only the
-  // `anthropic` provider consumes it); the AnthropicProvider fails fast if it is
-  // required but absent.
-  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    // Registration defaults. The conservative default poll interval (ms) stamped
+    // onto a RegisteredApp's capabilities when a registration omits capabilities
+    // (AR-1 crit 2). Defaults to 300000 ms (300 s); consumed by the Phase-4 Sync
+    // Engine Scheduler.
+    MEDIATOR_DEFAULT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
 
-  // Registration defaults. The conservative default poll interval (ms) stamped
-  // onto a RegisteredApp's capabilities when a registration omits capabilities
-  // (AR-1 crit 2). Defaults to 300000 ms (300 s); consumed by the Phase-4 Sync
-  // Engine Scheduler.
-  MEDIATOR_DEFAULT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
-});
+    // Operator-API local accounts — required, no default. The Phase-3 auth
+    // provider seeds its accounts from this; there is deliberately no
+    // unauthenticated mode (docs/architecture/security.md). Comma-separated
+    // `username:role:passwordHash`, where passwordHash is a salted scrypt hash
+    // (never a plaintext password). Structure is validated by the superRefine
+    // below so a misconfigured value fails fast at startup.
+    OPERATOR_ACCOUNTS: z.string({ error: OPERATOR_ACCOUNTS_MESSAGE }),
+  })
+  .superRefine((env, ctx) => {
+    // When OPERATOR_ACCOUNTS itself failed type validation (missing), the field
+    // check already reported it — skip so parsing never runs on a non-string.
+    if (typeof env.OPERATOR_ACCOUNTS !== "string") {
+      return;
+    }
+    const result = parseOperatorAccounts(env.OPERATOR_ACCOUNTS);
+    if (!result.ok) {
+      ctx.addIssue({ code: "custom", message: result.message, path: ["OPERATOR_ACCOUNTS"] });
+    }
+  });
 
 type RawEnv = z.infer<typeof envSchema>;
 
@@ -251,6 +373,15 @@ function toCredentialsConfig(raw: RawEnv): CredentialsConfig {
   return { masterKey };
 }
 
+function toAuthConfig(raw: RawEnv): AuthConfig {
+  const result = parseOperatorAccounts(raw.OPERATOR_ACCOUNTS);
+  if (!result.ok) {
+    // Unreachable: the schema superRefine already validated the structure.
+    throw new ConfigValidationError(`OPERATOR_ACCOUNTS ${result.message}`);
+  }
+  return { accounts: result.accounts };
+}
+
 function toAppConfig(raw: RawEnv): AppConfig {
   return {
     http: { port: raw.HTTP_PORT },
@@ -269,6 +400,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
     },
     credentials: toCredentialsConfig(raw),
     registration: { defaultPollInterval: raw.MEDIATOR_DEFAULT_POLL_INTERVAL_MS },
+    auth: toAuthConfig(raw),
   };
 }
 
@@ -279,6 +411,11 @@ function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.mappingLlm);
   Object.freeze(config.credentials);
   Object.freeze(config.registration);
+  Object.freeze(config.auth);
+  Object.freeze(config.auth.accounts);
+  for (const account of config.auth.accounts) {
+    Object.freeze(account);
+  }
   return Object.freeze(config);
 }
 

@@ -5,20 +5,22 @@ import {
 } from "@mediator/contracts";
 import type { FastifyInstance } from "fastify";
 
+import { getPrincipal, requireOperator } from "../auth/index.js";
 import { toResourceBindingDto } from "../dto-mappers.js";
-import { resolveOperatorIdentity } from "../identity.js";
 import { parseInput } from "../validation.js";
 import { idParamSchema, type OperatorApiDeps } from "./deps.js";
 
 /**
  * `PATCH /api/resource-bindings/:id` — confirm or correct one `ResourceBinding`
- * ref (RB-2). The acting operator identity is resolved via the Phase-3 stub
- * ({@link resolveOperatorIdentity}) and stamped into `confirmedBy`. Validation
- * (not-applicable ref, correction target not in IR) and 404s live in the service.
+ * ref (RB-2). A mutation, so `operator` only (OA-2). The acting identity is the
+ * authenticated principal (OA-3): {@link getPrincipal} yields it, and it is
+ * stamped into `confirmedBy`. Validation (not-applicable ref, correction target
+ * not in IR) and 404s live in the service.
  */
 export function registerResourceBindingRoutes(app: FastifyInstance, deps: OperatorApiDeps): void {
   app.patch(
     "/api/resource-bindings/:id",
+    { preHandler: requireOperator },
     async (request): Promise<UpdateResourceBindingResponse> => {
       const { id } = parseInput(idParamSchema, request.params, "path parameters");
       const body = parseInput(
@@ -26,7 +28,7 @@ export function registerResourceBindingRoutes(app: FastifyInstance, deps: Operat
         request.body,
         "resource-binding update",
       );
-      const operatorIdentity = resolveOperatorIdentity(request);
+      const operatorIdentity = getPrincipal(request).identity;
       const result = await deps.bindingConfirmer.confirmOrCorrect(id, body, operatorIdentity);
       return updateResourceBindingResponseSchema.parse(
         toResourceBindingDto(result.binding, result.capabilities),

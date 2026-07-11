@@ -1,11 +1,12 @@
 import type { IrResponse, PreviewParseResponse, RegisterAppResponse } from "@mediator/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { injectAs, TEST_OPERATOR } from "../../testing/auth.testkit.js";
 import { buildTestServer, type TestServer } from "../../testing/fake-persistence.testkit.js";
 import { providerSpecDocument } from "../../testing/sample-specs.testkit.js";
 
 async function registerProvider(server: TestServer): Promise<RegisterAppResponse> {
-  const response = await server.app.inject({
+  const response = await injectAs(server.app, TEST_OPERATOR, {
     method: "POST",
     url: "/api/apps",
     payload: {
@@ -28,7 +29,10 @@ describe("GET /api/specs/:id/ir (SI-3)", () => {
     const registered = await registerProvider(server);
     const specId = registered.specs[0]?.id ?? "";
 
-    const response = await server.app.inject({ method: "GET", url: `/api/specs/${specId}/ir` });
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: `/api/specs/${specId}/ir`,
+    });
     expect(response.statusCode).toBe(200);
     const body = response.json<IrResponse>();
     expect(body.apiSpecId).toBe(specId);
@@ -37,7 +41,7 @@ describe("GET /api/specs/:id/ir (SI-3)", () => {
 
   it("404s a well-formed but unknown spec id", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "GET",
       url: "/api/specs/00000000-0000-0000-0000-000000000000/ir",
     });
@@ -46,7 +50,10 @@ describe("GET /api/specs/:id/ir (SI-3)", () => {
 
   it("400s a malformed (non-UUID) spec id at the validation boundary", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({ method: "GET", url: "/api/specs/not-a-uuid/ir" });
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: "/api/specs/not-a-uuid/ir",
+    });
     expect(response.statusCode).toBe(400);
   });
 });
@@ -62,7 +69,7 @@ describe("PATCH /api/specs/:id/analysis-exclusions (SI-4)", () => {
     const registered = await registerProvider(server);
     const specId = registered.specs[0]?.id ?? "";
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/specs/${specId}/analysis-exclusions`,
       payload: { analysisExclusions: ["issues"] },
@@ -79,7 +86,7 @@ describe("PATCH /api/specs/:id/analysis-exclusions (SI-4)", () => {
     const registered = await registerProvider(server);
     const specId = registered.specs[0]?.id ?? "";
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/specs/${specId}/analysis-exclusions`,
       payload: { analysisExclusions: ["does-not-exist"] },
@@ -98,7 +105,7 @@ describe("POST /api/specs/preview (AR-3/SI-4)", () => {
 
   it("returns IR + resource groups without persisting anything", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/specs/preview",
       payload: { document: providerSpecDocument() },
@@ -116,7 +123,7 @@ describe("POST /api/specs/preview (AR-3/SI-4)", () => {
 
   it("400s an unparseable document", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/specs/preview",
       payload: { document: { not: "openapi" } },
@@ -150,7 +157,7 @@ describe("POST /api/specs/preview (AR-3/SI-4)", () => {
       },
     };
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/specs/preview",
       payload: { document },

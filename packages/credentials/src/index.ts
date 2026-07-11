@@ -26,6 +26,10 @@ export {
   type KeyProvider,
 } from "./key-provider.js";
 
+// Salted one-way hashing (equality-verified secrets: operator-account passwords
+// now, adapterToken in Phase 5).
+export { SECRET_HASH_SCHEME, hashSecret, isEncodedSecretHash, verifySecret } from "./hashing.js";
+
 // Credential material (store input) + secret (encrypted payload) shapes.
 export {
   CredentialMaterialValidationError,

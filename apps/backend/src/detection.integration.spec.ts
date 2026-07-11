@@ -103,6 +103,10 @@ function integrationConfig(): AppConfig {
     MAPPING_LLM_THINKING: process.env.MAPPING_LLM_THINKING ?? "false",
     MAPPING_LLM_REQUEST_TIMEOUT_MS: process.env.MAPPING_LLM_REQUEST_TIMEOUT_MS ?? "300000",
     OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "",
+    // A structurally-valid dummy account — this suite drives no authenticated
+    // HTTP, it only needs loadConfig to accept the (now-required) auth config.
+    OPERATOR_ACCOUNTS:
+      process.env.OPERATOR_ACCOUNTS ?? "operator:operator:scrypt$16384$8$1$64$c2FsdA==$aGFzaA==",
   };
   return loadConfig(env);
 }
