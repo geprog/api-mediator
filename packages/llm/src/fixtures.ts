@@ -286,3 +286,60 @@ export const twoIdentityCandidatesSet: unknown = {
     },
   ],
 };
+
+// ── Repairable outputs (fixed by the repair pass before validation) ───────────
+
+/**
+ * Out-of-range `confidence` on the pairs — `2` (over) and `-5` (under). Ollama's
+ * `format` grammar does not enforce numeric range, so a model can emit these; the
+ * repair pass clamps them to `1` / `0` so an otherwise-valid answer still validates.
+ */
+export const outOfRangeConfidenceShortlist: unknown = {
+  candidatePairs: [
+    { sourceResource: "issues", targetResource: "tasks", confidence: 2, rationale: "over range" },
+    { sourceResource: "labels", targetResource: "tags", confidence: -5, rationale: "under range" },
+  ],
+};
+
+/** Whitespace-padded `resourceRef`s — the repair pass trims them before validation. */
+export const paddedRefsShortlist: unknown = {
+  candidatePairs: [
+    {
+      sourceResource: "  issues  ",
+      targetResource: "\ttasks\n",
+      confidence: 0.8,
+      rationale: "padded refs",
+    },
+  ],
+};
+
+/**
+ * A peer-peer set with out-of-range `confidence` on an operation mapping (`5`), a
+ * field mapping (`-3`), and a nested `ambiguousAlternatives` entry (`9`) — all
+ * clamped into `[0,1]` by the repair pass so the set validates.
+ */
+export const outOfRangeConfidencePeerPeerSet: unknown = {
+  variant: "peer-peer",
+  operationMappings: [
+    {
+      sourceOperationId: "issueListIssues",
+      targetOperationId: "getProjectTasks",
+      confidence: 5,
+      rationale: "over range",
+      ambiguousAlternatives: [],
+      unmapped: false,
+    },
+  ],
+  fieldMappings: [
+    {
+      sourceField: "title",
+      targetField: "title",
+      transform: "rename",
+      transformDetail: "",
+      confidence: -3,
+      rationale: "under range",
+      ambiguousAlternatives: [{ targetField: "name", confidence: 9 }],
+      unmapped: false,
+    },
+  ],
+};

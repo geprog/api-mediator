@@ -26,20 +26,65 @@ export function inScopeResources(spec: ApiSpec): IrResourceGroup[] {
   return spec.parsedIR.filter((group) => !excluded.has(group.resourceRef));
 }
 
-/** A single operation's summary line for the shortlist prompt (or a fallback label). */
+/**
+ * Caps that keep a stage-1 summary **bounded** so a large resource group cannot
+ * blow up the shortlist prompt: a 60-operation, 100-field group is summarized to
+ * at most this many distinct operation summaries and top-level field names. The
+ * shortlist only needs enough metadata to judge plausible correspondence — a few
+ * representative operations and the leading field names — not the whole group.
+ */
+export const MAX_OPERATION_SUMMARIES = 10;
+export const MAX_TOP_LEVEL_FIELDS = 30;
+
+/**
+ * A single operation's summary line for the shortlist prompt: prefer the OpenAPI
+ * `summary`, then the `description`, and only fall back to a `METHOD /path` label
+ * when the operation carries no descriptive text at all.
+ */
 function operationSummary(operation: IrOperation): string {
   if (operation.summary !== undefined && operation.summary.length > 0) {
     return operation.summary;
   }
+  if (operation.description !== undefined && operation.description.length > 0) {
+    return operation.description;
+  }
   return `${operation.method.toUpperCase()} ${operation.path}`;
 }
 
-/** The distinct top-level field names across a resource group's full schemas. */
+/**
+ * The **distinct** operation summaries of a group, capped at
+ * {@link MAX_OPERATION_SUMMARIES}. Duplicate summaries (several CRUD operations
+ * sharing one summary line) collapse to a single entry, so the cap counts
+ * distinct lines rather than raw operations.
+ */
+function operationSummaries(group: IrResourceGroup): string[] {
+  const seen = new Set<string>();
+  const summaries: string[] = [];
+  for (const operation of group.operations) {
+    if (summaries.length >= MAX_OPERATION_SUMMARIES) {
+      break;
+    }
+    const summary = operationSummary(operation);
+    if (!seen.has(summary)) {
+      seen.add(summary);
+      summaries.push(summary);
+    }
+  }
+  return summaries;
+}
+
+/**
+ * The **distinct** top-level field names across a group's full schemas, capped at
+ * {@link MAX_TOP_LEVEL_FIELDS}.
+ */
 function topLevelFields(group: IrResourceGroup): string[] {
   const seen = new Set<string>();
   const fields: string[] = [];
   for (const schema of group.schemas) {
     for (const field of schema.fields) {
+      if (fields.length >= MAX_TOP_LEVEL_FIELDS) {
+        return fields;
+      }
       if (!seen.has(field.name)) {
         seen.add(field.name);
         fields.push(field.name);
@@ -52,14 +97,17 @@ function topLevelFields(group: IrResourceGroup): string[] {
 /**
  * Build the lightweight stage-1 {@link ResourceSummary} for one resource group:
  * name, operation summaries, and the top-level field list — metadata only, never
- * full operations/schemas (the shortlist call must stay cheap). `IrResourceGroup`
- * carries no group-level description, so the optional `description` is omitted.
+ * full operations/schemas (the shortlist call must stay cheap). Both lists are
+ * distinct and **bounded** ({@link MAX_OPERATION_SUMMARIES} /
+ * {@link MAX_TOP_LEVEL_FIELDS}) so a large group cannot produce a giant prompt.
+ * `IrResourceGroup` carries no group-level description, so the optional
+ * `description` is omitted.
  */
 export function toResourceSummary(group: IrResourceGroup): ResourceSummary {
   return {
     resourceRef: group.resourceRef,
     name: group.name,
-    operationSummaries: group.operations.map(operationSummary),
+    operationSummaries: operationSummaries(group),
     topLevelFields: topLevelFields(group),
   };
 }

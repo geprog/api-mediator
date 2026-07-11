@@ -11,6 +11,9 @@ import {
 } from "./schemas.js";
 import {
   malformedShortlist,
+  outOfRangeConfidencePeerPeerSet,
+  outOfRangeConfidenceShortlist,
+  paddedRefsShortlist,
   twoIdentityCandidatesSet,
   validConsumerProviderSet,
   validPeerPeerSet,
@@ -95,6 +98,39 @@ describe("validateSuggestionSetContent", () => {
   it("rejects a consumer-provider answer validated under the peer-peer variant", () => {
     expect(() =>
       validateSuggestionSetContent(JSON.stringify(validConsumerProviderSet), "peer-peer"),
+    ).toThrow(LLMOutputValidationError);
+  });
+});
+
+describe("repair pass (clamp confidence + trim refs before validation)", () => {
+  it("clamps an out-of-range shortlist confidence into [0,1] and then validates", () => {
+    const result = validateShortlistContent(JSON.stringify(outOfRangeConfidenceShortlist));
+    expect(result.candidatePairs.map((p) => p.confidence)).toEqual([1, 0]);
+  });
+
+  it("trims whitespace-padded refs before validation", () => {
+    const result = validateShortlistContent(JSON.stringify(paddedRefsShortlist));
+    expect(result.candidatePairs[0]?.sourceResource).toBe("issues");
+    expect(result.candidatePairs[0]?.targetResource).toBe("tasks");
+  });
+
+  it("clamps out-of-range confidence in a suggestion set (including nested alternatives)", () => {
+    const result = validateSuggestionSetContent(
+      JSON.stringify(outOfRangeConfidencePeerPeerSet),
+      "peer-peer",
+    );
+    expect(result.operationMappings[0]?.confidence).toBe(1);
+    expect(result.fieldMappings[0]?.confidence).toBe(0);
+    expect(result.fieldMappings[0]?.ambiguousAlternatives[0]?.confidence).toBe(1);
+  });
+
+  it("still throws on genuinely malformed output (repair does not mask a real error)", () => {
+    expect(() => validateShortlistContent(JSON.stringify(malformedShortlist))).toThrow(
+      LLMOutputValidationError,
+    );
+    // A wrong-variant key survives repair (it is neither a confidence nor a ref) and is rejected.
+    expect(() =>
+      validateSuggestionSetContent(JSON.stringify(wrongVariantPeerPeerSet), "peer-peer"),
     ).toThrow(LLMOutputValidationError);
   });
 });
