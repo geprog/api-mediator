@@ -65,10 +65,15 @@ The Mapping Engine is provider-agnostic — the core depends only on the
 local development it is backed by a self-hosted open-weight model served by
 Ollama, selected with `MAPPING_LLM_PROVIDER=ollama`.
 
+> **Default model:** `MAPPING_LLM_MODEL` now defaults to `gemma4:26b`, which
+> produces valid, recall-biased shortlists where glm-4.7-flash is too weak, at
+> the cost of slower CPU inference (a detail call can take a minute-plus);
+> glm-4.7-flash (below) stays selectable for fast, lower-accuracy iteration.
+
 Pull the default model once:
 
 ```bash
-ollama pull glm-4.7-flash
+ollama pull gemma4:26b
 ```
 
 ### Why glm-4.7-flash

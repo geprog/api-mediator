@@ -11,6 +11,7 @@ import {
   PROMPT_VERSION,
   type ChatMessage,
 } from "./prompt.js";
+import { buildGeneratedBy } from "./provider.js";
 
 function joinContent(messages: readonly ChatMessage[]): string {
   return messages.map((message) => message.content).join("\n");
@@ -24,6 +25,18 @@ describe("PROMPT_VERSION", () => {
   it("is a stable non-empty identifier", () => {
     expect(PROMPT_VERSION.length).toBeGreaterThan(0);
   });
+
+  it("is bumped to the v2 detection-tuning prompt", () => {
+    expect(PROMPT_VERSION).toBe("mapping-2026-07-v2");
+  });
+
+  it("is stamped into generatedBy.promptVersion", () => {
+    const generatedBy = buildGeneratedBy(
+      { providerId: "ollama", model: "gemma4:26b" },
+      PROMPT_VERSION,
+    );
+    expect(generatedBy.promptVersion).toBe(PROMPT_VERSION);
+  });
 });
 
 describe("buildShortlistPrompt", () => {
@@ -34,6 +47,18 @@ describe("buildShortlistPrompt", () => {
     expect(system).toMatch(/include the pair/i);
     // The rationale — a false negative is worse than a false positive — is present.
     expect(system).toMatch(/false negative/i);
+  });
+
+  it("directs systematic, same-name/synonym, and verbatim-ref behavior", () => {
+    const system = systemMessage(buildShortlistPrompt(shortlistContext));
+    // Work through every source × target pair, don't stop early.
+    expect(system).toMatch(/systematically/i);
+    expect(system).toMatch(/do not stop early/i);
+    // Always pair identical/synonym names, and semantically-equivalent different names.
+    expect(system).toMatch(/identical or obvious synonyms/i);
+    expect(system).toMatch(/issues↔tasks/);
+    // Copy the refs verbatim from the provided lists.
+    expect(system).toMatch(/verbatim/i);
   });
 
   it("templates only resource metadata (names, descriptions, operation summaries, fields)", () => {

@@ -41,23 +41,39 @@ export interface ChatMessage {
  * `generatedBy.promptVersion` (LP-4). Bump it when either stage's template text
  * changes so proposals stay comparable across prompt revisions.
  */
-export const PROMPT_VERSION = "mapping-2026-07-v1";
+export const PROMPT_VERSION = "mapping-2026-07-v2";
 
 // ── Stage 1: shortlist ───────────────────────────────────────────────────────
 
 const SHORTLIST_SYSTEM_PROMPT = [
   "You are the shortlist stage of an API mapping engine.",
-  "You are given resource-level summaries of two API specifications, a source and a target.",
-  "Identify every pair of resources — one from the source, one from the target — that plausibly",
+  "You are given resource-level summaries of two API specifications, a SOURCE and a TARGET.",
+  "Shortlist every pair of resources — one from the source, one from the target — that plausibly",
   "describe the same real-world concept and could therefore correspond.",
+  "",
+  "Work SYSTEMATICALLY. Take each SOURCE resource in turn and scan ALL TARGET resources for it",
+  "before moving on to the next source resource. Do NOT stop early: consider every source resource",
+  "against every target resource, even when the lists are long.",
   "",
   "Be RECALL-BIASED: when in doubt, INCLUDE the pair. A false positive costs only one wasted",
   "detail analysis downstream, but a false negative means a real correspondence is never proposed",
-  "at all. Prefer over-inclusion to omission.",
+  "at all. A miss is far more costly than a spurious pair — prefer over-inclusion to omission.",
+  "",
+  "ALWAYS pair resources whose `resourceRef` names are identical or obvious synonyms — for example",
+  "labels↔labels, comments↔comments, users↔user, tags↔labels. Pairing an identically-named resource",
+  "is mandatory, never optional. ALSO pair semantically-equivalent records whose names differ — for",
+  "example issues↔tasks, customers↔contacts, invoices↔bills. Matching the underlying concept matters",
+  "more than matching the spelling.",
+  "",
+  "Each resource is listed as its display name followed by its `resourceRef` in parentheses. Copy",
+  "the `sourceResource` and `targetResource` values VERBATIM from those `resourceRef` strings: use",
+  "the exact ref shown (not the display name), and never invent a ref, never prefix or annotate it,",
+  "and never emit a name that does not appear in the provided source/target lists.",
   "",
   "Resource correspondence is direction-agnostic. Return only the JSON object required by the",
   "schema: a `candidatePairs` array, each entry with `sourceResource`, `targetResource`,",
-  "a `confidence` in [0,1], and a short `rationale`. Return an empty array if nothing corresponds.",
+  "a `confidence` in [0,1], and a short `rationale`. Return an empty array only when genuinely",
+  "nothing corresponds.",
 ].join("\n");
 
 function renderResourceSummary(summary: ResourceSummary): string {
@@ -113,9 +129,14 @@ const DETAIL_SYSTEM_PROMPT_COMMON = [
   "resources. Produce operation-level and field-level correspondences from the SOURCE resource",
   "to the TARGET resource.",
   "",
-  "For every operation and field: give a `confidence` in [0,1], a `rationale`, populate",
-  "`ambiguousAlternatives` when more than one target is plausible (never silently best-guess),",
-  "and set `unmapped: true` (with a null target) when no counterpart exists.",
+  "For every operation and field: give a `confidence` strictly in the range [0,1] (never below 0 or",
+  "above 1), a `rationale`, populate `ambiguousAlternatives` when more than one target is plausible",
+  "(never silently best-guess), and set `unmapped: true` (with a null target) when no counterpart",
+  "exists.",
+  "",
+  "Copy every operation id and field name — `sourceOperationId`, `targetOperationId`, `sourceField`,",
+  "`targetField` — VERBATIM from the operations and schemas shown below. Never invent, rename, or",
+  "annotate an id or field name; use the exact strings provided.",
 ].join("\n");
 
 const DETAIL_SYSTEM_PROMPT_PEER_PEER = [

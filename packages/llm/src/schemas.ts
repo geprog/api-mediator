@@ -63,6 +63,72 @@ export function detailFormatFor(variant: MappingVariant): OllamaFormat {
   return variant === "peer-peer" ? peerPeerDetailFormat : consumerProviderDetailFormat;
 }
 
+// ── Repair (the core's repair logic, applied before validation) ──────────────
+
+/**
+ * The ref/id string fields a model sometimes returns with surrounding whitespace
+ * (a leading space after a JSON key, a trailing newline). Trimming them before
+ * validation avoids a spurious mismatch/rejection while never touching free-text
+ * fields (`rationale`, `transformDetail`) or the `variant` discriminator.
+ */
+const REF_ID_KEYS: ReadonlySet<string> = new Set([
+  "sourceResource",
+  "targetResource",
+  "sourceOperationId",
+  "targetOperationId",
+  "sourceField",
+  "targetField",
+  "sourceParam",
+  "targetParam",
+  "targetLookupParamRef",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Clamp a numeric confidence into the domain's `[0,1]` range (NaN passes through). */
+function clampConfidence(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * The concept's **repair logic** (`docs/architecture/mapping-engine.md`: "It owns
+ * prompt templating, retry, and repair logic itself"), applied at the shared
+ * validation boundary so both providers benefit. A minimal, structure-preserving
+ * pass over the parsed-but-not-yet-validated output that fixes the two cheap,
+ * common model slips which would otherwise fail an *otherwise-valid* answer:
+ *
+ * - every `confidence` number is **clamped to `[0,1]`** — Ollama's `format`
+ *   grammar enforces JSON structure and types but not numeric `minimum`/`maximum`,
+ *   so a model can emit `confidence: 2` or `-5` that the domain schema then rejects;
+ * - every ref/id string field ({@link REF_ID_KEYS}) is **trimmed**.
+ *
+ * It repairs recursively so nested `confidence` values (an `ambiguousAlternatives`
+ * entry) and nested ref/id fields are covered too. It never adds, drops, or
+ * reshapes keys, so genuinely malformed output (wrong shape, missing required,
+ * wrong-variant key) still fails the domain schema exactly as before.
+ */
+function repairLlmOutput(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(repairLlmOutput);
+  }
+  if (isRecord(value)) {
+    const repaired: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "confidence" && typeof child === "number") {
+        repaired[key] = clampConfidence(child);
+      } else if (REF_ID_KEYS.has(key) && typeof child === "string") {
+        repaired[key] = child.trim();
+      } else {
+        repaired[key] = repairLlmOutput(child);
+      }
+    }
+    return repaired;
+  }
+  return value;
+}
+
 // ── Validation (the provider contract's parse-then-validate step) ────────────
 
 function toIssues(error: z.ZodError): ValidationIssue[] {
@@ -97,7 +163,7 @@ function parseJsonContent(rawContent: string): unknown {
  * both the Ollama and fake providers so their validate boundary is identical.
  */
 export function validateShortlistContent(rawContent: string): ResourceShortlist {
-  const parsed = parseJsonContent(rawContent);
+  const parsed = repairLlmOutput(parseJsonContent(rawContent));
   const result = resourceShortlistSchema.safeParse(parsed);
   if (!result.success) {
     throw new LLMOutputValidationError(
@@ -119,7 +185,7 @@ export function validateSuggestionSetContent(
   rawContent: string,
   variant: MappingVariant,
 ): MappingSuggestionSet {
-  const parsed = parseJsonContent(rawContent);
+  const parsed = repairLlmOutput(parseJsonContent(rawContent));
   if (variant === "peer-peer") {
     const result = peerPeerMappingSuggestionSetSchema.safeParse(parsed);
     if (!result.success) {
