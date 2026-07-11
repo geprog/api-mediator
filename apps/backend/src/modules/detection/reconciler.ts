@@ -10,12 +10,13 @@ import { DETECTION_CONSUMER_NAME } from "./consumer.js";
  * re-enqueues a job for it, so a `SpecIngested` reaction the bus dropped is
  * eventually recovered.
  *
- * A spec with a job in *any* status is analyzed-or-analyzing and is left alone: a
- * `completed` job that produced zero proposals (the first spec in the landscape),
- * a `pending`/`running` job in flight, and a `failed`/parked shortlist outcome are
- * all recorded outcomes, not absences — so the sweep does not loop on them (DT-2
- * crit 5). The `enqueue` it drives is itself idempotent, so a race with the live
- * consumer collapses to one job.
+ * "Analyzed" is defined as **a detection job exists for the spec in ANY status**
+ * (closing README open-question #8): a spec with a job is analyzed-or-analyzing and
+ * is left alone — a `completed` job that produced zero proposals (the first spec in
+ * the landscape), a `pending`/`running` job in flight, and a `failed`/parked
+ * shortlist outcome are all recorded outcomes, not absences, so the sweep does not
+ * loop on them (DT-2 crit 5). The `enqueue` it drives is itself idempotent, so a
+ * race with the live consumer collapses to one job.
  */
 export interface DetectionReconcilerDeps {
   /** Spec ids that are `active` but have no `mapping_detection_job`. */

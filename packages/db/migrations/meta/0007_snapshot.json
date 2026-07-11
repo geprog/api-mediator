@@ -1,5 +1,5 @@
 {
-  "id": "a1530dcf-620d-42c0-93d6-475898ab11b7",
+  "id": "8aa2490c-1ea1-4c79-b8d3-5183c04efacb",
   "prevId": "04bf5d1b-5b95-4ab3-83b6-900930c8f9ab",
   "version": "7",
   "dialect": "postgresql",
@@ -372,6 +372,22 @@
           ],
           "isUnique": false,
           "where": "\"mapping_detection_job\".\"status\" = 'pending'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "mapping_detection_job_running_idx": {
+          "name": "mapping_detection_job_running_idx",
+          "columns": [
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"mapping_detection_job\".\"status\" = 'running'",
           "concurrently": false,
           "method": "btree",
           "with": {}

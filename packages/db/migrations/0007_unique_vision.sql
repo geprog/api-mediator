@@ -12,4 +12,5 @@ CREATE TABLE "mapping_detection_job" (
 --> statement-breakpoint
 ALTER TABLE "mapping_detection_job" ADD CONSTRAINT "mapping_detection_job_api_spec_id_api_spec_id_fk" FOREIGN KEY ("api_spec_id") REFERENCES "public"."api_spec"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "mapping_detection_job_pending_idx" ON "mapping_detection_job" USING btree ("created_at","id") WHERE "mapping_detection_job"."status" = 'pending';--> statement-breakpoint
+CREATE INDEX "mapping_detection_job_running_idx" ON "mapping_detection_job" USING btree ("started_at") WHERE "mapping_detection_job"."status" = 'running';--> statement-breakpoint
 CREATE UNIQUE INDEX "mapping_detection_job_active_spec_uq" ON "mapping_detection_job" USING btree ("api_spec_id") WHERE "mapping_detection_job"."status" in ('pending', 'running');

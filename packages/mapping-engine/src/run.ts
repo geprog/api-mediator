@@ -26,9 +26,22 @@ export interface SpecSource {
   listActive(): Promise<ApiSpec[]>;
 }
 
-/** Persists one proposal together with its items (transactionally). */
+/** One proposal together with its items, as produced by a directional analysis. */
+export interface PersistableProposal {
+  readonly proposal: MappingProposal;
+  readonly items: readonly MappingProposalItem[];
+}
+
+/**
+ * Persists **all** of one detection run's proposals (each with its items) in a
+ * SINGLE transaction — all-or-nothing. Atomicity is what makes a re-run safe: a
+ * DB fault or crash partway through commits **nothing**, so the worker's retry /
+ * stale-reclaim re-runs `runDetectionForSpec` and produces the run's proposals
+ * exactly once, never appending duplicates for pairs a partial run had already
+ * committed (DT-2 crit 3).
+ */
 export interface ProposalStore {
-  persist(proposal: MappingProposal, items: MappingProposalItem[]): Promise<void>;
+  persistAll(proposals: readonly PersistableProposal[]): Promise<void>;
 }
 
 /** The full dependency set the persisting entry point needs. */
@@ -46,8 +59,10 @@ export interface DetectionRunResult {
  * Enumerate, analyze, and **persist** every proposal for a newly ingested spec —
  * the `SpecIngested`-triggered entry point. Fetches the new spec + the active
  * counterpart set, runs the two-stage detection (`detectForSpec`), and persists
- * each directional proposal (pending or failed) with its items. Persistence
- * happens after analysis so a persistence error never leaves a half-analyzed run.
+ * all of its directional proposals (pending or failed) with their items in **one
+ * atomic** `persistAll`. Persistence happens after analysis so a persistence error
+ * never leaves a half-analyzed run, and is all-or-nothing so a fault mid-persist
+ * leaves nothing to duplicate on the worker's retry (DT-2 crit 3).
  */
 export async function runDetectionForSpec(
   specId: string,
@@ -62,9 +77,9 @@ export async function runDetectionForSpec(
   const otherActiveSpecs = active.filter((spec) => spec.id !== specId);
 
   const analyses = await detectForSpec(newSpec, otherActiveSpecs, deps);
-  for (const analysis of analyses) {
-    await deps.proposalStore.persist(analysis.proposal, analysis.items);
-  }
+  await deps.proposalStore.persistAll(
+    analyses.map((analysis) => ({ proposal: analysis.proposal, items: analysis.items })),
+  );
 
   return { newSpecId: specId, analyses };
 }
@@ -81,13 +96,19 @@ export function createDbSpecSource(db: DbHandle): SpecSource {
 }
 
 /**
- * A {@link ProposalStore} that persists each proposal + items in its own
- * transaction via `MappingProposalRepository.create`, matching the Phase-1
- * repository convention (`tx(db, (txn) => new Repo(txn).create(...))`).
+ * A {@link ProposalStore} that persists a whole run's proposals + items in **one**
+ * transaction via `MappingProposalRepository.create` on the shared handle — so the
+ * run's writes commit together or not at all. A failure on any proposal rolls the
+ * whole batch back (`tx` re-throws → Drizzle rolls back), leaving no partial set.
  */
 export function createDbProposalStore(db: Database): ProposalStore {
   return {
-    persist: (proposal, items) =>
-      tx(db, (txn) => new MappingProposalRepository(txn).create(proposal, items)),
+    persistAll: (proposals) =>
+      tx(db, async (txn) => {
+        const repo = new MappingProposalRepository(txn);
+        for (const { proposal, items } of proposals) {
+          await repo.create(proposal, [...items]);
+        }
+      }),
   };
 }

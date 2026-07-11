@@ -32,9 +32,14 @@ class InMemorySpecSource implements SpecSource {
 }
 
 class InMemoryProposalStore implements ProposalStore {
-  public readonly rows: { proposal: MappingProposal; items: MappingProposalItem[] }[] = [];
-  public persist(proposal: MappingProposal, items: MappingProposalItem[]): Promise<void> {
-    this.rows.push({ proposal, items });
+  public readonly rows: { proposal: MappingProposal; items: readonly MappingProposalItem[] }[] = [];
+  // Mirrors the real store: all of a run's proposals persist together (one batch).
+  public persistAll(
+    proposals: readonly { proposal: MappingProposal; items: readonly MappingProposalItem[] }[],
+  ): Promise<void> {
+    for (const { proposal, items } of proposals) {
+      this.rows.push({ proposal, items });
+    }
     return Promise.resolve();
   }
 }

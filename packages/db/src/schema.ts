@@ -468,6 +468,10 @@ export const mappingDetectionJob = pgTable(
     index("mapping_detection_job_pending_idx")
       .on(table.createdAt, table.id)
       .where(sql`${table.status} = 'pending'`),
+    // Supports the worker's stale-reclaim scan (`running` rows past the lease).
+    index("mapping_detection_job_running_idx")
+      .on(table.startedAt)
+      .where(sql`${table.status} = 'running'`),
     // At most one un-finished (pending|running) job per spec → idempotent enqueue.
     uniqueIndex("mapping_detection_job_active_spec_uq")
       .on(table.apiSpecId)

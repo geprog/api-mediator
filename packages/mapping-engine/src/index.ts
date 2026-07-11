@@ -52,6 +52,7 @@ export {
   createDbProposalStore,
   createDbSpecSource,
   type DetectionRunResult,
+  type PersistableProposal,
   type ProposalStore,
   runDetectionForSpec,
   type RunDetectionDeps,
