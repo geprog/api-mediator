@@ -1,6 +1,7 @@
 import type { RegisterAppResponse } from "@mediator/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { injectAs, TEST_OPERATOR } from "../../testing/auth.testkit.js";
 import { buildTestServer, type TestServer } from "../../testing/fake-persistence.testkit.js";
 import { malformedDocument, providerSpecDocument } from "../../testing/sample-specs.testkit.js";
 
@@ -18,7 +19,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("registers an app + PROVIDER spec and returns app + spec metadata with no secret", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -57,7 +58,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("rejects a spec that fails to parse with 400 and persists nothing (AR-1 crit 7)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -83,7 +84,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("requires baseUrl when any spec is a PROVIDER (AR-1 crit 3, OQ1)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: { name: "NoBase", specs: [{ role: "PROVIDER", document: providerSpecDocument() }] },
@@ -96,7 +97,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("allows a consumer-only registration with no baseUrl (AR-1 crit 4)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -113,7 +114,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("defaults capabilities conservatively when omitted (AR-1 crit 2, OQ2)", async () => {
     server = buildTestServer(123456);
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -135,7 +136,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("rejects a credential of type adapterToken (CR-1 crit 5)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -153,7 +154,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("rejects a request with no name (AR-1 crit 8)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -166,7 +167,7 @@ describe("POST /api/apps — registration (AR-1)", () => {
 
   it("rejects registration-time analysisExclusions referencing a non-IR resource (SI-4 crit 4)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -196,7 +197,7 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
   });
 
   async function register(name: string, role: "PROVIDER" | "CONSUMER"): Promise<string> {
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -213,7 +214,7 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
     await register("A", "PROVIDER");
     await register("B", "PROVIDER");
 
-    const response = await server.app.inject({ method: "GET", url: "/api/apps" });
+    const response = await injectAs(server.app, TEST_OPERATOR, { method: "GET", url: "/api/apps" });
     expect(response.statusCode).toBe(200);
     expect(response.json<{ apps: unknown[] }>().apps).toHaveLength(2);
   });
@@ -222,7 +223,10 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
     server = buildTestServer();
     const appId = await register("A", "PROVIDER");
 
-    const response = await server.app.inject({ method: "GET", url: `/api/apps/${appId}/specs` });
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: `/api/apps/${appId}/specs`,
+    });
     expect(response.statusCode).toBe(200);
     const { specs } = response.json<{ specs: { role: string }[] }>();
     expect(specs).toHaveLength(1);
@@ -233,7 +237,7 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
 
   it("404s the specs list for an unknown app (AR-2 crit 4)", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "GET",
       url: "/api/apps/00000000-0000-0000-0000-000000000000/specs",
     });
@@ -242,7 +246,10 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
 
   it("returns the ErrorResponse envelope for an unmatched route", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({ method: "GET", url: "/api/does-not-exist" });
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: "/api/does-not-exist",
+    });
     expect(response.statusCode).toBe(404);
     expect(response.json<{ statusCode: number; error: string; message: string }>()).toEqual({
       statusCode: 404,

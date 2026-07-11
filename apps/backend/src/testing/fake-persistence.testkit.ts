@@ -26,8 +26,10 @@ import type {
 import { RegistrationService } from "../modules/registration.js";
 import { ResourceBindingService } from "../modules/resource-bindings.js";
 import { SpecRegistry } from "../modules/spec-registry.js";
+import { LocalAccountsAuthProvider } from "../http/auth/index.js";
 import { registerErrorHandler } from "../http/errors.js";
-import { registerOperatorApi } from "../http/operator/api.js";
+import { registerAuthenticatedOperatorApi } from "../http/operator/api.js";
+import { TEST_OPERATOR_ACCOUNTS } from "./auth.testkit.js";
 
 /**
  * In-memory persistence fakes for the operator-API unit tests. They implement
@@ -237,8 +239,11 @@ export interface TestServer {
 
 /**
  * Build a Fastify instance with the real operator API + error handler wired over
- * in-memory fakes and the real `SpecRegistry`/services and `buildIr`. Call
- * `app.inject(...)` to drive routes; assert on `store` for persistence effects.
+ * in-memory fakes and the real `SpecRegistry`/services and `buildIr`. The real
+ * authentication hook and role guards (OA-1/OA-2) are installed, seeded with the
+ * shared {@link TEST_OPERATOR_ACCOUNTS}, so requests must present an identity via
+ * the `auth.testkit` header helpers. Call `app.inject(...)` to drive routes;
+ * assert on `store` for persistence effects.
  */
 export function buildTestServer(defaultPollInterval = 300000): TestServer {
   const store = new InMemoryStore();
@@ -251,14 +256,18 @@ export function buildTestServer(defaultPollInterval = 300000): TestServer {
   };
 
   const app = Fastify({ logger: false });
-  registerOperatorApi(app, {
-    registrar: new RegistrationService({ unitOfWork, specRegistry, defaultPollInterval }),
-    bindingConfirmer: new ResourceBindingService({ unitOfWork }),
-    exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
-    appReader: readers.appReader,
-    specReader: readers.specReader,
-    bindingReader: readers.bindingReader,
-  });
+  registerAuthenticatedOperatorApi(
+    app,
+    {
+      registrar: new RegistrationService({ unitOfWork, specRegistry, defaultPollInterval }),
+      bindingConfirmer: new ResourceBindingService({ unitOfWork }),
+      exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
+      appReader: readers.appReader,
+      specReader: readers.specReader,
+      bindingReader: readers.bindingReader,
+    },
+    new LocalAccountsAuthProvider(TEST_OPERATOR_ACCOUNTS),
+  );
   registerErrorHandler(app);
 
   return { app, store };

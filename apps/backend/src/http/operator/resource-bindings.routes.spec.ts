@@ -6,6 +6,7 @@ import type {
 } from "@mediator/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { injectAs, TEST_OPERATOR, TEST_OPERATOR_ALICE } from "../../testing/auth.testkit.js";
 import { buildTestServer, type TestServer } from "../../testing/fake-persistence.testkit.js";
 import { providerSpecDocument } from "../../testing/sample-specs.testkit.js";
 
@@ -20,7 +21,7 @@ async function registerAndGetBindings(server: TestServer): Promise<{
   specId: string;
   bindings: ResourceBindingDto[];
 }> {
-  const registration = await server.app.inject({
+  const registration = await injectAs(server.app, TEST_OPERATOR, {
     method: "POST",
     url: "/api/apps",
     payload: {
@@ -31,7 +32,7 @@ async function registerAndGetBindings(server: TestServer): Promise<{
     },
   });
   const specId = registration.json<RegisterAppResponse>().specs[0]?.id ?? "";
-  const bindingsResponse = await server.app.inject({
+  const bindingsResponse = await injectAs(server.app, TEST_OPERATOR, {
     method: "GET",
     url: `/api/specs/${specId}/resource-bindings`,
   });
@@ -78,11 +79,11 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     await server.app.close();
   });
 
-  it("confirms a ref, stamping confirmedBy (stub identity) + confirmedAt", async () => {
+  it("confirms a ref, stamping confirmedBy (authenticated identity) + confirmedAt", async () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
       payload: { refKind: "nativeIdRef" },
@@ -97,14 +98,15 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     expect(updated.refs.find((ref) => ref.kind === "collectionReadRef")?.confirmedBy).toBeNull();
   });
 
-  it("honors the x-operator-id header for confirmedBy (Phase-3 stub seam)", async () => {
+  it("attributes confirmedBy to the authenticated operator identity (OA-3)", async () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
 
-    const response = await server.app.inject({
+    // A different operator acts: confirmedBy must follow the authenticated
+    // identity, not a fixed value.
+    const response = await injectAs(server.app, TEST_OPERATOR_ALICE, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
-      headers: { "x-operator-id": "alice" },
       payload: { refKind: "nativeIdRef" },
     });
 
@@ -122,7 +124,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     expect(paginationBefore?.applicable).toBe(true);
     expect(paginationBefore?.value).toBeNull();
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
       payload: {
@@ -148,7 +150,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
       payload: { refKind: "nativeIdRef", value: { kind: "field", path: "title" } },
@@ -166,7 +168,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
       payload: { refKind: "nativeIdRef", value: { kind: "field", path: "does-not-exist" } },
@@ -179,7 +181,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
     // supportsDeltaQuery=false → deltaCursorRef is not applicable.
     const { bindings } = await registerAndGetBindings(server);
 
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${bindingId(bindings)}`,
       payload: { refKind: "deltaCursorRef" },
@@ -189,7 +191,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
 
   it("404s a well-formed but unknown binding id", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: "/api/resource-bindings/00000000-0000-0000-0000-000000000000",
       payload: { refKind: "nativeIdRef" },
@@ -199,7 +201,7 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
 
   it("400s a malformed (non-UUID) binding id at the validation boundary", async () => {
     server = buildTestServer();
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: "/api/resource-bindings/not-a-uuid",
       payload: { refKind: "nativeIdRef" },

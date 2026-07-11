@@ -17,8 +17,9 @@ import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
+import { LocalAccountsAuthProvider } from "./http/auth/index.js";
 import { registerErrorHandler } from "./http/errors.js";
-import { registerOperatorApi, type OperatorApiDeps } from "./http/operator/api.js";
+import { registerAuthenticatedOperatorApi, type OperatorApiDeps } from "./http/operator/api.js";
 import { pingDatabase, registerHealthRoute } from "./http/operator/health.js";
 
 /**
@@ -120,8 +121,12 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
 export function buildServer(deps: ServerDependencies): RunningServer {
   const app = Fastify({ loggerInstance: deps.logger });
 
+  // Health stays outside the authenticated context so orchestration probes reach
+  // it unauthenticated; the operator API is mounted inside a context that first
+  // requires an authenticated principal (OA-1).
   registerHealthRoute(app, { pingDb: () => pingDatabase(deps.db) });
-  registerOperatorApi(app, buildOperatorApiDeps(deps));
+  const authProvider = new LocalAccountsAuthProvider(deps.config.auth.accounts);
+  registerAuthenticatedOperatorApi(app, buildOperatorApiDeps(deps), authProvider);
   registerErrorHandler(app);
 
   const shutdown = async (): Promise<void> => {

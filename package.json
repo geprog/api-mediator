@@ -17,10 +17,12 @@
     "verify": "pnpm typecheck && pnpm lint && pnpm format && pnpm test && pnpm build",
     "test:e2e": "pnpm --filter @mediator/e2e run test:e2e",
     "db:generate": "pnpm --filter @mediator/db db:generate",
-    "db:migrate": "pnpm --filter @mediator/db db:migrate"
+    "db:migrate": "pnpm --filter @mediator/db db:migrate",
+    "hash:operator-password": "node scripts/hash-operator-password.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@mediator/credentials": "workspace:*",
     "@types/node": "24.13.3",
     "@vitest/coverage-v8": "4.1.10",
     "@vue/eslint-config-typescript": "14.9.0",

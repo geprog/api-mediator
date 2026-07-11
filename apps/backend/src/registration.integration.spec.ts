@@ -19,6 +19,12 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildServer, createServerLogger, type RunningServer } from "./composition-root.js";
+import {
+  injectAs,
+  operatorAccountsEnv,
+  TEST_OPERATOR,
+  TEST_OPERATOR_ALICE,
+} from "./testing/auth.testkit.js";
 import { providerSpecDocument } from "./testing/sample-specs.testkit.js";
 
 /**
@@ -60,6 +66,7 @@ function integrationConfig(): AppConfig {
     MAPPING_LLM_THINKING: process.env.MAPPING_LLM_THINKING ?? "false",
     MAPPING_LLM_REQUEST_TIMEOUT_MS: process.env.MAPPING_LLM_REQUEST_TIMEOUT_MS ?? "300000",
     OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "",
+    OPERATOR_ACCOUNTS: process.env.OPERATOR_ACCOUNTS ?? operatorAccountsEnv(),
   };
   return loadConfig(env);
 }
@@ -118,7 +125,7 @@ describe("registration API integration (requires Postgres)", () => {
 
   it("persists the whole registration graph atomically with a SpecIngested outbox row", async () => {
     const document = loadSpec("gitea.trimmed.oas3.json");
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -183,7 +190,7 @@ describe("registration API integration (requires Postgres)", () => {
 
   it("rolls everything back when a submitted spec is malformed", async () => {
     const document = loadSpec("gitea.trimmed.oas3.json");
-    const response = await server.app.inject({
+    const response = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -208,7 +215,7 @@ describe("registration API integration (requires Postgres)", () => {
 
   it("serves reads with no secrets and confirms/rejects binding refs", async () => {
     const document = loadSpec("gitea.trimmed.oas3.json");
-    const registration = await server.app.inject({
+    const registration = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -229,7 +236,7 @@ describe("registration API integration (requires Postgres)", () => {
     const specId = registered.specs[0]?.id ?? "";
 
     // GET /api/apps/:id/specs — metadata only, no rawDocument, no secret.
-    const specsResponse = await server.app.inject({
+    const specsResponse = await injectAs(server.app, TEST_OPERATOR, {
       method: "GET",
       url: `/api/apps/${registered.app.id}/specs`,
     });
@@ -238,12 +245,15 @@ describe("registration API integration (requires Postgres)", () => {
     expect(specsResponse.body).not.toContain(SECRET_VALUE);
 
     // GET /api/specs/:id/ir — the parsed IR, no secret.
-    const irResponse = await server.app.inject({ method: "GET", url: `/api/specs/${specId}/ir` });
+    const irResponse = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: `/api/specs/${specId}/ir`,
+    });
     expect(irResponse.statusCode).toBe(200);
     expect(irResponse.body).not.toContain(SECRET_VALUE);
 
     // GET the bindings, confirm the `issues` native id ref.
-    const bindingsResponse = await server.app.inject({
+    const bindingsResponse = await injectAs(server.app, TEST_OPERATOR, {
       method: "GET",
       url: `/api/specs/${specId}/resource-bindings`,
     });
@@ -252,17 +262,16 @@ describe("registration API integration (requires Postgres)", () => {
     expect(issuesBinding).toBeDefined();
     const issuesBindingId = issuesBinding?.id ?? "";
 
-    const confirm = await server.app.inject({
+    const confirm = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${issuesBindingId}`,
-      headers: { "x-operator-id": "integration-operator" },
       payload: { refKind: "nativeIdRef" },
     });
     expect(confirm.statusCode).toBe(200);
     const confirmedRef = confirm
       .json<{ refs: { kind: string; confirmedBy: string | null }[] }>()
       .refs.find((ref) => ref.kind === "nativeIdRef");
-    expect(confirmedRef?.confirmedBy).toBe("integration-operator");
+    expect(confirmedRef?.confirmedBy).toBe(TEST_OPERATOR.username);
 
     // The confirmation persisted to the specific nativeIdRef DB row.
     const [refRow] = await db
@@ -274,11 +283,11 @@ describe("registration API integration (requires Postgres)", () => {
           eq(resourceBindingRef.refKind, "nativeIdRef"),
         ),
       );
-    expect(refRow?.confirmedBy).toBe("integration-operator");
+    expect(refRow?.confirmedBy).toBe(TEST_OPERATOR.username);
     expect(refRow?.confirmedAt).not.toBeNull();
 
     // A correction naming a non-IR field is rejected (RB-2 crit 4).
-    const badCorrection = await server.app.inject({
+    const badCorrection = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/resource-bindings/${issuesBindingId}`,
       payload: { refKind: "nativeIdRef", value: { kind: "field", path: "definitely-not-a-field" } },
@@ -286,7 +295,7 @@ describe("registration API integration (requires Postgres)", () => {
     expect(badCorrection.statusCode).toBe(400);
 
     // PATCH analysis-exclusions persists to the real ApiSpec row (SI-4).
-    const exclusions = await server.app.inject({
+    const exclusions = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/specs/${specId}/analysis-exclusions`,
       payload: { analysisExclusions: ["issues"] },
@@ -296,7 +305,7 @@ describe("registration API integration (requires Postgres)", () => {
     expect(specRow?.analysisExclusions).toEqual(["issues"]);
 
     // A resourceRef not in the spec's IR is rejected (SI-4 crit 4).
-    const badExclusion = await server.app.inject({
+    const badExclusion = await injectAs(server.app, TEST_OPERATOR, {
       method: "PATCH",
       url: `/api/specs/${specId}/analysis-exclusions`,
       payload: { analysisExclusions: ["nope"] },
@@ -308,7 +317,7 @@ describe("registration API integration (requires Postgres)", () => {
     // The sample provider spec's `issues` list op has no paging params, so
     // paginationRef is applicable but was NOT derived (no resource_binding_ref
     // row). Correcting it must INSERT the row — an UPDATE-only silently lost it.
-    const registration = await server.app.inject({
+    const registration = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps",
       payload: {
@@ -328,7 +337,7 @@ describe("registration API integration (requires Postgres)", () => {
     createdAppIds.push(registered.app.id);
     const specId = registered.specs[0]?.id ?? "";
 
-    const bindingsResponse = await server.app.inject({
+    const bindingsResponse = await injectAs(server.app, TEST_OPERATOR, {
       method: "GET",
       url: `/api/specs/${specId}/resource-bindings`,
     });
@@ -346,10 +355,9 @@ describe("registration API integration (requires Postgres)", () => {
     expect(paginationBefore?.value).toBeNull();
     const issuesBindingId = issues?.id ?? "";
 
-    const correction = await server.app.inject({
+    const correction = await injectAs(server.app, TEST_OPERATOR_ALICE, {
       method: "PATCH",
       url: `/api/resource-bindings/${issuesBindingId}`,
-      headers: { "x-operator-id": "upsert-operator" },
       payload: {
         refKind: "paginationRef",
         value: { kind: "parameter", operationId: "getIssue", parameter: "id" },
@@ -370,7 +378,7 @@ describe("registration API integration (requires Postgres)", () => {
       );
     expect(refRow).toBeDefined();
     expect(refRow?.value).toEqual({ kind: "parameter", operationId: "getIssue", parameter: "id" });
-    expect(refRow?.confirmedBy).toBe("upsert-operator");
+    expect(refRow?.confirmedBy).toBe(TEST_OPERATOR_ALICE.username);
     expect(refRow?.confirmedAt).not.toBeNull();
   });
 });

@@ -9,6 +9,10 @@ import type { ErrorResponse, ValidationIssue } from "@mediator/contracts";
  *
  * - `400` {@link BadRequestError} — request validation, a violated domain rule
  *   (e.g. `baseUrl` required for a PROVIDER spec), or an unparseable spec.
+ * - `401` {@link UnauthorizedError} — the request carries no valid authenticated
+ *   operator identity (OA-1).
+ * - `403` {@link ForbiddenError} — an authenticated `viewer` attempted a mutation
+ *   an `operator` alone may perform (OA-2).
  * - `404` {@link NotFoundError} — a referenced entity does not exist.
  *
  * No error surface ever carries credential material: `issues` are
@@ -55,5 +59,29 @@ export class NotFoundError extends HttpError {
   public constructor(message: string) {
     super(404, "Not Found", message);
     this.name = "NotFoundError";
+  }
+}
+
+/**
+ * A 401: the request reached the operator API without a valid authenticated
+ * identity (OA-1). Thrown by the authentication hook before any route handler
+ * runs, so no side effect occurs. Never carries credential material.
+ */
+export class UnauthorizedError extends HttpError {
+  public constructor(message = "Authentication is required.") {
+    super(401, "Unauthorized", message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+/**
+ * A 403: an authenticated principal lacks the role for the action — a `viewer`
+ * attempting a mutation reserved for `operator` (OA-2). Thrown by the role guard
+ * before the handler runs, so nothing is mutated.
+ */
+export class ForbiddenError extends HttpError {
+  public constructor(message = "This action requires the operator role.") {
+    super(403, "Forbidden", message);
+    this.name = "ForbiddenError";
   }
 }

@@ -6,6 +6,13 @@ import { ConfigValidationError, loadConfig } from "./index.js";
 const DEV_MASTER_KEY = Buffer.alloc(32, 7).toString("base64");
 
 /**
+ * A structurally-valid dummy scrypt hash: config only pattern-checks the shape
+ * (the auth provider does the real verification), so the base64 segments here
+ * are placeholders, never a real hash.
+ */
+const DUMMY_HASH = "scrypt$16384$8$1$64$c2FsdHNhbHQ=$aGFzaGhhc2h2YWx1ZQ==";
+
+/**
  * A minimal, fully-valid environment. Individual tests clone and mutate this so
  * each assertion isolates one variable. Values are dev-plausible but arbitrary.
  */
@@ -23,6 +30,7 @@ function baseEnv(): NodeJS.ProcessEnv {
     MAPPING_LLM_THINKING: "true",
     MAPPING_LLM_REQUEST_TIMEOUT_MS: "300000",
     MAPPING_LLM_MAX_RETRIES: "3",
+    OPERATOR_ACCOUNTS: `alice:operator:${DUMMY_HASH},bob:viewer:${DUMMY_HASH}`,
   };
 }
 
@@ -49,6 +57,11 @@ describe("loadConfig", () => {
     // The master key is decoded to its exact 32 bytes.
     expect(config.credentials.masterKey).toBeInstanceOf(Buffer);
     expect(config.credentials.masterKey).toStrictEqual(Buffer.alloc(32, 7));
+    // Operator accounts are parsed into typed { username, role, passwordHash }.
+    expect(config.auth.accounts).toEqual([
+      { username: "alice", role: "operator", passwordHash: DUMMY_HASH },
+      { username: "bob", role: "viewer", passwordHash: DUMMY_HASH },
+    ]);
   });
 
   it("returns a deeply-frozen config object", () => {
@@ -60,6 +73,63 @@ describe("loadConfig", () => {
     expect(Object.isFrozen(config.telemetry)).toBe(true);
     expect(Object.isFrozen(config.mappingLlm)).toBe(true);
     expect(Object.isFrozen(config.credentials)).toBe(true);
+    expect(Object.isFrozen(config.auth)).toBe(true);
+    expect(Object.isFrozen(config.auth.accounts)).toBe(true);
+  });
+
+  describe("OPERATOR_ACCOUNTS", () => {
+    it("throws a helpful error when it is missing (no unauthenticated mode)", () => {
+      const env = baseEnv();
+      delete env.OPERATOR_ACCOUNTS;
+
+      expect(() => loadConfig(env)).toThrow(ConfigValidationError);
+      expect(() => loadConfig(env)).toThrow(/OPERATOR_ACCOUNTS/);
+    });
+
+    it("rejects an entry with an invalid role", () => {
+      const env = { ...baseEnv(), OPERATOR_ACCOUNTS: `alice:admin:${DUMMY_HASH}` };
+
+      expect(() => loadConfig(env)).toThrow(/OPERATOR_ACCOUNTS/);
+      expect(() => loadConfig(env)).toThrow(/role/);
+    });
+
+    it("rejects a plaintext password in place of a salted hash", () => {
+      const env = { ...baseEnv(), OPERATOR_ACCOUNTS: "alice:operator:hunter2" };
+
+      expect(() => loadConfig(env)).toThrow(/OPERATOR_ACCOUNTS/);
+      expect(() => loadConfig(env)).toThrow(/scrypt hash/);
+    });
+
+    it("rejects duplicate usernames", () => {
+      const env = {
+        ...baseEnv(),
+        OPERATOR_ACCOUNTS: `alice:operator:${DUMMY_HASH},alice:viewer:${DUMMY_HASH}`,
+      };
+
+      expect(() => loadConfig(env)).toThrow(/duplicate/);
+    });
+
+    it("rejects an empty account list", () => {
+      const env = { ...baseEnv(), OPERATOR_ACCOUNTS: "   " };
+
+      expect(() => loadConfig(env)).toThrow(/OPERATOR_ACCOUNTS/);
+    });
+
+    it("never echoes an account entry into the validation message", () => {
+      // A malformed entry (no role/hash) must not leak whatever was typed there.
+      const secretish = "topsecretmistake";
+      const env = { ...baseEnv(), OPERATOR_ACCOUNTS: secretish };
+
+      let message = "";
+      try {
+        loadConfig(env);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toContain("OPERATOR_ACCOUNTS");
+      expect(message).not.toContain(secretish);
+    });
   });
 
   describe("HTTP_PORT", () => {
