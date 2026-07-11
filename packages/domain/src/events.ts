@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { apiSpecRoleSchema } from "./enums.js";
+import { mappingVariantSchema } from "./mapping-enums.js";
 
 /**
  * Domain events carried by the Event Bus.
@@ -14,6 +15,9 @@ import { apiSpecRoleSchema } from "./enums.js";
 
 /** The `type` discriminant value for the {@link SpecIngested} event. */
 export const SPEC_INGESTED_EVENT_TYPE = "SpecIngested";
+
+/** The `type` discriminant value for the {@link MappingApproved} event. */
+export const MAPPING_APPROVED_EVENT_TYPE = "MappingApproved";
 
 /**
  * The base envelope every domain event fits into. `type` is a plain string here;
@@ -42,3 +46,29 @@ export const specIngestedSchema = domainEventEnvelopeSchema.extend({
   role: apiSpecRoleSchema,
 });
 export type SpecIngested = z.infer<typeof specIngestedSchema>;
+
+/**
+ * `MappingApproved` — emitted by the Approval Service once an `ApprovedMapping`
+ * is created or updated; it triggers `SyncRule`/`AdapterBinding` instantiation
+ * and the graph update (`docs/glossary.md` `MappingApproved`, requirement AM-5).
+ * The same envelope pattern as {@link SpecIngested}.
+ *
+ * The payload identifies the approved mapping **by id** and carries the `variant`
+ * needed to route instantiation (peer-peer → `SyncRule`s, consumer-provider →
+ * `AdapterBinding`s). Everything else — the full `ApprovedMapping` and its
+ * children — the consumer re-loads from persisted state, so the event stays
+ * small and re-derivable (the `SpecIngested` convention). The shape is
+ * **identical** for a first approval and a later incremental approval of the same
+ * mapping; the consumer's idempotent upsert absorbs the difference (AM-5
+ * criterion 4).
+ *
+ * Deliberately **no credential material and no reference that resolves to any**
+ * (the CR-2 invariant carried into Phase 3): every field here is an identifier or
+ * an enum.
+ */
+export const mappingApprovedSchema = domainEventEnvelopeSchema.extend({
+  type: z.literal(MAPPING_APPROVED_EVENT_TYPE),
+  approvedMappingId: z.string(),
+  variant: mappingVariantSchema,
+});
+export type MappingApproved = z.infer<typeof mappingApprovedSchema>;

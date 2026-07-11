@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   domainEventEnvelopeSchema,
+  MAPPING_APPROVED_EVENT_TYPE,
+  type MappingApproved,
+  mappingApprovedSchema,
   SPEC_INGESTED_EVENT_TYPE,
   type SpecIngested,
   specIngestedSchema,
@@ -50,5 +53,62 @@ describe("SpecIngested event", () => {
     const withoutSpecId: Partial<SpecIngested> = { ...baseEvent() };
     delete withoutSpecId.apiSpecId;
     expect(specIngestedSchema.safeParse(withoutSpecId).success).toBe(false);
+  });
+});
+
+function approvedEvent(): MappingApproved {
+  return {
+    id: "evt-2",
+    type: MAPPING_APPROVED_EVENT_TYPE,
+    occurredAt: new Date("2026-07-11T00:00:00.000Z"),
+    approvedMappingId: "am-1",
+    variant: "peer-peer",
+  };
+}
+
+describe("MappingApproved event", () => {
+  it("uses the glossary-verbatim discriminant value", () => {
+    expect(MAPPING_APPROVED_EVENT_TYPE).toBe("MappingApproved");
+  });
+
+  it("accepts a valid event and fits the base envelope", () => {
+    expect(mappingApprovedSchema.safeParse(approvedEvent()).success).toBe(true);
+    expect(domainEventEnvelopeSchema.safeParse(approvedEvent()).success).toBe(true);
+  });
+
+  it("carries only the mapping id and variant — no credential-bearing fields", () => {
+    const parsed = mappingApprovedSchema.parse(approvedEvent());
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["approvedMappingId", "id", "occurredAt", "type", "variant"].sort(),
+    );
+  });
+
+  it("has an identical shape for a first and an incremental approval", () => {
+    // A consumer-provider incremental approval carries the same keys as a first
+    // peer-peer approval — the consumer's idempotent upsert absorbs the difference.
+    const first = mappingApprovedSchema.parse(approvedEvent());
+    const incremental = mappingApprovedSchema.parse({
+      ...approvedEvent(),
+      variant: "consumer-provider",
+    });
+    expect(Object.keys(incremental).sort()).toEqual(Object.keys(first).sort());
+  });
+
+  it("rejects a wrong type discriminant", () => {
+    expect(
+      mappingApprovedSchema.safeParse({ ...approvedEvent(), type: "SpecIngested" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an invalid variant", () => {
+    expect(
+      mappingApprovedSchema.safeParse({ ...approvedEvent(), variant: "peer_peer" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a missing approvedMappingId", () => {
+    const withoutId: Partial<MappingApproved> = { ...approvedEvent() };
+    delete withoutId.approvedMappingId;
+    expect(mappingApprovedSchema.safeParse(withoutId).success).toBe(false);
   });
 });
