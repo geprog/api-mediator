@@ -27,6 +27,7 @@ export {
 export {
   buildGeneratedBy,
   type LLMMappingProvider,
+  type LlmUsage,
   type MappingPromptContext,
   type PriorMappingFeedback,
   type ResourceSummary,

@@ -31,11 +31,39 @@ export interface LLMMappingProvider {
   /** The model identifier recorded into `generatedBy.model` (LP-4). */
   readonly model: string;
 
+  /**
+   * Per-call usage/timing reported by the **most recent** provider call, or
+   * `undefined` when the last call reported none (a transport failure that never
+   * reached the model). The token-usage seam — deliberately NOT a change to either
+   * method's return type: the Mapping Engine reads it immediately after awaiting
+   * each call to thread `promptEvalCount`/`evalCount` into its per-call metrics
+   * record (the next slice emits those as OTel). Because it is overwritten by every
+   * call, it is only meaningful when calls are **not interleaved** — the engine
+   * drives a provider instance sequentially, which is the only supported use. A
+   * validation-failing attempt still reports usage (the model produced tokens); a
+   * transport-failing one resets it to `undefined`.
+   */
+  readonly lastUsage: LlmUsage | undefined;
+
   /** Stage 1: shortlist plausibly-corresponding resource pairs (one call). */
   shortlistResourcePairs(context: ShortlistPromptContext): Promise<ResourceShortlist>;
 
   /** Stage 2: detail-analyze one shortlisted resource pair (one call). */
   generateMappingProposal(context: MappingPromptContext): Promise<MappingSuggestionSet>;
+}
+
+/**
+ * Per-call usage/timing a provider surfaces through {@link LLMMappingProvider.lastUsage}.
+ * `promptEvalCount`/`evalCount` are the prompt/response token counts (from the
+ * Ollama response envelope's `prompt_eval_count`/`eval_count`); `totalDurationMs`
+ * is the model-reported wall time (`total_duration`, nanoseconds → ms) when the
+ * provider reports one. The `FakeProvider` reports synthetic zero counts and no
+ * duration, so unit tests stay deterministic and free of model timing.
+ */
+export interface LlmUsage {
+  readonly promptEvalCount: number;
+  readonly evalCount: number;
+  readonly totalDurationMs?: number;
 }
 
 // ── Stage-1 context: resource-level summaries only ───────────────────────────
