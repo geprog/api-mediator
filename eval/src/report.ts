@@ -121,6 +121,11 @@ export interface Stage2PeerPairResult {
   readonly kind: "peer-peer";
   readonly source: AlignedResource;
   readonly target: AlignedResource;
+  /** Whether this resource pair's aligned group-pair appears in the shortlist (a stage-1 outcome). */
+  readonly shortlisted: boolean;
+  /** Whether it was shortlisted but its stage-2 detail call `analysisFailed` (a real stage-2 failure). */
+  readonly detailFailed: boolean;
+  /** Whether stage-2 detail scoring ran for this pair — true ONLY when shortlisted AND detail-analyzed. */
   readonly analyzed: boolean;
   readonly crud: readonly CrudResult[];
   readonly fieldPrecision: RatioMetric;
@@ -142,6 +147,11 @@ export interface Stage2ConsumerPairResult {
   readonly source: AlignedResource;
   readonly targetApp: string;
   readonly targetResourceRef: string | null;
+  /** Whether this consumer↔provider resource pair appears in the shortlist (a stage-1 outcome). */
+  readonly shortlisted: boolean;
+  /** Whether it was shortlisted but its stage-2 detail call `analysisFailed` (a real stage-2 failure). */
+  readonly detailFailed: boolean;
+  /** Whether stage-2 detail scoring ran — true ONLY when shortlisted AND detail-analyzed. */
   readonly analyzed: boolean;
   /** Request-phase field-pair recall (backend request field synthesized/renamed from the consumer field). */
   readonly requestPhase: RatioMetric;
@@ -159,7 +169,17 @@ export interface Stage2ConsumerPairResult {
 export type Stage2PairResult = Stage2PeerPairResult | Stage2ConsumerPairResult;
 
 export interface Stage2Report {
-  /** Operation CRUD-classification accuracy across every peer-peer pair's actions. */
+  /**
+   * Stage-2 aggregates are **conditional on shortlist**: only ground-truth pairs
+   * that were shortlisted AND detail-analyzed contribute. A non-shortlisted pair is
+   * a stage-1 recall miss (counted in stage-1 recall, excluded here); a shortlisted
+   * pair whose detail call failed is counted in {@link detailFailures}, not folded
+   * into these denominators as a forced zero.
+   */
+  readonly analyzedPairCount: number;
+  /** Ground-truth pairs that were shortlisted but whose stage-2 detail call `analysisFailed`. */
+  readonly detailFailures: number;
+  /** Operation CRUD-classification accuracy across every shortlisted+analyzed peer-peer pair's actions. */
   readonly crud: RatioMetric;
   readonly fieldPrecision: RatioMetric;
   readonly fieldRecall: RatioMetric;
@@ -246,7 +266,10 @@ export function formatSummary(report: ScenarioReport): string {
     lines.push(`      FAIL [${neg.verdict}] ${neg.source} ↔ ${neg.target ?? "∅"} — ${neg.detail}`);
   }
   lines.push("");
-  lines.push("  Stage 2 (detail)");
+  lines.push("  Stage 2 (detail — conditional on shortlist)");
+  lines.push(
+    `    analyzed pairs: ${String(s2.analyzedPairCount)} · detail failures: ${String(s2.detailFailures)}`,
+  );
   lines.push(
     `    CRUD ${pct(s2.crud)} · field precision ${pct(s2.fieldPrecision)} · field recall ${pct(s2.fieldRecall)}`,
   );

@@ -30,6 +30,14 @@ import type { LoadedSpec } from "./scenario-loader.js";
  * reported as unresolved rather than crashing).
  */
 
+/**
+ * The separator for composite map keys built from two identity components
+ * (`resourceRef` + `operationId`, or two spec ids). NUL is used because it cannot
+ * occur in any of those identifiers, so the composite key stays injective — no two
+ * distinct component pairs can collide.
+ */
+export const KEY_SEP = "\u0000";
+
 // ── Operation identity ───────────────────────────────────────────────────────
 
 /** The file-path-independent identity key of a ground-truth operation ref. */
@@ -120,13 +128,13 @@ export function buildOperationRefLookup(
   const index = new Map<string, GtOperationRef>();
   for (const group of spec.parsedIR) {
     for (const op of group.operations) {
-      const key = `${group.resourceRef}\u0000${op.operationId}`;
+      const key = `${group.resourceRef}${KEY_SEP}${op.operationId}`;
       if (!index.has(key)) {
         index.set(key, { method: op.method.toUpperCase(), path: op.path });
       }
     }
   }
-  return (resourceRef, operationId) => index.get(`${resourceRef}\u0000${operationId}`);
+  return (resourceRef, operationId) => index.get(`${resourceRef}${KEY_SEP}${operationId}`);
 }
 
 // ── Field / parameter identity ───────────────────────────────────────────────

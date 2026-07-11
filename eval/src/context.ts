@@ -6,7 +6,7 @@ import type {
   ShortlistResultPair,
 } from "@mediator/domain";
 
-import { buildOperationRefLookup } from "./align.js";
+import { buildOperationRefLookup, KEY_SEP } from "./align.js";
 import type { HarnessConfig } from "./config.js";
 import type { GroundTruth, GtOperationRef } from "./ground-truth.js";
 import type { LoadedSpec } from "./scenario-loader.js";
@@ -102,7 +102,7 @@ export class ScoringContext {
     for (const { proposal } of this.input.proposals) {
       const [a, b] = [proposal.sourceSpecId, proposal.targetSpecId].sort();
       if (a === undefined || b === undefined) continue;
-      const key = `${a}\u0000${b}`;
+      const key = `${a}${KEY_SEP}${b}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const forward = this.proposalFor(a, b);
@@ -138,7 +138,7 @@ export class ScoringContext {
 }
 
 function directionKey(sourceSpecId: string, targetSpecId: string): string {
-  return `${sourceSpecId}\u0000${targetSpecId}`;
+  return `${sourceSpecId}${KEY_SEP}${targetSpecId}`;
 }
 
 // ── Item accessors (over the discriminated ref target) ───────────────────────

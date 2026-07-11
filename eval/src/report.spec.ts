@@ -11,7 +11,7 @@ describe("formatSummary", () => {
     expect(summary).toContain("Detection eval — fixture-peer");
     expect(summary).toContain("provider: fixture / fixture-model");
     expect(summary).toContain("Stage 1 (shortlist)");
-    expect(summary).toContain("Stage 2 (detail)");
+    expect(summary).toContain("Stage 2 (detail");
     expect(summary).toContain("recall");
     // The confidently-proposed negative surfaces as an explicit failure line.
     expect(summary).toContain("FAIL [incorrect-but-tempting]");

@@ -182,10 +182,22 @@ function scoreIdentity(gt: GtPeerPair, fields: readonly ProducedField[]): Identi
 
 function scorePeerPair(ctx: ScoringContext, gt: GtPeerPair): Stage2PeerPairResult {
   const a = alignPeerPair(ctx, gt);
-  const emptyResult: Stage2PeerPairResult = {
+  const source = {
+    app: gt.sourceApp,
+    resource: gt.sourceResource,
+    resourceRef: a.sourceRef ?? null,
+  };
+  const target = {
+    app: gt.targetApp,
+    resource: gt.targetResource,
+    resourceRef: a.targetRef ?? null,
+  };
+  const notScored = (shortlisted: boolean, detailFailed: boolean): Stage2PeerPairResult => ({
     kind: "peer-peer",
-    source: { app: gt.sourceApp, resource: gt.sourceResource, resourceRef: a.sourceRef ?? null },
-    target: { app: gt.targetApp, resource: gt.targetResource, resourceRef: a.targetRef ?? null },
+    source,
+    target,
+    shortlisted,
+    detailFailed,
     analyzed: false,
     crud: [],
     fieldPrecision: ratioMetric(0, 0),
@@ -193,16 +205,38 @@ function scorePeerPair(ctx: ScoringContext, gt: GtPeerPair): Stage2PeerPairResul
     identity: scoreIdentity(gt, []),
     transforms: [],
     falsePositiveFields: [],
-  };
+  });
 
   if (!a.resolved || !a.sourceSpec || !a.targetSpec || !a.sourceRef || !a.targetRef) {
-    return emptyResult;
+    return notScored(false, false); // unresolved — not present in the detection input
   }
-  const proposal = ctx.proposalFor(a.sourceSpec.id, a.targetSpec.id);
-  if (proposal === undefined || proposal.proposal.status === "failed") return emptyResult;
+  const sourceSpecId = a.sourceSpec.id;
+  const targetSpecId = a.targetSpec.id;
+  const sourceRef = a.sourceRef;
+  const targetRef = a.targetRef;
+
+  const proposal = ctx.proposalFor(sourceSpecId, targetSpecId);
+  const shortlist = proposal?.proposal.shortlistResult ?? null;
+  if (proposal === undefined || shortlist === null) {
+    // No directional proposal, or the stage-1 shortlist failed for this spec pair.
+    return notScored(false, false);
+  }
+  // Gate on THIS resource pair being shortlisted (EH-3 "given a shortlisted pair").
+  // A non-shortlisted ground-truth pair is a stage-1 recall miss, not a stage-2 zero.
+  const candidate = shortlist.candidatePairs.find(
+    (p) =>
+      (p.sourceResource === sourceRef && p.targetResource === targetRef) ||
+      (p.sourceResource === targetRef && p.targetResource === sourceRef),
+  );
+  if (candidate === undefined) {
+    return notScored(false, false); // resolved but not shortlisted → stage-1 recall miss
+  }
+  if (candidate.analysisFailed) {
+    return notScored(true, true); // shortlisted, but the stage-2 detail call failed
+  }
 
   const items = proposal.items;
-  const fields = producedFields(items, a.sourceRef, a.targetRef);
+  const fields = producedFields(items, sourceRef, targetRef);
   const threshold = ctx.input.config.confidenceThreshold;
 
   // Field precision / recall (by root-name identity).
@@ -258,10 +292,12 @@ function scorePeerPair(ctx: ScoringContext, gt: GtPeerPair): Stage2PeerPairResul
 
   return {
     kind: "peer-peer",
-    source: { app: gt.sourceApp, resource: gt.sourceResource, resourceRef: a.sourceRef },
-    target: { app: gt.targetApp, resource: gt.targetResource, resourceRef: a.targetRef },
+    source,
+    target,
+    shortlisted: true,
+    detailFailed: false,
     analyzed: true,
-    crud: scoreCrud(ctx, gt, a.sourceSpec.id, a.targetSpec.id, a.sourceRef, a.targetRef, items),
+    crud: scoreCrud(ctx, gt, sourceSpecId, targetSpecId, sourceRef, targetRef, items),
     fieldPrecision: ratioMetric(precisionMatched, fields.length),
     fieldRecall: ratioMetric(recallMatched, gtKeys.size),
     identity: scoreIdentity(gt, fields),
@@ -331,23 +367,32 @@ function scoreConsumerTarget(
   const expectations = consumerExpectations(gt);
   const constantSynthesis =
     expectations.constantTarget === null ? null : { expected: true, detected: false };
+  const notScored = (shortlisted: boolean, detailFailed: boolean): Stage2ConsumerPairResult => ({
+    ...base,
+    shortlisted,
+    detailFailed,
+    analyzed: false,
+    requestPhase: ratioMetric(0, 0),
+    responsePhase: ratioMetric(0, 0),
+    phaseCorrectness: ratioMetric(0, 0),
+    parameterCoverage: ratioMetric(0, 0),
+    constantSynthesis,
+  });
 
-  if (
-    sourceRef === undefined ||
-    target.targetRef === undefined ||
-    proposal === undefined ||
-    proposal.proposal.status === "failed"
-  ) {
-    return {
-      ...base,
-      analyzed: false,
-      requestPhase: ratioMetric(0, expectations.request.size),
-      responsePhase: ratioMetric(0, expectations.response.size),
-      phaseCorrectness: ratioMetric(0, 0),
-      parameterCoverage: ratioMetric(0, expectations.parameters.size),
-      constantSynthesis,
-    };
+  if (sourceRef === undefined || target.targetRef === undefined || proposal === undefined) {
+    return notScored(false, false);
   }
+  const shortlist = proposal.proposal.shortlistResult;
+  if (shortlist === null) return notScored(false, false); // stage-1 shortlist failed
+  const targetRef = target.targetRef;
+  // Gate stage-2 detail scoring on THIS consumer↔provider pair being shortlisted.
+  const candidate = shortlist.candidatePairs.find(
+    (p) =>
+      (p.sourceResource === sourceRef && p.targetResource === targetRef) ||
+      (p.sourceResource === targetRef && p.targetResource === sourceRef),
+  );
+  if (candidate === undefined) return notScored(false, false); // stage-1 recall miss
+  if (candidate.analysisFailed) return notScored(true, true); // stage-2 detail failure
 
   const fields = producedFields(proposal.items, sourceRef, target.targetRef);
   const requestFields = fields.filter((f) => f.phase === "request");
@@ -397,6 +442,8 @@ function scoreConsumerTarget(
 
   return {
     ...base,
+    shortlisted: true,
+    detailFailed: false,
     analyzed: true,
     requestPhase: ratioMetric(requestRecall, expectations.request.size),
     responsePhase: ratioMetric(responseRecall, expectations.response.size),
@@ -451,29 +498,38 @@ export function scoreStage2(ctx: ScoringContext): Stage2Report {
     (p): p is Stage2ConsumerPairResult => p.kind === "consumer-provider",
   );
 
+  // Stage-2 aggregates are conditional on shortlist: only shortlisted + detail-
+  // analyzed pairs contribute. Non-shortlisted pairs are stage-1 recall misses
+  // (counted there); a shortlisted-but-detail-failed pair is a separate count.
+  const analyzedPeers = peerPairs.filter((p) => p.analyzed);
+  const analyzedConsumers = consumerPairs.filter((p) => p.analyzed);
+  const detailFailures = pairs.filter((p) => p.detailFailed).length;
+
   const crud = sumRatios(
-    peerPairs.flatMap((p) => p.crud).map((c) => ratioMetric(c.hit ? 1 : 0, 1)),
+    analyzedPeers.flatMap((p) => p.crud).map((c) => ratioMetric(c.hit ? 1 : 0, 1)),
   );
-  const fieldPrecision = sumRatios(peerPairs.map((p) => p.fieldPrecision));
-  const fieldRecall = sumRatios(peerPairs.map((p) => p.fieldRecall));
-  const identityKeyed = peerPairs.filter((p) => p.identity.expectedSource !== null);
+  const fieldPrecision = sumRatios(analyzedPeers.map((p) => p.fieldPrecision));
+  const fieldRecall = sumRatios(analyzedPeers.map((p) => p.fieldRecall));
+  const identityKeyed = analyzedPeers.filter((p) => p.identity.expectedSource !== null);
   const identityHitRate = ratioMetric(
     identityKeyed.filter((p) => p.identity.hit).length,
     identityKeyed.length,
   );
   const transformAgreement = sumRatios(
-    peerPairs.flatMap((p) => p.transforms).map((t) => ratioMetric(t.agrees ? 1 : 0, 1)),
+    analyzedPeers.flatMap((p) => p.transforms).map((t) => ratioMetric(t.agrees ? 1 : 0, 1)),
   );
 
   return {
+    analyzedPairCount: analyzedPeers.length + analyzedConsumers.length,
+    detailFailures,
     crud,
     fieldPrecision,
     fieldRecall,
     identityHitRate,
     transformAgreement,
-    phaseCorrectness: sumRatios(consumerPairs.map((p) => p.phaseCorrectness)),
-    parameterCoverage: sumRatios(consumerPairs.map((p) => p.parameterCoverage)),
-    falsePositiveFields: peerPairs.flatMap((p) => p.falsePositiveFields),
+    phaseCorrectness: sumRatios(analyzedConsumers.map((p) => p.phaseCorrectness)),
+    parameterCoverage: sumRatios(analyzedConsumers.map((p) => p.parameterCoverage)),
+    falsePositiveFields: analyzedPeers.flatMap((p) => p.falsePositiveFields),
     pairs,
   };
 }

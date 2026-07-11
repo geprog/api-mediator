@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { consumerScoringInput, FIXTURE_GENERATED_BY, peerScoringInput } from "./fixtures.js";
+import {
+  consumerScoringInput,
+  FIXTURE_GENERATED_BY,
+  peerScopingInput,
+  peerScoringInput,
+} from "./fixtures.js";
 import type { Stage2ConsumerPairResult, Stage2PeerPairResult } from "./report.js";
 import { scoreScenario } from "./scoring.js";
 
@@ -62,6 +67,40 @@ describe("scoreScenario — peer-peer (EH-2/EH-3)", () => {
   it("health signal: recall above the floor is not flagged", () => {
     expect(report.health.shortlistRecall).toBe(1);
     expect(report.health.stage1RecallTooLow).toBe(false);
+  });
+});
+
+describe("scoreScenario — stage-2 scoping is conditional on shortlist (EH-3)", () => {
+  const report = scoreScenario(peerScopingInput());
+  const pairs = report.stage2.pairs.filter(
+    (p): p is Stage2PeerPairResult => p.kind === "peer-peer",
+  );
+  const widgets = pairs.find((p) => p.source.resource === "widgets");
+  const gizmos = pairs.find((p) => p.source.resource === "gizmos");
+  const gears = pairs.find((p) => p.source.resource === "gears");
+
+  it("scores only the shortlisted + detail-analyzed pair", () => {
+    expect(widgets?.shortlisted).toBe(true);
+    expect(widgets?.analyzed).toBe(true);
+    expect(report.stage2.analyzedPairCount).toBe(1);
+  });
+
+  it("excludes a non-shortlisted GT pair from stage-2 aggregates (stage-1 miss, not a forced zero)", () => {
+    expect(gizmos?.shortlisted).toBe(false);
+    expect(gizmos?.detailFailed).toBe(false);
+    expect(gizmos?.analyzed).toBe(false);
+    // Aggregates reflect ONLY widgets — gizmos/gears do not drag the denominators.
+    expect(report.stage2.crud).toEqual({ matched: 2, total: 2, ratio: 1 });
+    expect(report.stage2.fieldRecall).toEqual({ matched: 2, total: 2, ratio: 1 });
+    expect(report.stage2.fieldPrecision).toEqual({ matched: 2, total: 2, ratio: 1 });
+    expect(report.stage2.identityHitRate).toEqual({ matched: 1, total: 1, ratio: 1 });
+  });
+
+  it("counts a shortlisted-but-detail-failed pair as a detail failure, not a stage-1 miss", () => {
+    expect(gears?.shortlisted).toBe(true);
+    expect(gears?.detailFailed).toBe(true);
+    expect(gears?.analyzed).toBe(false);
+    expect(report.stage2.detailFailures).toBe(1);
   });
 });
 

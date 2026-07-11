@@ -183,8 +183,9 @@ function candidate(
   sourceResource: string,
   targetResource: string,
   confidence: number,
+  analysisFailed = false,
 ): ShortlistResultPair {
-  return { sourceResource, targetResource, confidence, rationale: "", analysisFailed: false };
+  return { sourceResource, targetResource, confidence, rationale: "", analysisFailed };
 }
 
 // ── Peer-peer fixture ────────────────────────────────────────────────────────
@@ -324,6 +325,87 @@ export function consumerScoringInput(): ScoringInput {
     groundTruth: parseGroundTruth(CONSUMER_GROUND_TRUTH),
     specs: [consumer, provider],
     proposals: [forward],
+    generatedBy: FIXTURE_GENERATED_BY,
+    config: FIXTURE_CONFIG,
+  };
+}
+
+// ── Stage-2 scoping fixture (shortlist-conditional stage-2 metrics) ───────────
+
+const SCOPING_GROUND_TRUTH = `
+meta:
+  scenario: fixture-scoping
+pairs:
+  - source: { app: a, resource: widgets }
+    target: { app: b, resource: gadgets }
+    kind: peer-peer
+    operations:
+      list: { source: GET /widgets, target: GET /gadgets }
+      create: { source: POST /widgets, target: POST /gadgets }
+    identityKey: { source: code, target: code2 }
+    fields:
+      - { source: name, target: label, transform: rename }
+      - { source: code, target: code2, transform: direct }
+  - source: { app: a, resource: gizmos }
+    target: { app: b, resource: doohickeys }
+    kind: peer-peer
+    operations:
+      list: { source: GET /gizmos, target: GET /doohickeys }
+    fields:
+      - { source: foo, target: bar, transform: rename }
+  - source: { app: a, resource: gears }
+    target: { app: b, resource: cogs }
+    kind: peer-peer
+    operations:
+      list: { source: GET /gears, target: GET /cogs }
+    fields:
+      - { source: baz, target: qux, transform: rename }
+`;
+
+/**
+ * A scenario with three genuine ground-truth pairs but only ONE fully detected:
+ * `widgets↔gadgets` is shortlisted + detail-analyzed; `gizmos↔doohickeys` is
+ * resolvable but NOT shortlisted (a stage-1 recall miss); `gears↔cogs` is
+ * shortlisted but its detail call `analysisFailed` (a stage-2 detail failure).
+ * Used to assert stage-2 aggregates are conditional on shortlist — the two
+ * undetected pairs must NOT drag the stage-2 precision/recall/CRUD denominators.
+ */
+export function peerScopingInput(): ScoringInput {
+  itemCounter = 0;
+  const specA = spec("spec-a", "a", "PROVIDER", [
+    group("widget", [
+      irOp("listWidgets", "get", "/widgets"),
+      irOp("createWidgets", "post", "/widgets"),
+    ]),
+    group("gizmo", [irOp("listGizmos", "get", "/gizmos")]),
+    group("gear", [irOp("listGears", "get", "/gears")]),
+  ]);
+  const specB = spec("spec-b", "b", "PROVIDER", [
+    group("gadget", [
+      irOp("listGadgets", "get", "/gadgets"),
+      irOp("createGadgets", "post", "/gadgets"),
+    ]),
+    group("doohickey", [irOp("listDoohickeys", "get", "/doohickeys")]),
+    group("cog", [irOp("listCogs", "get", "/cogs")]),
+  ]);
+
+  // widgets↔gadgets shortlisted+analyzed; gears↔cogs shortlisted but detail-failed;
+  // gizmos↔doohickeys deliberately absent from the shortlist.
+  const candidatePairs = [candidate("widget", "gadget", 0.9), candidate("gear", "cog", 0.5, true)];
+  const items = [
+    operationItem("widget", "gadget", "listWidgets", "listGadgets", 0.9),
+    operationItem("widget", "gadget", "createWidgets", "createGadgets", 0.85),
+    fieldItem("widget", "gadget", "name", "label", "rename", 0.9),
+    fieldItem("widget", "gadget", "code", "code2", "rename", 0.95, { identity: true }),
+  ];
+  const forward = proposal("s-ab", "spec-a", "spec-b", candidatePairs, items);
+  const backward = proposal("s-ba", "spec-b", "spec-a", candidatePairs, []);
+
+  return {
+    scenario: "fixture-scoping",
+    groundTruth: parseGroundTruth(SCOPING_GROUND_TRUTH),
+    specs: [specA, specB],
+    proposals: [forward, backward],
     generatedBy: FIXTURE_GENERATED_BY,
     config: FIXTURE_CONFIG,
   };

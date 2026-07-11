@@ -34,6 +34,11 @@ function buildNotes(input: ScoringInput): string[] {
       "granularity.",
     "Shortlist recall is measured over ground-truth pairs whose resources resolve to the detection " +
       "input; full-spec-only pairs (trimmed away) are reported as unresolved, not recall misses.",
+    "Stage-2 metrics are conditional on shortlist: only ground-truth pairs that were shortlisted AND " +
+      "detail-analyzed contribute to the stage-2 aggregates. A non-shortlisted pair is a stage-1 recall " +
+      "miss (counted in stage-1 recall, excluded from stage-2 denominators); a shortlisted pair whose " +
+      "detail call failed is counted separately as detailFailures. This keeps stage-1 recall and " +
+      "stage-2 quality separable rather than conflated into an end-to-end score.",
     `Scored against provider ${input.generatedBy.providerId}/${input.generatedBy.model} ` +
       `prompt ${input.generatedBy.promptVersion}; thresholds are harness config, never a gate.`,
   ];
