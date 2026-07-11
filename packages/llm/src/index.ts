@@ -61,6 +61,21 @@ export {
 } from "./ollama-provider.js";
 
 export {
+  AnthropicConfigError,
+  AnthropicProvider,
+  createAnthropicSdkClient,
+  type AnthropicContentBlock,
+  type AnthropicMessagesClient,
+  type AnthropicOtherBlock,
+  type AnthropicProviderOptions,
+  type AnthropicResponse,
+  type AnthropicToolDef,
+  type AnthropicToolRequest,
+  type AnthropicToolUseBlock,
+  type AnthropicUsage,
+} from "./anthropic-provider.js";
+
+export {
   FakeProvider,
   FakeProviderScriptError,
   type FakeProviderScript,

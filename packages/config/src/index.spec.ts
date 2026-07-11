@@ -214,6 +214,25 @@ describe("loadConfig", () => {
 
       expect(() => loadConfig(env)).toThrow(/MAPPING_LLM_MAX_RETRIES/);
     });
+
+    it("carries ANTHROPIC_API_KEY onto mappingLlm when set", () => {
+      const config = loadConfig({ ...baseEnv(), ANTHROPIC_API_KEY: "sk-ant-test" });
+
+      expect(config.mappingLlm.anthropicApiKey).toBe("sk-ant-test");
+    });
+
+    it("omits anthropicApiKey (rather than setting undefined) when unset", () => {
+      const config = loadConfig(baseEnv());
+
+      expect(config.mappingLlm.anthropicApiKey).toBeUndefined();
+      expect("anthropicApiKey" in config.mappingLlm).toBe(false);
+    });
+
+    it("rejects an empty ANTHROPIC_API_KEY", () => {
+      const env = { ...baseEnv(), ANTHROPIC_API_KEY: "" };
+
+      expect(() => loadConfig(env)).toThrow(/ANTHROPIC_API_KEY/);
+    });
   });
 
   describe("defaults", () => {

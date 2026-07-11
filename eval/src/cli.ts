@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "@mediator/config";
-import { type LLMMappingProvider, OllamaProvider, PROMPT_VERSION } from "@mediator/llm";
+import {
+  AnthropicProvider,
+  type LLMMappingProvider,
+  OllamaProvider,
+  PROMPT_VERSION,
+} from "@mediator/llm";
 
 import { DEFAULT_HARNESS_CONFIG } from "./config.js";
 import { buildFakeProvider } from "./fake-script.js";
@@ -19,23 +24,26 @@ import { runScenario } from "./runner.js";
  * slow). The deterministic scoring is unit-tested separately.
  *
  * Usage:
- *   pnpm --filter @mediator/eval run eval -- --scenario <name> [--provider ollama|fake]
+ *   pnpm --filter @mediator/eval run eval -- --scenario <name> [--provider ollama|anthropic|fake]
  *
- * `--provider ollama` (default) reads `config.mappingLlm` (fail-fast on a bad env);
- * `--provider fake` uses a scripted `FakeProvider` and needs no LLM/DB env at all.
+ * `--provider ollama` (default) and `--provider anthropic` both read
+ * `config.mappingLlm` (fail-fast on a bad env), so the model and provider identity
+ * come from `MAPPING_LLM_MODEL` / the env — set `MAPPING_LLM_MODEL=claude-sonnet-5`
+ * and `ANTHROPIC_API_KEY=…` for a Claude run. `--provider fake` uses a scripted
+ * `FakeProvider` and needs no LLM/DB env at all.
  */
 
 interface CliArgs {
   readonly scenario: string;
-  readonly provider: "ollama" | "fake";
+  readonly provider: "ollama" | "anthropic" | "fake";
 }
 
 const USAGE =
-  "Usage: pnpm --filter @mediator/eval run eval -- --scenario <name> [--provider ollama|fake]";
+  "Usage: pnpm --filter @mediator/eval run eval -- --scenario <name> [--provider ollama|anthropic|fake]";
 
 function parseArgs(argv: readonly string[]): CliArgs {
   let scenario: string | undefined;
-  let provider: "ollama" | "fake" = "ollama";
+  let provider: CliArgs["provider"] = "ollama";
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--scenario" || arg === "-s") {
@@ -43,8 +51,10 @@ function parseArgs(argv: readonly string[]): CliArgs {
       i += 1;
     } else if (arg === "--provider" || arg === "-p") {
       const value = argv[i + 1];
-      if (value !== "ollama" && value !== "fake") {
-        throw new Error(`--provider must be "ollama" or "fake" (got ${value ?? "nothing"})`);
+      if (value !== "ollama" && value !== "anthropic" && value !== "fake") {
+        throw new Error(
+          `--provider must be "ollama", "anthropic", or "fake" (got ${value ?? "nothing"})`,
+        );
       }
       provider = value;
       i += 1;
@@ -69,10 +79,11 @@ function buildProvider(
     return { provider: buildFakeProvider(scenario), maxRetries: FAKE_MAX_RETRIES };
   }
   const config = loadConfig();
-  return {
-    provider: new OllamaProvider({ config: config.mappingLlm }),
-    maxRetries: config.mappingLlm.maxRetries,
-  };
+  const provider =
+    args.provider === "anthropic"
+      ? new AnthropicProvider({ config: config.mappingLlm })
+      : new OllamaProvider({ config: config.mappingLlm });
+  return { provider, maxRetries: config.mappingLlm.maxRetries };
 }
 
 async function writeReport(report: ScenarioReport): Promise<string> {
