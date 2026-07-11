@@ -5,7 +5,11 @@
  * `changeTimestampRef=updated`).
  */
 
-/** A minimal, valid OpenAPI 3.0 provider document with one `issue` resource. */
+/**
+ * A minimal, valid OpenAPI 3.0 provider document with one resource. Its `/issues`
+ * collection and `/issues/{id}` item read share the path noun `issues`, so
+ * `buildIr` groups them under the `issues` resourceRef (noun grouping, not tags).
+ */
 export function providerSpecDocument(): Record<string, unknown> {
   return {
     openapi: "3.0.0",

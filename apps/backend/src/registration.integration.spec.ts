@@ -151,13 +151,13 @@ describe("registration API integration (requires Postgres)", () => {
     expect(specRow?.status).toBe("active");
     expect(specRow?.contentHash).toBe(computeContentHash(document));
 
-    // ResourceBindings derived + persisted, unconfirmed, with an `issue` group.
+    // ResourceBindings derived + persisted, unconfirmed, with an `issues` group.
     const bindingRows = await db
       .select()
       .from(resourceBinding)
       .where(eq(resourceBinding.apiSpecId, specId));
     expect(bindingRows.length).toBeGreaterThan(0);
-    expect(bindingRows.some((row) => row.resourceRef === "issue")).toBe(true);
+    expect(bindingRows.some((row) => row.resourceRef === "issues")).toBe(true);
     const bindingIds = bindingRows.map((row) => row.id);
     const refRows = await db
       .select()
@@ -242,19 +242,19 @@ describe("registration API integration (requires Postgres)", () => {
     expect(irResponse.statusCode).toBe(200);
     expect(irResponse.body).not.toContain(SECRET_VALUE);
 
-    // GET the bindings, confirm the `issue` native id ref.
+    // GET the bindings, confirm the `issues` native id ref.
     const bindingsResponse = await server.app.inject({
       method: "GET",
       url: `/api/specs/${specId}/resource-bindings`,
     });
     const bindings = bindingsResponse.json<{ bindings: { id: string; resourceRef: string }[] }>();
-    const issueBinding = bindings.bindings.find((binding) => binding.resourceRef === "issue");
-    expect(issueBinding).toBeDefined();
-    const issueBindingId = issueBinding?.id ?? "";
+    const issuesBinding = bindings.bindings.find((binding) => binding.resourceRef === "issues");
+    expect(issuesBinding).toBeDefined();
+    const issuesBindingId = issuesBinding?.id ?? "";
 
     const confirm = await server.app.inject({
       method: "PATCH",
-      url: `/api/resource-bindings/${issueBindingId}`,
+      url: `/api/resource-bindings/${issuesBindingId}`,
       headers: { "x-operator-id": "integration-operator" },
       payload: { refKind: "nativeIdRef" },
     });
@@ -270,7 +270,7 @@ describe("registration API integration (requires Postgres)", () => {
       .from(resourceBindingRef)
       .where(
         and(
-          eq(resourceBindingRef.resourceBindingId, issueBindingId),
+          eq(resourceBindingRef.resourceBindingId, issuesBindingId),
           eq(resourceBindingRef.refKind, "nativeIdRef"),
         ),
       );
@@ -280,7 +280,7 @@ describe("registration API integration (requires Postgres)", () => {
     // A correction naming a non-IR field is rejected (RB-2 crit 4).
     const badCorrection = await server.app.inject({
       method: "PATCH",
-      url: `/api/resource-bindings/${issueBindingId}`,
+      url: `/api/resource-bindings/${issuesBindingId}`,
       payload: { refKind: "nativeIdRef", value: { kind: "field", path: "definitely-not-a-field" } },
     });
     expect(badCorrection.statusCode).toBe(400);
@@ -289,11 +289,11 @@ describe("registration API integration (requires Postgres)", () => {
     const exclusions = await server.app.inject({
       method: "PATCH",
       url: `/api/specs/${specId}/analysis-exclusions`,
-      payload: { analysisExclusions: ["issue"] },
+      payload: { analysisExclusions: ["issues"] },
     });
     expect(exclusions.statusCode).toBe(200);
     const [specRow] = await db.select().from(apiSpec).where(eq(apiSpec.id, specId));
-    expect(specRow?.analysisExclusions).toEqual(["issue"]);
+    expect(specRow?.analysisExclusions).toEqual(["issues"]);
 
     // A resourceRef not in the spec's IR is rejected (SI-4 crit 4).
     const badExclusion = await server.app.inject({
@@ -305,7 +305,7 @@ describe("registration API integration (requires Postgres)", () => {
   });
 
   it("upserts a correction of an applicable-but-underived binding ref (real DB regression)", async () => {
-    // The sample provider spec's `issue` list op has no paging params, so
+    // The sample provider spec's `issues` list op has no paging params, so
     // paginationRef is applicable but was NOT derived (no resource_binding_ref
     // row). Correcting it must INSERT the row — an UPDATE-only silently lost it.
     const registration = await server.app.inject({
@@ -339,16 +339,16 @@ describe("registration API integration (requires Postgres)", () => {
         refs: { kind: string; applicable: boolean; value: unknown }[];
       }[];
     }>();
-    const issue = bindings.find((binding) => binding.resourceRef === "issue");
-    const paginationBefore = issue?.refs.find((ref) => ref.kind === "paginationRef");
+    const issues = bindings.find((binding) => binding.resourceRef === "issues");
+    const paginationBefore = issues?.refs.find((ref) => ref.kind === "paginationRef");
     // Precondition: applicable but not derived — the exact bug scenario.
     expect(paginationBefore?.applicable).toBe(true);
     expect(paginationBefore?.value).toBeNull();
-    const issueBindingId = issue?.id ?? "";
+    const issuesBindingId = issues?.id ?? "";
 
     const correction = await server.app.inject({
       method: "PATCH",
-      url: `/api/resource-bindings/${issueBindingId}`,
+      url: `/api/resource-bindings/${issuesBindingId}`,
       headers: { "x-operator-id": "upsert-operator" },
       payload: {
         refKind: "paginationRef",
@@ -364,7 +364,7 @@ describe("registration API integration (requires Postgres)", () => {
       .from(resourceBindingRef)
       .where(
         and(
-          eq(resourceBindingRef.resourceBindingId, issueBindingId),
+          eq(resourceBindingRef.resourceBindingId, issuesBindingId),
           eq(resourceBindingRef.refKind, "paginationRef"),
         ),
       );

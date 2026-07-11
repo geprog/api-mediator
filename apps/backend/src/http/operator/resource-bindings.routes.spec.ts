@@ -39,9 +39,9 @@ async function registerAndGetBindings(server: TestServer): Promise<{
 }
 
 function bindingId(bindings: ResourceBindingDto[]): string {
-  const issue = bindings.find((binding) => binding.resourceRef === "issue");
-  if (issue === undefined) throw new Error("issue binding not found");
-  return issue.id;
+  const issues = bindings.find((binding) => binding.resourceRef === "issues");
+  if (issues === undefined) throw new Error("issues binding not found");
+  return issues.id;
 }
 
 describe("GET /api/specs/:id/resource-bindings (RB-3)", () => {
@@ -53,21 +53,21 @@ describe("GET /api/specs/:id/resource-bindings (RB-3)", () => {
   it("reports each ref's value + applicability + confirmed state", async () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
-    const issue = bindings.find((binding) => binding.resourceRef === "issue");
-    expect(issue).toBeDefined();
+    const issues = bindings.find((binding) => binding.resourceRef === "issues");
+    expect(issues).toBeDefined();
 
-    const nativeId = issue?.refs.find((ref) => ref.kind === "nativeIdRef");
+    const nativeId = issues?.refs.find((ref) => ref.kind === "nativeIdRef");
     expect(nativeId?.applicable).toBe(true);
     expect(nativeId?.value).toEqual({ kind: "field", path: "id" });
     expect(nativeId?.confirmedBy).toBeNull();
 
     // supportsChangeTimestamps=true → changeTimestampRef is applicable + derived.
-    const changeTs = issue?.refs.find((ref) => ref.kind === "changeTimestampRef");
+    const changeTs = issues?.refs.find((ref) => ref.kind === "changeTimestampRef");
     expect(changeTs?.applicable).toBe(true);
     expect(changeTs?.value).toEqual({ kind: "field", path: "updated" });
 
     // supportsDeltaQuery=false → delta refs are not applicable.
-    const deltaCursor = issue?.refs.find((ref) => ref.kind === "deltaCursorRef");
+    const deltaCursor = issues?.refs.find((ref) => ref.kind === "deltaCursorRef");
     expect(deltaCursor?.applicable).toBe(false);
   });
 });
@@ -115,10 +115,10 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
   it("persists a correction of an applicable-but-underived ref (upsert)", async () => {
     server = buildTestServer();
     const { bindings } = await registerAndGetBindings(server);
-    const issue = bindings.find((binding) => binding.resourceRef === "issue");
+    const issues = bindings.find((binding) => binding.resourceRef === "issues");
     // paginationRef is always applicable but the sample list op has no paging
     // params, so no ref was derived (no row) — the silent-data-loss scenario.
-    const paginationBefore = issue?.refs.find((ref) => ref.kind === "paginationRef");
+    const paginationBefore = issues?.refs.find((ref) => ref.kind === "paginationRef");
     expect(paginationBefore?.applicable).toBe(true);
     expect(paginationBefore?.value).toBeNull();
 

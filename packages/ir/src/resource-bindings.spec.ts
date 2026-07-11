@@ -90,11 +90,11 @@ describe("deriveResourceBindings — shape (RB-1 crit 1, 7)", () => {
   });
 });
 
-describe("deriveResourceBindings — Vikunja `task` (RB-1 crit 2-5, 9)", () => {
+describe("deriveResourceBindings — Vikunja `tasks` (RB-1 crit 2-5, 9)", () => {
   it("guesses nativeIdRef = `id`, collectionReadRef = param-free GET /tasks, paginationRef = page", () => {
     const binding = bindingFor(
       deriveResourceBindings(vikunjaIr, capabilities(), "spec-vikunja"),
-      "task",
+      "tasks",
     );
 
     expect(binding.nativeIdRef?.value).toEqual({ kind: "field", path: "id" });
@@ -102,7 +102,7 @@ describe("deriveResourceBindings — Vikunja `task` (RB-1 crit 2-5, 9)", () => {
     const collectionRead = binding.collectionReadRef?.value;
     expect(collectionRead?.kind).toBe("operation");
     if (collectionRead?.kind !== "operation") throw new Error("expected an operation ref");
-    const operation = resolveOperation(vikunjaIr, "task", collectionRead.operationId);
+    const operation = resolveOperation(vikunjaIr, "tasks", collectionRead.operationId);
     expect(operation.method).toBe("get");
     expect(operation.path).toBe("/tasks");
     expect(operation.parameters.some((p) => p.location === "path")).toBe(false); // param-free
@@ -117,13 +117,13 @@ describe("deriveResourceBindings — Vikunja `task` (RB-1 crit 2-5, 9)", () => {
   it("guesses changeTimestampRef = `updated` iff the app declares supportsChangeTimestamps", () => {
     const withTimestamps = bindingFor(
       deriveResourceBindings(vikunjaIr, capabilities({ supportsChangeTimestamps: true }), "spec"),
-      "task",
+      "tasks",
     );
     expect(withTimestamps.changeTimestampRef?.value).toEqual({ kind: "field", path: "updated" });
 
     const withoutTimestamps = bindingFor(
       deriveResourceBindings(vikunjaIr, capabilities({ supportsChangeTimestamps: false }), "spec"),
-      "task",
+      "tasks",
     );
     expect(withoutTimestamps.changeTimestampRef).toBeUndefined();
   });
@@ -131,20 +131,22 @@ describe("deriveResourceBindings — Vikunja `task` (RB-1 crit 2-5, 9)", () => {
   it("omits delta refs when the app does not declare supportsDeltaQuery", () => {
     const binding = bindingFor(
       deriveResourceBindings(vikunjaIr, capabilities({ supportsDeltaQuery: false }), "spec"),
-      "task",
+      "tasks",
     );
     expect(binding.deltaCursorRef).toBeUndefined();
     expect(binding.deltaDeletionRef).toBeUndefined();
   });
 });
 
-describe("deriveResourceBindings — Gitea `issue` (RB-1 crit 6, 8)", () => {
-  const ACCEPTABLE_COLLECTION_READS = ["/repos/issues/search", "/repos/{owner}/{repo}/issues"];
+describe("deriveResourceBindings — Gitea `issues` (RB-1 crit 6, 8)", () => {
+  // With noun grouping, `/repos/issues/search` (noun `search`) is its own group,
+  // so the `issues` collection read is unambiguously the {owner}/{repo}-scoped list.
+  const ACCEPTABLE_COLLECTION_READS = ["/repos/{owner}/{repo}/issues"];
 
   it("guesses nativeIdRef = `id` and a collection GET for collectionReadRef, both unconfirmed", () => {
     const binding = bindingFor(
       deriveResourceBindings(giteaIr, capabilities(), "spec-gitea"),
-      "issue",
+      "issues",
     );
 
     expect(binding.nativeIdRef?.value).toEqual({ kind: "field", path: "id" });
@@ -153,10 +155,9 @@ describe("deriveResourceBindings — Gitea `issue` (RB-1 crit 6, 8)", () => {
     const collectionRead = binding.collectionReadRef?.value;
     expect(collectionRead?.kind).toBe("operation");
     if (collectionRead?.kind !== "operation") throw new Error("expected an operation ref");
-    const operation = resolveOperation(giteaIr, "issue", collectionRead.operationId);
+    const operation = resolveOperation(giteaIr, "issues", collectionRead.operationId);
     expect(operation.method).toBe("get");
-    // Ground truth: either the {owner}/{repo}-scoped list or the param-free
-    // /repos/issues/search is an acceptable unconfirmed guess.
+    // Ground truth: the {owner}/{repo}-scoped issues list is the collection read.
     expect(ACCEPTABLE_COLLECTION_READS).toContain(operation.path);
     expect(binding.collectionReadRef?.confirmedBy).toBeNull();
   });
@@ -164,7 +165,7 @@ describe("deriveResourceBindings — Gitea `issue` (RB-1 crit 6, 8)", () => {
   it("guesses deltaCursorRef (`since`) iff the app declares supportsDeltaQuery", () => {
     const withDelta = bindingFor(
       deriveResourceBindings(giteaIr, capabilities({ supportsDeltaQuery: true }), "spec-gitea"),
-      "issue",
+      "issues",
     );
     const cursor = withDelta.deltaCursorRef?.value;
     expect(cursor?.kind).toBe("parameter");
@@ -172,7 +173,7 @@ describe("deriveResourceBindings — Gitea `issue` (RB-1 crit 6, 8)", () => {
 
     const withoutDelta = bindingFor(
       deriveResourceBindings(giteaIr, capabilities({ supportsDeltaQuery: false }), "spec-gitea"),
-      "issue",
+      "issues",
     );
     expect(withoutDelta.deltaCursorRef).toBeUndefined();
   });
@@ -225,7 +226,7 @@ describe("deriveResourceBindings — pagination-vs-delta cursor precedence", () 
     const ir = await buildIr(widgetsSpec({ collectionParams: ["cursor"], fields: [] }));
     const binding = bindingFor(
       deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
-      "widget",
+      "widgets",
     );
     expect(binding.paginationRef?.value).toEqual({
       kind: "parameter",
@@ -239,7 +240,7 @@ describe("deriveResourceBindings — pagination-vs-delta cursor precedence", () 
     const ir = await buildIr(widgetsSpec({ collectionParams: ["cursor", "since"], fields: [] }));
     const binding = bindingFor(
       deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
-      "widget",
+      "widgets",
     );
     expect(binding.paginationRef?.value).toEqual({
       kind: "parameter",
@@ -260,14 +261,14 @@ describe("deriveResourceBindings — deltaDeletionRef (RB-1 crit 6)", () => {
 
     const withDelta = bindingFor(
       deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: true }), "spec-widgets"),
-      "widget",
+      "widgets",
     );
     expect(withDelta.deltaDeletionRef?.value).toEqual({ kind: "field", path: "deletedAt" });
     expect(withDelta.deltaDeletionRef?.confirmedBy).toBeNull();
 
     const withoutDelta = bindingFor(
       deriveResourceBindings(ir, capabilities({ supportsDeltaQuery: false }), "spec-widgets"),
-      "widget",
+      "widgets",
     );
     expect(withoutDelta.deltaDeletionRef).toBeUndefined();
   });

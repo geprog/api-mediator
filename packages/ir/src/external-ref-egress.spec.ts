@@ -79,8 +79,8 @@ describe("buildIr — external-ref egress hardening", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     // The document still built into an IR (leniency preserved).
     expect(ir.length).toBeGreaterThan(0);
-    const thing = ir.find((group) => group.resourceRef === "thing");
-    expect(thing).toBeDefined();
+    const things = ir.find((group) => group.resourceRef === "things");
+    expect(things).toBeDefined();
   });
 
   it("leaves the external $ref unexpanded — its host never appears in the IR", async () => {
@@ -98,8 +98,8 @@ describe("buildIr — external-ref egress hardening", () => {
     const ir = await buildIr(specWithLocalRef);
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    const thing = ir.find((group) => group.resourceRef === "thing");
-    const listThings = thing?.operations.find((op) => op.operationId === "listThings");
+    const things = ir.find((group) => group.resourceRef === "things");
+    const listThings = things?.operations.find((op) => op.operationId === "listThings");
     const fieldNames = listThings?.responseSchema?.fields.map((field) => field.name) ?? [];
     // The local Thing schema resolved and flattened into the response fields.
     expect(fieldNames).toEqual(expect.arrayContaining(["id", "name"]));
