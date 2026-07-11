@@ -225,3 +225,117 @@ Each has a recommended default the stories adopt; confirm or override.
    `MappingProposal` — **including a `failed` one** — counts as "analyzed," so a recorded shortlist
    failure is not re-looped indefinitely; a spec with *zero* proposals for a pair it should have is
    what the sweep re-triggers. (DT-2)
+
+---
+
+## Phase 3 — Review / Approval + operator auth + review UI
+
+The third vertical slice, and the concept's core safety promise made testable: **a `MappingProposal`
+→ per-item accept/edit/reject → partial approval → one `ApprovedMapping` → `MappingApproved` →
+disabled downstream artifacts.** It stands up the **Approval Service** (turning proposals into
+`ApprovedMapping`s under partial approval, edit-path validation, and the human-confirmed identity
+key), wires the **operator/viewer auth** the earlier phases only described, and ships the **review
+UI** — all while keeping the hard invariant that **nothing executes**: approval *instantiates*
+`SyncRule`(s) `disabled` and `AdapterBinding`(s) `proposed`, but enabling, backfilling, and serving
+are Phase 4/5.
+
+The identity-key confirmation is the phase's sharpest invariant: a wrong identity key silently merges
+unrelated records — the worst failure the Sync Engine has — so it is **never auto-confirmed**,
+restricted to a **value-preserving (`rename`) pairing**, and **shared-locked** across a bidirectional
+pair's two directions. Every approval invariant is asserted deterministically over a **replayed
+proposal fixture**; the capstone e2e proves nothing executed before approval.
+
+| File | Stories | Realizes (concept component) |
+|---|---|---|
+| [phase-3-approved-mapping-domain.md](phase-3-approved-mapping-domain.md) | AM-1 … AM-6 | `@mediator/domain` (approved-side entities + `MappingApproved` + disabled-artifact shapes) |
+| [phase-3-approval-service.md](phase-3-approval-service.md) | AS-1 … AS-6 | Mapping Review/Approval Service (partial approval, edit validation, identity key, emission) |
+| [phase-3-artifact-instantiation.md](phase-3-artifact-instantiation.md) | AI-1 … AI-3 | Event Bus consumer (`MappingApproved` → disabled `SyncRule`/`AdapterBinding`/`GraphEdge`) |
+| [phase-3-operator-auth.md](phase-3-operator-auth.md) | OA-1 … OA-3 | Operator authentication & authorization (`operator`/`viewer`, local accounts, attribution) |
+| [phase-3-approval-api.md](phase-3-approval-api.md) | RA-1 … RA-5 | API Layer (review/approval endpoints + escape hatch) |
+| [phase-3-review-ui.md](phase-3-review-ui.md) | RU-1 … RU-5 | UI Layer (confidence-sorted review, identity-key panel, escape hatch) |
+
+28 stories total.
+
+### Suggested implementation order (Phase 3, blocking edges)
+
+Layered per the plan (types → persistence → logic → HTTP → UI):
+
+1. **AM-1 … AM-6** (domain types: approved-side enums, `ApprovedMapping` + `FieldMapping`/
+   `OperationMapping`/`ParameterMapping`, `MappingApproved`, disabled-artifact shapes) — foundational;
+   reuse the Phase-2 enums unchanged.
+2. **OA-1 → OA-2 → OA-3** (auth: authenticated identity → role gating → attribution) — independent of
+   the approval logic, needed before any Phase-3 HTTP route; also retro-enforces the Phase-1/2
+   read/mutate split.
+3. **AS-1** (per-item review states) → **AS-2** (partial-approval assembly) → **AS-3** (edit-path
+   validation) → **AS-4** (`action` + `targetIdParamRef`) → **AS-5** (identity-key confirmation locks)
+   → **AS-6** (counterpart link + emit `MappingApproved` + nothing-executes).
+4. **AI-1 / AI-2** (instantiate disabled `SyncRule`s / `proposed` `AdapterBinding`s + `GraphEdge`) →
+   **AI-3** (idempotent, in-dispatcher-tx, reconcilable) — depend on AS-6 (the event) and AM-5/AM-6.
+5. **RA-1** (read, confidence-sorted) → **RA-2** (per-item decisions) → **RA-3** (identity-key confirm)
+   → **RA-4** (approve) → **RA-5** (escape hatch) — thin HTTP over the Approval Service, gated by OA-2.
+6. **RU-1 … RU-4** (review screen, per-item controls, escape-hatch/excluded surfacing, identity-key
+   panel + partial approve) → **RU-5** (capstone e2e over a replayed proposal fixture proving nothing
+   executes pre-approval).
+
+### Phase boundary map (Phase 3 → owning later phase)
+
+Named once so each story can point at "the owning later phase":
+
+| Deferred concern | Owning phase |
+|---|---|
+| **Enabling** a `SyncRule`, its enablement gate (identity key + `pollOperationRef` + `ResourceBinding` refs), the initial backfill, polling/`RecordLink`/`SyncFieldState`, conflict handling, `deletePropagation` — Phase 3 only *instantiates disabled* rules | **Phase 4** ([sync-engine.md](../architecture/sync-engine.md)) |
+| **Composing / activating / serving** an `AdapterEndpoint`: single-binding auto-activation, `composition-required`, aggregation strategy/roles/order/chaining, `postMerge*`, the Adapter Server Runtime, Auth Gateway, adapter token issuance — Phase 3 only creates the `AdapterEndpoint` + `proposed` `AdapterBinding`(s) | **Phase 5** ([adapter-engine.md](../architecture/adapter-engine.md), [adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md), [security.md](../architecture/security.md)) |
+| Executing any `transform` and the `expression` sandbox; setting `FieldMapping.conflictPolicy` at review | **Phase 4/5** ([security.md](../architecture/security.md)) |
+| `SpecDiff`-scoped incremental/delta proposals, re-review of `stale` mappings, `priorFeedback`, **re-pinning**, **successor adoption**, version-agnostic `counterpartMappingId` across versions, `analysisExclusions` re-inclusion re-analysis, `suspend`, disable/deregister cascade & archival | **Phase 6** ([extensibility.md](../architecture/extensibility.md); [mapping-engine.md](../architecture/mapping-engine.md) *Re-mapping on spec change*, *Scoping down*) |
+| Graph **rendering** UI (Phase 3 only *upserts* the `GraphEdge` projection on approval) | **Phase 6** ([graph-overview.md](../flows/graph-overview.md)) |
+| SSO/OIDC auth provider (Phase 3 ships local accounts behind the pluggable seam) | later |
+
+Phase 3 operates on **version-1 specs only** (like Phase 1/2), so spec lineage identity reduces to the
+`(app, role)` pair and no re-pinning path is exercised.
+
+### Open questions for a human (Phase 3 — concept silent or underspecified)
+
+Each has a recommended default the stories adopt; confirm or override.
+
+1. **The plan's `list` action is not in the concept.** The implementation plan lists operation `action`
+   as `create/read/update/delete/list`, but [data-model.md](../architecture/data-model.md)
+   `OperationMapping.action` and [glossary.md](../glossary.md) `action` enumerate **only**
+   `create | read | update | delete` — there is **no `list`**. *Recommended:* follow the concept
+   (four values); classify a collection read as `read`. Do **not** silently coin a `list` member. A
+   human should decide whether the concept should gain `list` or the plan should drop it. (AM-1, AS-4)
+2. **`AdapterBinding` instantiation status: `disabled` vs. `proposed`, and single-binding
+   auto-activation.** The plan says instantiate artifacts "disabled"; the flow
+   ([mapping-review-and-approval.md](../flows/mapping-review-and-approval.md) step 9) says a
+   single-binding `AdapterEndpoint` "activates immediately with safe defaults." These collide with the
+   phased "nothing enabled/served in Phase 3" boundary. *Recommended:* instantiate `SyncRule`s
+   `status = disabled` (concept-exact) and `AdapterBinding`s `status = proposed` (the concept's status
+   for "attached by a mapping approval but not yet composed"); defer **all** composition, single-binding
+   auto-activation, and serving to Phase 5, since there is no Adapter Server Runtime in Phase 3. This
+   satisfies the plan's intent while using the concept's own vocabulary; flag for confirmation. (AI-2)
+3. **Proposal `status` predicate: `partially_approved` vs. `approved` vs. `rejected`.** The flow states
+   only that a subset approval yields `partially_approved`; the exact predicate for `approved`/`rejected`
+   is not spelled out. *Recommended:* `partially_approved` while any item is `pending`; `approved` once
+   every item is decided with ≥1 `accepted`/`edited`; `rejected` once every item is `rejected` (no
+   `ApprovedMapping` then). (AS-2)
+4. **One `ApprovedMapping` per directional proposal, updated in place.** The flow says approval assembles
+   accepted items under "a new (or updated) `ApprovedMapping`", and `approvedBy` is "the *most recent*
+   approval action." *Recommended:* incremental partial approvals update the **same** `ApprovedMapping`
+   (adding child rows), not a new row per approve. (AS-2, AI-3)
+5. **Escape-hatch output: attach to the existing proposal vs. a new delta proposal.** The concept says a
+   reviewer can trigger a detail analysis for a missed pair, but not where the produced items land.
+   *Recommended:* attach the new `MappingProposalItem`s to the existing proposal for that resource pair
+   and remove the resource from the no-counterpart set. (RA-5, RU-3)
+6. **Escape-hatch and edit are operator mutations, not viewer reads.** The escape hatch spends LLM budget
+   and mutates the proposal; an edit changes review state. *Recommended:* gate both to `operator`. (OA-2,
+   RA-2, RA-5)
+7. **`GraphEdge` node identity.** [graph-overview.md](../flows/graph-overview.md) renders app nodes;
+   `GraphEdge` carries `sourceNodeId`/`targetNodeId`. *Recommended:* node id = app id, so an approval
+   upserts the edge for the mapping's `(sourceAppId → targetAppId)` pair; graph rendering is Phase 6.
+   (AI-1, AI-2)
+8. **UI copy / equal-confidence tie-breaking / no pagination.** The concept fixes the sort *criteria*
+   (ascending confidence, descending ambiguity, `reviewRequired` first) but not wording, tie-breaks, or
+   paging. *Recommended:* implementation-defined copy; a stable secondary sort (e.g. by `sourceRef`) for
+   ties; no item pagination at Phase-3 scale (the shortlist already bounds proposal size). (RA-1, RU-1)
+9. **`MappingApproved` payload breadth.** The concept names the event but not its fields. *Recommended:*
+   carry `approvedMappingId` + `variant` (for routing) and re-load the rest from persisted state, mirroring
+   `SpecIngested`'s identifier-only convention. (AM-5)
