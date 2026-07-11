@@ -33,7 +33,11 @@ declare module "fastify" {
  * authentication hook otherwise guarantees one on every operator-API request.
  */
 export function getPrincipal(request: FastifyRequest): Principal {
-  if (request.principal === null) {
+  // `!` (not `=== null`) so the guard also catches `undefined` — the
+  // decoration is encapsulated to the authenticated context, so on any other
+  // context the property is absent, exactly the wiring bug this net promises to
+  // catch.
+  if (!request.principal) {
     throw new Error(
       "No authenticated principal on request — the authentication hook is not installed on this route's context.",
     );

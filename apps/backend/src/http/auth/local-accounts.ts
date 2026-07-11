@@ -33,7 +33,11 @@ export class LocalAccountsAuthProvider implements AuthProvider {
 
   public constructor(accounts: readonly OperatorAccount[]) {
     this.#accountsByUsername = new Map(accounts.map((account) => [account.username, account]));
-    this.#decoyHash = hashSecret(randomBytes(32).toString("hex"));
+    // `.catch` keeps a construction-time scrypt rejection (practically
+    // unreachable) from surfacing as an unhandled rejection; the sentinel is an
+    // unparseable hash, so `verifySecret` returns false and an unknown user
+    // still gets 401 rather than a 500.
+    this.#decoyHash = hashSecret(randomBytes(32).toString("hex")).catch(() => "decoy-unavailable");
   }
 
   public async authenticate(request: FastifyRequest): Promise<Principal | null> {
