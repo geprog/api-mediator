@@ -7,7 +7,13 @@ import {
   type Database,
   type DbTransaction,
 } from "@mediator/db";
-import { ConsumerRegistry, OutboxDispatcher, ReconciliationSweep } from "@mediator/event-bus";
+import {
+  ConsumerRegistry,
+  OutboxDispatcher,
+  ReconciliationSweep,
+  type EventConsumer,
+  type Reconciler,
+} from "@mediator/event-bus";
 import { PROMPT_VERSION, type LLMMappingProvider } from "@mediator/llm";
 import {
   createDbProposalStore,
@@ -42,6 +48,14 @@ import { DetectionWorker } from "./worker.js";
  * `unref`'d poll loops; `stop()` stops them (in-flight passes finish). The
  * dispatcher/worker/sweep are also returned so a test can drive their `runOnce()`/
  * `runSweep()` deterministically.
+ *
+ * This owns the **single** `OutboxDispatcher` over the shared `event_outbox`, so
+ * other Phase-3+ reaction modules whose consumers must see the same outbox
+ * (e.g. the `MappingApproved` artifact-instantiation consumer) register on it via
+ * `additionalConsumers`/`additionalReconcilers` rather than standing up a second
+ * dispatcher — a second dispatcher scanning the same outbox would claim and
+ * mark-published a foreign event (an event with no consumer in its OWN registry)
+ * before the intended consumer ran.
  */
 
 export interface DetectionBackgroundDeps {
@@ -55,6 +69,14 @@ export interface DetectionBackgroundDeps {
   readonly provider?: LLMMappingProvider;
   /** Override the metrics sink (tests may pass a recording/no-op sink). */
   readonly metricsSink?: DetectionMetricsSink;
+  /**
+   * Extra Event Bus consumers to register on the shared dispatcher (Phase-3+
+   * reactions to other event types, e.g. `MappingApproved`). Registered after the
+   * detection consumer, so each is delivered every event of the types it handles.
+   */
+  readonly additionalConsumers?: readonly EventConsumer<DbTransaction>[];
+  /** Extra reconcilers to register on the shared reconciliation sweep. */
+  readonly additionalReconcilers?: readonly Reconciler[];
 }
 
 export interface DetectionBackground {
@@ -102,6 +124,10 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
       new DetectionJobRepository(txn).enqueue(apiSpecId),
     ),
   );
+  // Other Phase-3+ reactions share this single dispatcher (see the class comment).
+  for (const consumer of deps.additionalConsumers ?? []) {
+    registry.register(consumer);
+  }
   const dispatcher = new OutboxDispatcher<DbTransaction>(
     db,
     (txn) => new EventOutboxRepository(txn),
@@ -131,6 +157,9 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
   });
   const sweep = new ReconciliationSweep();
   sweep.register(reconciler);
+  for (const extra of deps.additionalReconcilers ?? []) {
+    sweep.register(extra);
+  }
 
   // A small `unref`'d, re-entrancy-guarded loop for the sweep (mirrors the
   // dispatcher/worker loops). A richer scheduler is a Phase-6 concern.
