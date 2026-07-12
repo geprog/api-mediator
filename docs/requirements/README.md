@@ -339,3 +339,146 @@ Each has a recommended default the stories adopt; confirm or override.
 9. **`MappingApproved` payload breadth.** The concept names the event but not its fields. *Recommended:*
    carry `approvedMappingId` + `variant` (for routing) and re-load the rest from persisted state, mirroring
    `SpecIngested`'s identifier-only convention. (AM-5)
+
+---
+
+## Phase 4 — The Sync Engine (execution begins)
+
+The largest, hardest slice, and where the concept's documented **risk register** is turned into testable
+criteria: the **disabled** `SyncRule`s Phase 3 instantiated are **enabled and run**. Phase 4 stands up the
+Sync Engine end to end — poll a source, correlate records into `RecordLink`s, transform, and write to the
+other side — **without echo loops, without clobbering, and without ever silently merging unrelated records**.
+It is the first phase that makes real outbound calls to landscape apps, so it completes the Phase-1
+`CredentialStore.withCredential` decrypt-for-call seam and the shared Transformation/Outbound executors.
+
+Everything is a **thin vertical slice**: spec ingestion → proposal → review → approval (Phases 1-3) → **one
+enabled `SyncRule` polling one direction with no echo back**. Phase 4 operates on **version-1 specs only**
+(no re-pinning, no `SpecDiff` — Phase 6), and instantiates/serves **no** adapter (Phase 5). The risk-register
+items are specified as explicit Given/When/Then, not hand-waved.
+
+**What already exists vs. what Phase 4 adds** (checked against `packages/domain/src` + the Phase-3 output):
+`SyncRule` exists as the **minimal disabled** Phase-3 shape (`id`/`approvedMappingId`/`resourcePairRef`/
+`status` — [`downstream-artifacts.ts`](../../packages/domain/src/downstream-artifacts.ts)) and Phase 4
+**extends** it with execution fields (SD-1); `SyncEvent`/`AuditLog` exists
+([`audit-log.ts`](../../packages/domain/src/audit-log.ts)) already owning all six `type` values but only the
+`mapping-decision` columns — Phase 4 **extends** it with the per-record sync columns + the
+`success/failure/skipped-*/conflict` status (SD-4); **`RecordLink` and `SyncFieldState` do not exist yet** and
+Phase 4 **adds** them (SD-2/SD-3). The reconciliation sweep ([`event-bus/src/reconciliation.ts`](../../packages/event-bus/src/reconciliation.ts))
+is **extended** to sync derivations (RS-*), not replaced.
+
+| File | Stories | Realizes (concept component) |
+|---|---|---|
+| [phase-4-sync-domain.md](phase-4-sync-domain.md) | SD-1 … SD-4 | `@mediator/domain` (extend `SyncRule`/`SyncEvent`; add `RecordLink`/`SyncFieldState`) |
+| [phase-4-transformation-executor.md](phase-4-transformation-executor.md) | TX-1 … TX-5 | Transformation Executor + `expression` sandbox |
+| [phase-4-credential-decrypt.md](phase-4-credential-decrypt.md) | CD-1 … CD-3 | Credential Store (`withCredential` decrypt-for-call, OAuth2 refresh) |
+| [phase-4-outbound-executor.md](phase-4-outbound-executor.md) | OC-1 … OC-5 | Outbound Call Executor + REST Protocol Client + idempotency + retry/park |
+| [phase-4-scheduler-poller.md](phase-4-scheduler-poller.md) | SP-1 … SP-5 | Sync Engine (Scheduler + Poller; enqueue-then-advance) |
+| [phase-4-identity-record-link.md](phase-4-identity-record-link.md) | RL-1 … RL-5 | Identity Resolution + `RecordLink` lifecycle |
+| [phase-4-ordering-queue.md](phase-4-ordering-queue.md) | OQ-1 … OQ-4 | Per-`RecordLink` ordering queue (cross-direction serialization) |
+| [phase-4-loop-prevention.md](phase-4-loop-prevention.md) | EP-1 … EP-4 | Loop Prevention (no echo) |
+| [phase-4-conflict-detection.md](phase-4-conflict-detection.md) | CF-1 … CF-7 | Conflict Detection & resolution |
+| [phase-4-backfill-enablement.md](phase-4-backfill-enablement.md) | BE-1 … BE-6 | `SyncRule` enablement gate + initial backfill |
+| [phase-4-reconciliation-sweep.md](phase-4-reconciliation-sweep.md) | RS-1 … RS-2 | Reconciliation sweep (sync) |
+| [phase-4-sync-api.md](phase-4-sync-api.md) | SA-1 … SA-5 | API Layer (enable/link/resolve/replay/read) |
+| [phase-4-sync-ui.md](phase-4-sync-ui.md) | SU-1 … SU-6 | UI Layer (enablement/linking/resolution/replay + capstone e2e) |
+
+61 stories total.
+
+### Risk-register → owning criteria (the documented hard problems, each specified)
+
+| Risk-register item | Owning criteria |
+|---|---|
+| PUT-clobber read-carry | CF-5 (esp. criterion 3-4) |
+| Unobserved-target silent overwrite + `targetDriftCheck` | CF-6 |
+| Deletes never auto-resolve against drift | CF-7 (esp. criterion 3, 6) |
+| Ambiguous identity match → manual only | RL-4 (esp. criterion 1, 5) |
+| Backfill enable-gating + deliberately-early cursor seeding | BE-1/BE-3, BE-6 (esp. criterion 4-5) |
+| Cross-direction ordering race (key by `RecordLink`, pre-link identity keying, continuation handoff) | OQ-2, OQ-3, OQ-4 |
+| Enqueue-then-advance crash window | SP-5 |
+| Idempotency key includes prior reconciled state | OC-2 (esp. criterion 1-2) |
+| Target-wins = withhold + baselines untouched | CF-4 (esp. criterion 2, 6) |
+| Reconciliation sweep makes "bus loss degrades timeliness, never correctness" true | RS-1, RS-2 |
+| No echo (loop prevention hard invariant) | EP-1 … EP-4 |
+
+### Suggested implementation order (Phase 4, blocking edges)
+
+Layered per the plan (types → persistence → logic → HTTP → UI):
+
+1. **SD-1 … SD-4** (domain types: extend `SyncRule`/`SyncEvent`, add `RecordLink`/`SyncFieldState`) —
+   foundational; every slice below imports them.
+2. **CD-1 … CD-3** (`withCredential` decrypt-for-call + OAuth2 refresh) and **TX-1 … TX-5** (Transformation
+   Executor + sandbox) — **parallelizable**: CD depends only on the Phase-1 store, TX only on the Phase-3
+   `FieldMapping` shape; **OQ-1** (queue mechanics) can also start here (needs only SD-2).
+3. **OC-1 … OC-5** (Outbound Call Executor + idempotency + retry/park) — depends on CD, TX, SD.
+4. The **pipeline core**, in dependency order: **RL-1 … RL-5** (identity/`RecordLink`) → **OQ-2 … OQ-4**
+   (keying + continuation handoff, once RL exists) → **EP-1 … EP-4** (loop prevention) → **SP-1 … SP-5**
+   (scheduler/poller) → **CF-1 … CF-7** (conflict detection). RL/EP and SP can partly overlap once OC lands.
+5. **BE-1 … BE-6** (enablement gate + backfill + early seeding) — depends on RL, OC, SP; **RS-1 … RS-2**
+   (reconciliation) follows BE + SP.
+6. **SA-1 … SA-5** (HTTP: enable/link/resolve/replay/read) — thin over the engine services, gated by Phase-3
+   OA-2.
+7. **SU-1 … SU-5** (enablement/linking/resolution/replay/binding-blocker screens) → **SU-6** (capstone e2e:
+   a real scenario-1 sync round with no echo back, plus an identity-less pair blocked from enabling), driven
+   by the deterministic poll-trigger hook (SP-5).
+
+**What can parallelize:** TX ∥ CD ∥ OQ-1 (step 2); within the pipeline, the invariant unit-test suites
+(dedup/no-echo, enqueue-then-advance, ambiguous→manual, target-wins-withhold, PUT read-carry, cross-direction
+ordering, deletes, idempotency) attach to their owning stories and can be written alongside them; the UI
+stories (SU-1..SU-5) parallelize once their backing SA-* endpoint lands.
+
+### Phase boundary map (Phase 4 → owning later phase)
+
+| Deferred concern | Owning phase |
+|---|---|
+| The **Adapter/Gateway Engine** and all serving: request routing, resolution planning, aggregation strategies, `postMerge*`, Adapter Server Runtime, Auth Gateway, adapter-token validation, `mediator-transform-error` response validation | **Phase 5** ([adapter-engine.md](../architecture/adapter-engine.md), [security.md](../architecture/security.md)) — Phase 4 defines the shared Transformation/Outbound executors + the transform-error signal the adapter reuses, but runs **no** adapter |
+| `SpecDiff`, additional spec versions, **re-pinning** `pollOperationRef`/`sourceSpecId`, `stale`/`suspended` transitions, successor adoption re-pointing rules, `analysisExclusions` re-inclusion, disable/deregister cascade + `archived` links/field-state | **Phase 6** ([extensibility.md](../architecture/extensibility.md)) — Phase 4 uses **version-1 specs only** and honors the `stale`/`suspended` *pause gate* (SP-1) without owning the transitions |
+| Graph **rendering** and the graph/observability/lifecycle **polish** (Grafana dashboards are provisioned; Phase 4 emits the metrics they read) | **Phase 6** ([graph-overview.md](../flows/graph-overview.md), [observability.md](../architecture/observability.md)) |
+| High availability / active-passive standby | later ([overview.md](../architecture/overview.md) *Deployment model*) |
+
+### Open questions for a human (Phase 4 — concept silent, underspecified, or thinner than the plan)
+
+Each has a recommended default the stories adopt; confirm or override.
+
+1. **`transformConfig` per-kind schema.** *Concept gap:* [data-model.md](../architecture/data-model.md)
+   names `FieldMapping.transformConfig` and says multi-input transforms "declare their additional input paths"
+   there, but specifies no per-kind shape. *Recommended:* define a structured, discriminated
+   `transformConfig` per `TransformKind` (coerce: conversion spec; aggregate: additional input paths + combine
+   rule; expression: the expression text + additional input paths); implementation-defined internally, but a
+   human should confirm the shape is a Phase-4 modeling choice, not new product behavior. (TX-1..TX-3)
+2. **Reconciliation-sweep sync derivations are thinner in the concept than the plan implies.** *Concept
+   gap / flag:* the sweep's named examples ([overview.md](../architecture/overview.md) *Components*) are
+   detection and instantiation; for the **polling loop itself** the concept leans on cursor/snapshot
+   self-healing ([overview.md](../architecture/overview.md) *Deployment model*), not the sweep. *Recommended:*
+   the sweep's sync role is (a) re-derive a lost enablement reaction, (b) re-trigger a crashed/stuck backfill,
+   (c) re-schedule an enabled+backfilled rule that isn't polling (RS-1); polling *within* a live rule
+   self-heals via cursors independently. Confirm this is the intended derivation set. (RS-1, RS-2)
+3. **The deterministic poll-trigger hook is a test seam, not concept behavior.** *Flag:* the concept has the
+   Scheduler wake rules on wall-clock intervals; a synchronous single-cycle trigger for e2e is a testing
+   affordance the plan requires. *Recommended:* ship it as an internal/test-only entry point (not a public
+   operator API), so e2e is deterministic without changing the product's scheduling model. (SP-5, SU-6)
+4. **LWW epsilon and idempotency lookback window are unset.** The concept gives "e.g. a few seconds" for the
+   epsilon and "e.g. the last N events or a configured retention period" for the lookback. *Recommended:*
+   both **config-defined**, with conservative defaults; never unbounded lookback. (CF-2, OC-2)
+5. **Per-app concurrency/rate ceilings: where captured.** [overview.md](../architecture/overview.md)
+   *Outbound load discipline* calls them "operational configuration on the app registration," but the Phase-1
+   `RegisteredApp` model deferred them (Phase-1 README open question 10). *Recommended:* capture them on the
+   `RegisteredApp` now (a Phase-4 additive field), config-level defaults where omitted. (OC-3)
+6. **Setting `FieldMapping.conflictPolicy = manual-resolve`: at review or as rule config?** Phase 3 (AM-3)
+   left it absent and called setting it "a Phase-4 concern." *Concept gap:* the concept does not fix *when* it
+   is set. *Recommended:* let the operator set it as a rule-configuration action (SA-1) since it governs
+   execution, not correspondence; confirm whether it should instead be a review-time control. (CF-3, SA-1)
+7. **Re-enabling a disabled rule does not re-run backfill.** Concept is silent on disable→re-enable.
+   *Recommended:* disabling retains `cursor`/snapshot/links/field-state; re-enabling resumes polling without a
+   fresh backfill (backfill is the *initial* reconciliation, run once). (SA-1)
+8. **No glossary term for the per-record ordering queue or the "recently-written" cache.** *Flag (not a coin):*
+   [sync-engine.md](../architecture/sync-engine.md) describes both in prose (*Ordering and consistency*, *Loop
+   prevention*) but [glossary.md](../glossary.md) has no dedicated entry. The stories use **descriptive**
+   naming ("per-`RecordLink` ordering queue", "recently-written cache") rather than coining a glossary entity;
+   a human should decide whether either deserves a glossary line. (OQ-*, EP-2)
+9. **`OperationMapping.action` has no `list` value** (carried over from the Phase-3 open question). Sync's
+   change-type → operation selection (SP-3, OC-1) classifies a collection read as `read`; it never needs a
+   `list` action. Flagged again here because the Sync Engine is the first *consumer* of `action`. (SP-3)
+10. **Recently-written cache TTL and passthrough-tag header name.** Concept says "short-TTL" and "a passthrough
+    header/field where the target API supports write metadata" without fixing values. *Recommended:*
+    implementation-defined; correctness is independent of both (EP-2), so they are tuning knobs, not
+    contracts. (EP-2)
