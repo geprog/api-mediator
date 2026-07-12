@@ -33,6 +33,9 @@ export function useAppSpecs(
   return useQuery<AppSpecsResponse, ApiError>({
     queryKey: computed(() => queryKeys.appSpecs(toValue(appId))),
     queryFn: () => getAppSpecs(toValue(appId)),
+    // Guard against an empty appId (e.g. an unselected app in the proposal-list
+    // filter) firing a request with no id.
+    enabled: computed(() => toValue(appId) !== ""),
   });
 }
 
