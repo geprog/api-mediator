@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 import type { ExclusionsReplacer } from "../../modules/analysis-exclusions.js";
+import type {
+  ApprovalService,
+  EscapeHatchService,
+  ProposalReadService,
+} from "../../modules/approval/index.js";
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
@@ -18,6 +23,12 @@ export interface OperatorApiDeps {
   readonly bindingReader: BindingReader;
   readonly bindingConfirmer: BindingConfirmer;
   readonly exclusionsReplacer: ExclusionsReplacer;
+  // Phase-3 Review & Approval (RA-1..RA-5): the read side, the Approval Service
+  // (per-item decisions + identity-key confirmation + approve), and the
+  // shortlist-miss escape hatch.
+  readonly proposalReadService: ProposalReadService;
+  readonly approvalService: ApprovalService;
+  readonly escapeHatchService: EscapeHatchService;
 }
 
 /**

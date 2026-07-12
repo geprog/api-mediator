@@ -12,6 +12,7 @@ import type {
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { AnalysisExclusionsService } from "../modules/analysis-exclusions.js";
+import { FakeApprovalPersistence } from "../modules/approval/approval.testkit.js";
 import type {
   AppReader,
   AppTxRepo,
@@ -29,6 +30,7 @@ import { SpecRegistry } from "../modules/spec-registry.js";
 import { LocalAccountsAuthProvider } from "../http/auth/index.js";
 import { registerErrorHandler } from "../http/errors.js";
 import { registerAuthenticatedOperatorApi } from "../http/operator/api.js";
+import { buildApprovalApiDeps, type ApprovalApiTestOptions } from "./approval-api.testkit.js";
 import { TEST_OPERATOR_ACCOUNTS } from "./auth.testkit.js";
 
 /**
@@ -235,6 +237,13 @@ function replaceArray<T>(target: T[], source: readonly T[]): void {
 export interface TestServer {
   readonly app: FastifyInstance;
   readonly store: InMemoryStore;
+  /**
+   * The Phase-3 approval state (proposals/items/specs/approved mappings/audit/
+   * events) the RA routes read and mutate. Seed it with `seedSpec`/`seedProposal`/
+   * `seedApprovedMapping` and assert on its maps — it is a **separate** store from
+   * {@link InMemoryStore} (which backs the Phase-1/2 routes).
+   */
+  readonly approval: FakeApprovalPersistence;
 }
 
 /**
@@ -245,7 +254,10 @@ export interface TestServer {
  * the `auth.testkit` header helpers. Call `app.inject(...)` to drive routes;
  * assert on `store` for persistence effects.
  */
-export function buildTestServer(defaultPollInterval = 300000): TestServer {
+export function buildTestServer(
+  defaultPollInterval = 300000,
+  approvalOptions: ApprovalApiTestOptions = {},
+): TestServer {
   const store = new InMemoryStore();
   const unitOfWork = new FakeUnitOfWork(store);
   const specRegistry = new SpecRegistry();
@@ -254,6 +266,12 @@ export function buildTestServer(defaultPollInterval = 300000): TestServer {
     specReader: new FakeSpecRepo(store),
     bindingReader: new FakeBindingRepo(store),
   };
+
+  // The Phase-3 RA slice runs over its own in-memory approval store, seeded and
+  // asserted on via the returned `approval` handle. Its LLM escape hatch is driven
+  // by a `FakeProvider` (no live model).
+  const approval = new FakeApprovalPersistence();
+  const approvalDeps = buildApprovalApiDeps(approval, approvalOptions);
 
   const app = Fastify({ logger: false });
   registerAuthenticatedOperatorApi(
@@ -265,10 +283,13 @@ export function buildTestServer(defaultPollInterval = 300000): TestServer {
       appReader: readers.appReader,
       specReader: readers.specReader,
       bindingReader: readers.bindingReader,
+      proposalReadService: approvalDeps.proposalReadService,
+      approvalService: approvalDeps.approvalService,
+      escapeHatchService: approvalDeps.escapeHatchService,
     },
     new LocalAccountsAuthProvider(TEST_OPERATOR_ACCOUNTS),
   );
   registerErrorHandler(app);
 
-  return { app, store };
+  return { app, store, approval };
 }

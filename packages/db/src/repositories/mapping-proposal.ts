@@ -41,6 +41,20 @@ export class MappingProposalRepository {
     }
   }
 
+  /**
+   * Append `MappingProposalItem`s to an **existing** proposal, inside the caller's
+   * transaction — the write half of the Phase-3 escape hatch (RA-5), which attaches
+   * a scoped detail analysis's items to a proposal that already exists. Unlike
+   * {@link create} it inserts no proposal row; a no-op on an empty list. The caller
+   * atomically pairs it with {@link setShortlistResult} so the attached items and
+   * the updated `shortlistResult` commit together.
+   */
+  public async addItems(items: MappingProposalItem[]): Promise<void> {
+    if (items.length > 0) {
+      await this.db.insert(mappingProposalItem).values(items.map(toMappingProposalItemInsert));
+    }
+  }
+
   /** The proposal row for `id` (its items are read via {@link listItems}). */
   public async getById(id: string): Promise<MappingProposal | undefined> {
     const [row] = await this.db.select().from(mappingProposal).where(eq(mappingProposal.id, id));

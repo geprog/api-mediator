@@ -2,17 +2,29 @@ import type { AppConfig } from "@mediator/config";
 import { EnvKeyProvider, type CredentialStoreLogger } from "@mediator/credentials";
 import {
   ApiSpecRepository,
+  MappingProposalRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   closeDb,
+  tx,
   type Database,
 } from "@mediator/db";
 import { PostgresEventBus } from "@mediator/event-bus";
+import { PROMPT_VERSION } from "@mediator/llm";
 import { getActiveTraceContext, shutdownTelemetry } from "@mediator/telemetry";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { pino } from "pino";
 
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
+import {
+  ApprovalService,
+  DbApprovalUnitOfWork,
+  EscapeHatchService,
+  ProposalReadService,
+  createEscapeHatchTelemetry,
+} from "./modules/approval/index.js";
+import { createDetectionMetricsSink } from "./modules/detection/telemetry.js";
+import { createMappingProvider } from "./modules/detection/provider.js";
 import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
@@ -103,6 +115,44 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
   };
   const unitOfWork = new DbUnitOfWork(db, keyProvider, eventBus, credentialLogger);
   const specRegistry = new SpecRegistry();
+  const specReader = new ApiSpecRepository(db);
+
+  // ── Phase-3 Review & Approval slice (RA-1..RA-5) ───────────────────────────
+  // Kept in one clearly-scoped block to minimize conflict with the concurrent
+  // slice that also edits this file. The Approval Service does all of its reads
+  // and writes in one transaction via `DbApprovalUnitOfWork`; the read side and
+  // escape hatch use pooled reads plus (for the escape-hatch attach) a `tx`. The
+  // escape hatch gets its own provider instance (a dedicated `lastUsage` seam,
+  // separate from the detection background's provider).
+  const proposalRepo = new MappingProposalRepository(db);
+  const escapeHatchProvider = createMappingProvider(config.mappingLlm);
+  const approvalService = new ApprovalService({
+    unitOfWork: new DbApprovalUnitOfWork(db, eventBus),
+  });
+  const proposalReadService = new ProposalReadService({
+    proposals: proposalRepo,
+    specs: specReader,
+    reviewThreshold: config.mappingLlm.reviewThreshold,
+  });
+  const escapeHatchService = new EscapeHatchService({
+    proposals: proposalRepo,
+    specs: specReader,
+    detection: {
+      provider: escapeHatchProvider,
+      maxRetries: config.mappingLlm.maxRetries,
+      promptVersion: PROMPT_VERSION,
+    },
+    writer: {
+      attach: ({ proposalId, items, shortlistResult }) =>
+        tx(db, async (txn) => {
+          const repo = new MappingProposalRepository(txn);
+          await repo.addItems([...items]);
+          await repo.setShortlistResult(proposalId, shortlistResult);
+        }),
+    },
+    metricsSink: createDetectionMetricsSink(escapeHatchProvider.providerId),
+    telemetry: createEscapeHatchTelemetry(escapeHatchProvider.providerId),
+  });
 
   return {
     registrar: new RegistrationService({
@@ -113,8 +163,11 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     bindingConfirmer: new ResourceBindingService({ unitOfWork }),
     exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
     appReader: new RegisteredAppRepository(db),
-    specReader: new ApiSpecRepository(db),
+    specReader,
     bindingReader: new ResourceBindingRepository(db),
+    proposalReadService,
+    approvalService,
+    escapeHatchService,
   };
 }
 

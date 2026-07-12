@@ -40,6 +40,7 @@ const config: MappingLlmConfig = {
   thinking: (process.env["MAPPING_LLM_THINKING"] ?? "true") === "true",
   requestTimeoutMs: 110_000,
   maxRetries: 3,
+  reviewThreshold: 0.7,
 };
 
 const context: ShortlistPromptContext = {
