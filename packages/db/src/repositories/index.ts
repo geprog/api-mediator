@@ -15,3 +15,7 @@ export {
 export { ApprovedMappingRepository } from "./approved-mapping.js";
 export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-artifacts.js";
 export { AuditLogRepository } from "./audit-log.js";
+export {
+  DownstreamArtifactRepository,
+  type DownstreamArtifactOps,
+} from "./downstream-artifacts.js";

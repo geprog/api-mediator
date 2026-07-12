@@ -15,6 +15,9 @@ import {
 } from "drizzle-orm/pg-core";
 
 import type {
+  AdapterBindingRole,
+  AdapterBindingStatus,
+  AdapterEndpointStatus,
   ApiSpecRole,
   ApiSpecStatus,
   AppCapabilities,
@@ -24,6 +27,8 @@ import type {
   ConflictPolicy,
   CredentialType,
   GeneratedBy,
+  GraphEdgeMetadata,
+  GraphEdgeType,
   Ir,
   IrRefTarget,
   MappingDecision,
@@ -38,6 +43,7 @@ import type {
   ResourceBinding,
   ReviewState,
   ShortlistResult,
+  SyncRuleStatus,
   TransformConfig,
   TransformKind,
   TransformSuggestion,
@@ -172,6 +178,36 @@ export const approvedMappingStatusEnum = pgEnum("approved_mapping_status", [
   "superseded",
   "archived",
 ] as const satisfies readonly ApprovedMappingStatus[]);
+
+// ── Phase-3 downstream-artifact enums (pinned to @mediator/domain unions) ──────
+
+export const syncRuleStatusEnum = pgEnum("sync_rule_status", [
+  "enabled",
+  "disabled",
+] as const satisfies readonly SyncRuleStatus[]);
+
+export const adapterEndpointStatusEnum = pgEnum("adapter_endpoint_status", [
+  "active",
+  "composition-required",
+  "disabled",
+] as const satisfies readonly AdapterEndpointStatus[]);
+
+export const adapterBindingRoleEnum = pgEnum("adapter_binding_role", [
+  "primary",
+  "fallback",
+  "supplement",
+] as const satisfies readonly AdapterBindingRole[]);
+
+export const adapterBindingStatusEnum = pgEnum("adapter_binding_status", [
+  "active",
+  "proposed",
+  "disabled",
+] as const satisfies readonly AdapterBindingStatus[]);
+
+export const graphEdgeTypeEnum = pgEnum("graph_edge_type", [
+  "sync",
+  "adapter-dependency",
+] as const satisfies readonly GraphEdgeType[]);
 
 export const auditLogTypeEnum = pgEnum("audit_log_type", [
   "poll-run",
@@ -729,5 +765,179 @@ export const auditLog = pgTable(
     // "the decision history for this proposal" / "for this mapping".
     index("audit_log_related_proposal_id_idx").on(table.relatedProposalId),
     index("audit_log_related_mapping_id_idx").on(table.relatedMappingId),
+  ],
+);
+
+// ── Phase-3 downstream artifacts (the disabled instantiation of an approval) ───
+//
+// The `MappingApproved` consumer instantiates these in a NON-executing state
+// (`docs/flows/mapping-review-and-approval.md` steps 9-10; requirements AI-1..AI-3):
+// a peer-peer mapping yields disabled `sync_rule`s + a `sync` `graph_edge`; a
+// consumer-provider mapping yields an `adapter_endpoint` with `proposed`
+// `adapter_binding`s + an `adapter-dependency` `graph_edge`. These carry ONLY the
+// AM-6 minimal columns — no Phase-4 execution state (cursor/snapshot/backfill/
+// deletePropagation/intervals) and no Phase-5 composition state (aggregation
+// strategy, post-merge filters/sorts/pagination, execution order, chaining,
+// cache TTL). Those columns arrive with the phases that write them.
+
+/**
+ * `SyncRule` — the disabled, per-resource-pair sync configuration a peer-peer
+ * `ApprovedMapping` instantiates (`docs/architecture/data-model.md` `SyncRule`,
+ * AI-1). One row per mapped resource pair; created `status = 'disabled'`, with no
+ * live execution state — enablement (Phase 4) is what seeds the cursor/snapshot
+ * and triggers the backfill.
+ *
+ * `resource_pair_ref` is the mapped resource pair in its **canonical
+ * direction-agnostic form** (the two `(app, resource)` sides ordered by a stable
+ * key, never by this rule's direction), so both directions of a bidirectional pair
+ * name the same links/field state (data-model.md `SyncRule`/`RecordLink`).
+ *
+ * `mapping_id` is `ON DELETE CASCADE`: a rule is wholly instantiated by its
+ * `ApprovedMapping` (the child-mapping discipline). The partial-free UNIQUE index
+ * over `(approved_mapping_id, resource_pair_ref)` is the idempotency/upsert key: a
+ * redelivered `MappingApproved` (or an incremental one) re-inserts each rule with
+ * `ON CONFLICT DO NOTHING`, so an already-instantiated rule (and any operator state
+ * on it) is left untouched while a newly-covered pair adds a row (AI-3 criteria 1/2).
+ */
+export const syncRule = pgTable(
+  "sync_rule",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvedMappingId: uuid("approved_mapping_id")
+      .notNull()
+      .references(() => approvedMapping.id, { onDelete: "cascade" }),
+    resourcePairRef: text("resource_pair_ref").notNull(),
+    status: syncRuleStatusEnum("status").notNull(),
+  },
+  (table) => [
+    index("sync_rule_approved_mapping_id_idx").on(table.approvedMappingId),
+    // Idempotent instantiation: at most one rule per (mapping, resource pair).
+    uniqueIndex("sync_rule_mapping_resource_pair_uq").on(
+      table.approvedMappingId,
+      table.resourcePairRef,
+    ),
+  ],
+);
+
+/**
+ * `AdapterEndpoint` — the mediator-hosted virtual provider for one CONSUMER-spec
+ * operation (`docs/architecture/data-model.md` `AdapterEndpoint`, AI-2). Created
+ * when the first consumer-provider mapping covering that operation is approved,
+ * then reused (never duplicated) as further mappings attach bindings — the
+ * `(consumer_app_id, consumer_operation_id)` UNIQUE index is what makes the
+ * ensure-exists idempotent (AI-2 criterion 1).
+ *
+ * Phase 3 creates it NON-serving: no `aggregation_strategy`/`cache_ttl`/post-merge
+ * columns (Phase 5) and its `status` reflects that composition and serving are
+ * deferred — `composition-required`, the enum value that means "binding(s)
+ * attached, an aggregation decision is still owed before anything serves" (AI-2
+ * criterion 4; the flow's single-binding "activate immediately" is overridden by
+ * the phase-3 reconciliation note in the requirement — there is no Adapter Server
+ * Runtime until Phase 5).
+ */
+export const adapterEndpoint = pgTable(
+  "adapter_endpoint",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    consumerAppId: uuid("consumer_app_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    consumerOperationId: text("consumer_operation_id").notNull(),
+    status: adapterEndpointStatusEnum("status").notNull(),
+  },
+  (table) => [
+    index("adapter_endpoint_consumer_app_id_idx").on(table.consumerAppId),
+    // Ensure-exists key: one endpoint per (consumer app, consumer operation).
+    uniqueIndex("adapter_endpoint_consumer_operation_uq").on(
+      table.consumerAppId,
+      table.consumerOperationId,
+    ),
+  ],
+);
+
+/**
+ * `AdapterBinding` — a binding from an `AdapterEndpoint` to a backend
+ * app + operation, attached by a consumer-provider `ApprovedMapping`
+ * (`docs/architecture/data-model.md` `AdapterBinding`, AI-2). Phase 3 attaches it
+ * `status = 'proposed'` (not yet composed into a serving configuration) with the
+ * default `role = 'primary'`; `backend_operation_id` is one of the approved
+ * `OperationMapping`s' target operations, not free-form.
+ *
+ * Both foreign keys `ON DELETE CASCADE` (a binding is owned by its endpoint and by
+ * its mapping). The UNIQUE index over
+ * `(adapter_endpoint_id, backend_app_id, backend_operation_id, approved_mapping_id)`
+ * is the idempotency/upsert key: a redelivered or incremental `MappingApproved`
+ * re-inserts each binding with `ON CONFLICT DO NOTHING`. `approved_mapping_id` is
+ * part of the key deliberately — two DIFFERENT mappings attaching a binding to the
+ * same endpoint for the same backend operation are distinct candidate bindings
+ * (a Phase-5 composition decision), not a duplicate.
+ */
+export const adapterBinding = pgTable(
+  "adapter_binding",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    adapterEndpointId: uuid("adapter_endpoint_id")
+      .notNull()
+      .references(() => adapterEndpoint.id, { onDelete: "cascade" }),
+    backendAppId: uuid("backend_app_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    backendOperationId: text("backend_operation_id").notNull(),
+    approvedMappingId: uuid("approved_mapping_id")
+      .notNull()
+      .references(() => approvedMapping.id, { onDelete: "cascade" }),
+    role: adapterBindingRoleEnum("role").notNull(),
+    status: adapterBindingStatusEnum("status").notNull(),
+  },
+  (table) => [
+    index("adapter_binding_adapter_endpoint_id_idx").on(table.adapterEndpointId),
+    index("adapter_binding_approved_mapping_id_idx").on(table.approvedMappingId),
+    // Idempotent attach: one binding per (endpoint, backend op, mapping).
+    uniqueIndex("adapter_binding_endpoint_backend_mapping_uq").on(
+      table.adapterEndpointId,
+      table.backendAppId,
+      table.backendOperationId,
+      table.approvedMappingId,
+    ),
+  ],
+);
+
+/**
+ * `GraphEdge` — the materialized projection of one sync/adapter-dependency
+ * relationship between two app nodes (`docs/architecture/data-model.md`
+ * `GraphEdge`, AI-1/AI-2 criterion 3). Upserted on approval, aggregating that
+ * `(app pair, direction)`'s rules/bindings; not a source of truth.
+ *
+ * `status` is a plain `text` (the concept does NOT enumerate `GraphEdge.status` —
+ * it projects the underlying rule/binding state). `metadata` is the one jsonb
+ * column carrying the aggregated `direction` (`sourceSpecId → targetSpecId`) and
+ * `lastActivityAt` (NULL before anything executes) — the mapper reconstructs the
+ * `Date` on read.
+ *
+ * The UNIQUE index over `(source_node_id, target_node_id, type)` keys the edge by
+ * its node pair + type + direction (direction is encoded by the ordered node
+ * pair): a bidirectional pair is two directed rows. The upsert is ensure-exists
+ * (`ON CONFLICT DO NOTHING`): for a fixed `(source app, target app, type)` the
+ * projected direction is invariant and Phase 3 produces no activity, so a repeat
+ * approval finds the edge already correct and must NOT clobber a later phase's
+ * `lastActivityAt`/`status` (AI-3 criterion 2). Node columns FK `registered_app`.
+ */
+export const graphEdge = pgTable(
+  "graph_edge",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceNodeId: uuid("source_node_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    targetNodeId: uuid("target_node_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    type: graphEdgeTypeEnum("type").notNull(),
+    status: text("status").notNull(),
+    metadata: jsonb("metadata").$type<GraphEdgeMetadata>().notNull(),
+  },
+  (table) => [
+    // Node pair + type + direction (direction = ordered node pair) → one edge.
+    uniqueIndex("graph_edge_nodes_type_uq").on(table.sourceNodeId, table.targetNodeId, table.type),
   ],
 );

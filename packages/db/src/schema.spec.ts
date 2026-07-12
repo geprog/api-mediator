@@ -1,10 +1,14 @@
 import {
+  adapterBindingRoleSchema,
+  adapterBindingStatusSchema,
+  adapterEndpointStatusSchema,
   apiSpecRoleSchema,
   apiSpecStatusSchema,
   approvedMappingStatusSchema,
   auditLogTypeSchema,
   conflictPolicySchema,
   credentialTypeSchema,
+  graphEdgeTypeSchema,
   mappingDecisionSchema,
   mappingPhaseSchema,
   mappingProposalItemKindSchema,
@@ -13,18 +17,23 @@ import {
   operationActionSchema,
   registeredAppStatusSchema,
   reviewStateSchema,
+  syncRuleStatusSchema,
   transformKindSchema,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import {
   RESOURCE_BINDING_REF_KINDS,
+  adapterBindingRoleEnum,
+  adapterBindingStatusEnum,
+  adapterEndpointStatusEnum,
   apiSpecRoleEnum,
   apiSpecStatusEnum,
   approvedMappingStatusEnum,
   auditLogTypeEnum,
   conflictPolicyEnum,
   credentialTypeEnum,
+  graphEdgeTypeEnum,
   mappingDecisionEnum,
   mappingPhaseEnum,
   mappingProposalItemKindEnum,
@@ -33,6 +42,7 @@ import {
   operationActionEnum,
   registeredAppStatusEnum,
   reviewStateEnum,
+  syncRuleStatusEnum,
   transformKindEnum,
 } from "./schema.js";
 
@@ -75,6 +85,19 @@ describe("pg enum ↔ domain parity", () => {
     ],
     ["audit_log_type", auditLogTypeEnum.enumValues, auditLogTypeSchema.options],
     ["mapping_decision", mappingDecisionEnum.enumValues, mappingDecisionSchema.options],
+    ["sync_rule_status", syncRuleStatusEnum.enumValues, syncRuleStatusSchema.options],
+    [
+      "adapter_endpoint_status",
+      adapterEndpointStatusEnum.enumValues,
+      adapterEndpointStatusSchema.options,
+    ],
+    ["adapter_binding_role", adapterBindingRoleEnum.enumValues, adapterBindingRoleSchema.options],
+    [
+      "adapter_binding_status",
+      adapterBindingStatusEnum.enumValues,
+      adapterBindingStatusSchema.options,
+    ],
+    ["graph_edge_type", graphEdgeTypeEnum.enumValues, graphEdgeTypeSchema.options],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {

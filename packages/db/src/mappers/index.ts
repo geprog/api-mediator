@@ -74,3 +74,27 @@ export {
   type AuditLogInsert,
   type AuditLogRow,
 } from "./audit-log.js";
+export {
+  mapSyncRuleRow,
+  toSyncRuleInsert,
+  type SyncRuleInsert,
+  type SyncRuleRow,
+} from "./sync-rule.js";
+export {
+  mapAdapterEndpointRow,
+  toAdapterEndpointInsert,
+  type AdapterEndpointInsert,
+  type AdapterEndpointRow,
+} from "./adapter-endpoint.js";
+export {
+  mapAdapterBindingRow,
+  toAdapterBindingInsert,
+  type AdapterBindingInsert,
+  type AdapterBindingRow,
+} from "./adapter-binding.js";
+export {
+  mapGraphEdgeRow,
+  toGraphEdgeInsert,
+  type GraphEdgeInsert,
+  type GraphEdgeRow,
+} from "./graph-edge.js";

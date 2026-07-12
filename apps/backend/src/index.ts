@@ -11,6 +11,7 @@ import { createDb } from "@mediator/db";
 
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
+import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
 import { buildDetectionBackground } from "./modules/detection/background.js";
 
 /**
@@ -30,12 +31,27 @@ const db = createDb(config.database.url, (error) => {
 });
 const { app, shutdown: shutdownServer } = buildServer({ config, db, logger });
 
+// The Phase-3 artifact-instantiation reaction: the `MappingApproved` consumer that
+// instantiates an approval's disabled downstream artifacts (SyncRules /
+// AdapterBindings + GraphEdge), plus its reconciler. It builds NO dispatcher of its
+// own — it registers on the single shared outbox dispatcher below (a second
+// dispatcher over the same outbox would mark a foreign event published without
+// delivering it to its consumer).
+const artifactInstantiation = buildArtifactInstantiation({ db });
+
 // The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers
 // `SpecIngested` to the detection consumer, which enqueues a job), the durable
 // `DetectionWorker` (runs the LLM detection off the dispatcher transaction), and
-// the periodic reconciliation sweep. Started after `listen`, stopped before the
-// server closes its db pool.
-const detection = buildDetectionBackground({ config, db, logger });
+// the periodic reconciliation sweep. It owns the single shared outbox dispatcher,
+// so the Phase-3 `MappingApproved` consumer + reconciler register on it here.
+// Started after `listen`, stopped before the server closes its db pool.
+const detection = buildDetectionBackground({
+  config,
+  db,
+  logger,
+  additionalConsumers: [artifactInstantiation.consumer],
+  additionalReconcilers: [artifactInstantiation.reconciler],
+});
 
 async function shutdown(): Promise<void> {
   detection.stop();
