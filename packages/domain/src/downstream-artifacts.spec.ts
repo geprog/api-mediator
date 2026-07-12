@@ -21,7 +21,10 @@ describe("SyncRule schema (peer-peer outcome)", () => {
     };
   }
 
-  it("accepts a disabled rule with only the AM-6 fields", () => {
+  it("accepts a disabled rule with only the AM-6 fields (SD-1 backward compat)", () => {
+    // The Phase-3 minimal shape — the exact object AI-1 instantiates and the db
+    // mapper reconstructs — still validates against the SD-1-extended schema, and
+    // the extended fields stay *absent* (no defaults forced onto the type).
     const parsed = syncRuleSchema.parse(disabledRule());
     expect(Object.keys(parsed).sort()).toEqual(
       ["approvedMappingId", "id", "resourcePairRef", "status"].sort(),
@@ -30,6 +33,46 @@ describe("SyncRule schema (peer-peer outcome)", () => {
 
   it("rejects an unknown status", () => {
     expect(syncRuleSchema.safeParse({ ...disabledRule(), status: "active" }).success).toBe(false);
+  });
+
+  it("accepts an enabled rule carrying its full SD-1 execution/policy state", () => {
+    const result = syncRuleSchema.safeParse({
+      ...disabledRule(),
+      status: "enabled",
+      pollIntervalOverride: 300,
+      pollOperationRef: "issues#list",
+      deletePropagation: "propagate",
+      targetDriftCheck: "read-before-write",
+      backfillMode: "link-only",
+      backfillStatus: "completed",
+      lastRunAt: new Date("2026-07-11T00:00:00.000Z"),
+      lastEventAt: new Date("2026-07-11T00:05:00.000Z"),
+      cursor: "cursor-42",
+      lastSnapshotRef: "snap-1",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts explicit-null live-state fields (unset at go-live)", () => {
+    const result = syncRuleSchema.safeParse({
+      ...disabledRule(),
+      status: "enabled",
+      backfillStatus: "running",
+      lastRunAt: null,
+      lastEventAt: null,
+      cursor: null,
+      lastSnapshotRef: null,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an unknown deletePropagation / backfillStatus value", () => {
+    expect(
+      syncRuleSchema.safeParse({ ...disabledRule(), deletePropagation: "delete" }).success,
+    ).toBe(false);
+    expect(syncRuleSchema.safeParse({ ...disabledRule(), backfillStatus: "done" }).success).toBe(
+      false,
+    );
   });
 });
 

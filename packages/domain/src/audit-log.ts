@@ -7,18 +7,24 @@ import { z } from "zod";
  * `docs/architecture/security.md` *Audit logging*). One entity, two names: the
  * `SyncEvent` name is kept because sync executions dominate the row volume.
  *
- * Phase 3 writes exactly one `type` — `mapping-decision` — to satisfy AS-1
- * criterion 5 (a per-item decision records its actor + item + decision) and the
- * approve action's attribution. The sync-execution/poll-run/etc. rows, with their
- * idempotency/loop-prevention columns, are Phase 4 and deliberately not modeled
- * on this shape yet; the columns they need are added by a later migration to the
- * same table. What is modeled here is exactly what an audit reader needs to
- * reconstruct the incremental-approval history the concept says lives in the
- * audit log rather than on the `ApprovedMapping` (`ApprovedMapping.approvedBy`).
+ * Phase 3 modeled only the `mapping-decision` columns (a per-item decision records
+ * its actor + item + decision — AS-1 criterion 5 — plus the approve action's
+ * attribution). SD-4 now layers on the per-record **sync-execution** columns and
+ * the execution `status` enum, so a `sync-execution` row can be written **once per
+ * processed change whatever its outcome** — including one that stopped before any
+ * outbound call (`skipped-loop`, `skipped-policy`) — and idempotency dedup /
+ * parked-event supersession / manual replay can query by it.
+ *
+ * This is a **types-only** extension: the actual `audit_log` migration adding these
+ * columns, and the pipeline code that writes them, are later slices (OC-*, every
+ * engine story). Every SD-4 field is `.optional()` so the existing Phase-3
+ * `mapping-decision` construction sites (the approval service + its db mapper),
+ * which set none of them, still validate and typecheck unchanged — a
+ * `mapping-decision` row leaves `status` unset (enforced below).
  *
  * **Metadata only, never secrets** — the security invariant: an audit entry
- * carries who/what/when/decision, never credential material or live payload
- * values (`docs/architecture/security.md`).
+ * carries who/what/when/decision and hashes/ids/status, never credential material
+ * or live payload values (`docs/architecture/security.md`).
  */
 
 // ── type (the full data-model vocabulary) ────────────────────────────────────
@@ -54,6 +60,29 @@ export const mappingDecisionSchema = z.enum(["accept", "edit", "reject", "approv
 export type MappingDecision = z.infer<typeof mappingDecisionSchema>;
 export const MappingDecision = mappingDecisionSchema.enum;
 
+// ── status (the sync-execution outcome vocabulary — SD-4) ────────────────────
+
+/**
+ * The execution `status` of a `SyncEvent`/`AuditLog` row
+ * (`docs/architecture/data-model.md` `SyncEvent / AuditLog` `status`). The single
+ * naming authority owns every value the column can hold. `skipped-policy` records a
+ * change observed but not propagated by policy and covers **all four** of its
+ * causes — a deletion under `deletePropagation = ignore`, a create with no approved
+ * `create` operation, an update on a create-only rule, and a change to a record
+ * whose link is tombstoned `observed-delete` — distinguished by the row's per-record
+ * context and `details`, not a dedicated sub-enum (the concept coins none). A
+ * `mapping-decision` row leaves `status` unset (SD-4 criterion 1).
+ */
+export const auditLogStatusSchema = z.enum([
+  "success",
+  "failure",
+  "skipped-loop",
+  "skipped-policy",
+  "conflict",
+]);
+export type AuditLogStatus = z.infer<typeof auditLogStatusSchema>;
+export const AuditLogStatus = auditLogStatusSchema.enum;
+
 // ── AuditLogEntry ────────────────────────────────────────────────────────────
 
 /**
@@ -71,16 +100,52 @@ export const MappingDecision = mappingDecisionSchema.enum;
  *   deleted, so it must not be cascade-removed with them.
  * - `details` — a short, metadata-only note (e.g. the approve outcome); never a
  *   secret value.
+ *
+ * SD-4 per-record execution fields (all optional — see the file header):
+ *
+ * - `status` — the execution outcome (above); **unset on `mapping-decision`**
+ *   rows, enforced by the refinement below.
+ * - `relatedRuleId` / `recordLinkId` / `sourceNativeId` / `originAppId` /
+ *   `idempotencyKey` / `payloadHash` — the per-record (`sync-execution`) context
+ *   that idempotency's per-record lookback, parked-event supersession, and manual
+ *   replay query by. All hashes/ids — never a live payload value.
+ * - `traceId` / `spanId` — correlation to the OpenTelemetry trace. The concept says
+ *   every row carries them; they are modeled `.optional()` here so the pre-existing
+ *   Phase-3 `mapping-decision` construction sites (which predate this slice and set
+ *   neither) still compile — a later slice populates them at write time.
  */
-export const auditLogEntrySchema = z.object({
-  id: z.string(),
-  type: auditLogTypeSchema,
-  actor: z.string(),
-  decision: mappingDecisionSchema.optional(),
-  relatedProposalId: z.string().optional(),
-  relatedItemId: z.string().optional(),
-  relatedMappingId: z.string().optional(),
-  details: z.string().optional(),
-  timestamp: z.date(),
-});
+export const auditLogEntrySchema = z
+  .object({
+    id: z.string(),
+    type: auditLogTypeSchema,
+    actor: z.string(),
+    decision: mappingDecisionSchema.optional(),
+    relatedProposalId: z.string().optional(),
+    relatedItemId: z.string().optional(),
+    relatedMappingId: z.string().optional(),
+    details: z.string().optional(),
+    timestamp: z.date(),
+    // ── SD-4 per-record execution fields (all optional for backward compatibility) ──
+    status: auditLogStatusSchema.optional(),
+    relatedRuleId: z.string().optional(),
+    recordLinkId: z.string().optional(),
+    sourceNativeId: z.string().optional(),
+    originAppId: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    payloadHash: z.string().optional(),
+    traceId: z.string().optional(),
+    spanId: z.string().optional(),
+  })
+  .superRefine((entry, ctx) => {
+    // A `mapping-decision` row leaves `status` unset (SD-4 criterion 1): the
+    // execution status vocabulary describes a processed sync change, not a review
+    // decision.
+    if (entry.type === "mapping-decision" && entry.status !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "a mapping-decision audit row leaves status unset",
+        path: ["status"],
+      });
+    }
+  });
 export type AuditLogEntry = z.infer<typeof auditLogEntrySchema>;
