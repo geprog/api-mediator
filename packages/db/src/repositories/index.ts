@@ -12,3 +12,6 @@ export {
   type DetectionJobEnqueueOps,
   type DetectionJobWorkerOps,
 } from "./detection-job.js";
+export { ApprovedMappingRepository } from "./approved-mapping.js";
+export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-artifacts.js";
+export { AuditLogRepository } from "./audit-log.js";

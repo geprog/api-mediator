@@ -44,3 +44,33 @@ export {
   type MappingProposalItemInsert,
   type MappingProposalItemRow,
 } from "./mapping-proposal-item.js";
+export {
+  mapApprovedMappingRow,
+  toApprovedMappingInsert,
+  type ApprovedMappingInsert,
+  type ApprovedMappingRow,
+} from "./approved-mapping.js";
+export {
+  mapFieldMappingRow,
+  toFieldMappingInsert,
+  type FieldMappingInsert,
+  type FieldMappingRow,
+} from "./field-mapping.js";
+export {
+  mapOperationMappingRow,
+  toOperationMappingInsert,
+  type OperationMappingInsert,
+  type OperationMappingRow,
+} from "./operation-mapping.js";
+export {
+  mapParameterMappingRow,
+  toParameterMappingInsert,
+  type ParameterMappingInsert,
+  type ParameterMappingRow,
+} from "./parameter-mapping.js";
+export {
+  mapAuditLogRow,
+  toAuditLogInsert,
+  type AuditLogInsert,
+  type AuditLogRow,
+} from "./audit-log.js";

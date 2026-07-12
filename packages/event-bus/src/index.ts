@@ -16,8 +16,10 @@ export { PostgresEventBus, type EventBus } from "./event-bus.js";
 
 // Event envelope handling + construction/parse helpers.
 export {
+  createMappingApproved,
   createSpecIngested,
   flattenDeliveredEvent,
+  parseMappingApproved,
   parseSpecIngested,
   reconstructEvent,
   toOutboxInsert,

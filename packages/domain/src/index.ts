@@ -28,3 +28,4 @@ export * from "./approved-mapping.js";
 export * from "./field-mapping.js";
 export * from "./operation-mapping.js";
 export * from "./downstream-artifacts.js";
+export * from "./audit-log.js";

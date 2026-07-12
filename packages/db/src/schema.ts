@@ -11,26 +11,35 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 import type {
   ApiSpecRole,
   ApiSpecStatus,
   AppCapabilities,
+  ApprovedMappingStatus,
+  AuditLogType,
   ConfirmableRef,
+  ConflictPolicy,
   CredentialType,
   GeneratedBy,
   Ir,
   IrRefTarget,
+  MappingDecision,
   MappingPhase,
   MappingProposalItemKind,
   MappingProposalStatus,
+  MappingVariant,
+  OperationAction,
   ProposalElementRef,
   ProposalItemAlternative,
   RegisteredAppStatus,
   ResourceBinding,
   ReviewState,
   ShortlistResult,
+  TransformConfig,
+  TransformKind,
   TransformSuggestion,
 } from "@mediator/domain";
 
@@ -130,6 +139,55 @@ export const mappingPhaseEnum = pgEnum("mapping_phase", [
   "request",
   "response",
 ] as const satisfies readonly MappingPhase[]);
+
+// ── Phase-3 approved-mapping enums (pinned to @mediator/domain unions) ─────────
+
+export const mappingVariantEnum = pgEnum("mapping_variant", [
+  "peer-peer",
+  "consumer-provider",
+] as const satisfies readonly MappingVariant[]);
+
+export const transformKindEnum = pgEnum("transform_kind", [
+  "rename",
+  "coerce",
+  "aggregate",
+  "expression",
+] as const satisfies readonly TransformKind[]);
+
+export const conflictPolicyEnum = pgEnum("conflict_policy", [
+  "manual-resolve",
+] as const satisfies readonly ConflictPolicy[]);
+
+export const operationActionEnum = pgEnum("operation_action", [
+  "create",
+  "read",
+  "update",
+  "delete",
+] as const satisfies readonly OperationAction[]);
+
+export const approvedMappingStatusEnum = pgEnum("approved_mapping_status", [
+  "active",
+  "suspended",
+  "stale",
+  "superseded",
+  "archived",
+] as const satisfies readonly ApprovedMappingStatus[]);
+
+export const auditLogTypeEnum = pgEnum("audit_log_type", [
+  "poll-run",
+  "backfill-run",
+  "sync-execution",
+  "adapter-request",
+  "mapping-decision",
+  "credential-access",
+] as const satisfies readonly AuditLogType[]);
+
+export const mappingDecisionEnum = pgEnum("mapping_decision", [
+  "accept",
+  "edit",
+  "reject",
+  "approve",
+] as const satisfies readonly MappingDecision[]);
 
 /**
  * The lifecycle of a `mapping_detection_job` (below). This is an **infrastructure**
@@ -476,5 +534,200 @@ export const mappingDetectionJob = pgTable(
     uniqueIndex("mapping_detection_job_active_spec_uq")
       .on(table.apiSpecId)
       .where(sql`${table.status} in ('pending', 'running')`),
+  ],
+);
+
+// ── Phase-3 approved-mapping tables (the executable review outcome) ───────────
+
+/**
+ * `ApprovedMapping` — the reviewed, human-approved result the Sync/Adapter
+ * engines act on (`docs/architecture/data-model.md` `ApprovedMapping`, AS-2). One
+ * row per directional proposal, **updated in place** across incremental partial
+ * approvals (AS-2 criterion 4) — never a new row per approve.
+ *
+ * `source_spec_id`/`target_spec_id` pin the exact `ApiSpec` on each side (the
+ * source of truth); `source_app_id`/`target_app_id` denormalize them for query
+ * convenience. `variant` routes the AI-* instantiation (peer-peer → `SyncRule`s,
+ * consumer-provider → `AdapterBinding`s). Phase 3 only ever creates rows at
+ * `status = 'active'` — non-execution comes from the disabled downstream
+ * artifacts, never a mapping status (AS-6 criterion 3).
+ *
+ * `counterpart_mapping_id` is a nullable **self-reference**: peer-peer only, set
+ * on both rows when the reverse-direction mapping is also approved (AS-6
+ * criterion 2). No cascade — clearing it on archival is a deliberate Phase-6
+ * action, not an incidental delete.
+ *
+ * The partial UNIQUE index enforces the core invariant that at most **one active**
+ * `ApprovedMapping` exists per directional spec pair, which is what makes the
+ * update-in-place lookup (`getActiveByDirectionalSpecPair`) unambiguous. Non-active
+ * rows (a future `superseded`/`archived`) are excluded, so successor adoption can
+ * still hold both rows.
+ */
+export const approvedMapping = pgTable(
+  "approved_mapping",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceSpecId: uuid("source_spec_id")
+      .notNull()
+      .references(() => apiSpec.id),
+    targetSpecId: uuid("target_spec_id")
+      .notNull()
+      .references(() => apiSpec.id),
+    sourceAppId: uuid("source_app_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    targetAppId: uuid("target_app_id")
+      .notNull()
+      .references(() => registeredApp.id),
+    variant: mappingVariantEnum("variant").notNull(),
+    approvedBy: text("approved_by").notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }).notNull(),
+    status: approvedMappingStatusEnum("status").notNull(),
+    // Nullable self-reference: peer-peer reverse-direction link (AS-6). No cascade.
+    counterpartMappingId: uuid("counterpart_mapping_id").references(
+      (): AnyPgColumn => approvedMapping.id,
+    ),
+  },
+  (table) => [
+    // The update-in-place / counterpart lookups: by directional spec pair.
+    index("approved_mapping_source_target_idx").on(table.sourceSpecId, table.targetSpecId),
+    // At most one ACTIVE mapping per directional spec pair (update-in-place).
+    uniqueIndex("approved_mapping_active_direction_uq")
+      .on(table.sourceSpecId, table.targetSpecId)
+      .where(sql`${table.status} = 'active'`),
+  ],
+);
+
+/**
+ * `FieldMapping` — one approved field-level correspondence under an
+ * `ApprovedMapping` (`docs/architecture/data-model.md` `FieldMapping`, AS-2). The
+ * persisted form of an accepted/edited `kind = field` `MappingProposalItem`.
+ *
+ * `mapping_id` is `ON DELETE CASCADE`: a field mapping is wholly owned by its
+ * `ApprovedMapping` and the approve action reconciles the child set by replacing
+ * it, so an orphaned field row has no meaning.
+ *
+ * Conditionally-meaningful columns match the domain's variant conditionality
+ * (`FieldMapping`): `phase` is present only on consumer-provider rows;
+ * `is_identity_key`/`target_lookup_param_ref`/`conflict_policy` only on peer-peer
+ * rows. All are nullable → the mapper collapses NULL to an **absent** domain key.
+ * Phase 3 writes `is_identity_key = true` **only** on the one reviewer-confirmed
+ * identity field per resource pair (all others NULL), and never writes
+ * `conflict_policy` (a Phase-4 concern).
+ */
+export const fieldMapping = pgTable(
+  "field_mapping",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mappingId: uuid("mapping_id")
+      .notNull()
+      .references(() => approvedMapping.id, { onDelete: "cascade" }),
+    sourcePath: text("source_path").notNull(),
+    targetPath: text("target_path").notNull(),
+    transform: transformKindEnum("transform").notNull(),
+    // Nullable: only multi-input transforms declare additional input paths.
+    transformConfig: jsonb("transform_config").$type<TransformConfig>(),
+    // Nullable: only on consumer-provider rows.
+    phase: mappingPhaseEnum("phase"),
+    // Nullable: peer-peer only; `true` on the single confirmed identity field.
+    isIdentityKey: boolean("is_identity_key"),
+    targetLookupParamRef: text("target_lookup_param_ref"),
+    // Nullable: peer-peer only; Phase 3 always leaves it NULL.
+    conflictPolicy: conflictPolicyEnum("conflict_policy"),
+  },
+  (table) => [index("field_mapping_mapping_id_idx").on(table.mappingId)],
+);
+
+/**
+ * `OperationMapping` — one approved operation-level correspondence under an
+ * `ApprovedMapping` (`docs/architecture/data-model.md` `OperationMapping`, AS-2/
+ * AS-4). Tells the executing engines which target operation to call.
+ *
+ * `action` is classified mechanically from the target operation's IR at approval,
+ * reviewer-overridable (AS-4). `target_id_param_ref` is nullable: present only on
+ * `action = update | delete` rows of a **peer-peer** mapping (the linked record's
+ * target-side native id parameter); absent on `create`/`read`, and — a
+ * construction-time invariant, not a column constraint — absent on
+ * consumer-provider mappings, which fill inputs via `parameter_mapping` instead.
+ */
+export const operationMapping = pgTable(
+  "operation_mapping",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    mappingId: uuid("mapping_id")
+      .notNull()
+      .references(() => approvedMapping.id, { onDelete: "cascade" }),
+    sourceOperationRef: text("source_operation_ref").notNull(),
+    targetOperationRef: text("target_operation_ref").notNull(),
+    action: operationActionEnum("action").notNull(),
+    // Nullable: peer-peer update/delete only.
+    targetIdParamRef: text("target_id_param_ref"),
+  },
+  (table) => [index("operation_mapping_mapping_id_idx").on(table.mappingId)],
+);
+
+/**
+ * `ParameterMapping` — one approved operation-input correspondence under a
+ * **consumer-provider** `ApprovedMapping` (`docs/architecture/data-model.md`
+ * `ParameterMapping`, AS-2). Hangs off the `OperationMapping` that pairs the two
+ * operations (`operation_mapping_id`, `ON DELETE CASCADE`), not off the mapping
+ * directly, because parameters are inherently per-operation. Peer-peer mappings
+ * have **no** rows of this table.
+ *
+ * `transform`/`transform_config` are nullable: a parameter may pass through
+ * untransformed.
+ */
+export const parameterMapping = pgTable(
+  "parameter_mapping",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationMappingId: uuid("operation_mapping_id")
+      .notNull()
+      .references(() => operationMapping.id, { onDelete: "cascade" }),
+    sourceParamRef: text("source_param_ref").notNull(),
+    targetParamRef: text("target_param_ref").notNull(),
+    // Nullable: a pass-through parameter carries no transform.
+    transform: transformKindEnum("transform"),
+    transformConfig: jsonb("transform_config").$type<TransformConfig>(),
+  },
+  (table) => [index("parameter_mapping_operation_mapping_id_idx").on(table.operationMappingId)],
+);
+
+// ── Audit / Event Log (mapping-decision rows; sync rows arrive in Phase 4) ─────
+
+/**
+ * `SyncEvent / AuditLog` — the durable, queryable record of mapping decisions,
+ * credential accesses, and (from Phase 4) sync executions and adapter requests
+ * (`docs/architecture/data-model.md` `SyncEvent / AuditLog`;
+ * `docs/architecture/security.md` *Audit logging*). Phase 3 writes only
+ * `type = 'mapping-decision'` rows — one per per-item review decision (AS-1
+ * criterion 5) and one per approve action, attributing each to its authenticated
+ * actor.
+ *
+ * The `related_*` references are **loose** (no foreign key): an audit row is
+ * retained for traceability even after its proposal/items are deleted, so it must
+ * not cascade with them — the same "retained for audit" discipline the data model
+ * applies to archived specs/mappings. `details` is a metadata-only note; the
+ * schema layer carries no secret material by construction (only ids/enums/short
+ * notes).
+ */
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    type: auditLogTypeEnum("type").notNull(),
+    actor: text("actor").notNull(),
+    // Present on mapping-decision rows; NULL on the sync-focused types.
+    decision: mappingDecisionEnum("decision"),
+    relatedProposalId: uuid("related_proposal_id"),
+    relatedItemId: uuid("related_item_id"),
+    relatedMappingId: uuid("related_mapping_id"),
+    details: text("details"),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // "the decision history for this proposal" / "for this mapping".
+    index("audit_log_related_proposal_id_idx").on(table.relatedProposalId),
+    index("audit_log_related_mapping_id_idx").on(table.relatedMappingId),
   ],
 );
