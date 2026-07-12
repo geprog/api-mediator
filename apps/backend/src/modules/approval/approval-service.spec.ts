@@ -618,6 +618,30 @@ describe("AS-5 identity-key confirmation", () => {
         ),
       ).rejects.toBeInstanceOf(BadRequestError);
     });
+
+    it("rejects re-confirming an edited identity that diverges from the counterpart", async () => {
+      const { fake, service, fx } = setupPeerPeer();
+      // Counterpart confirmed the tasks/email ↔ issues/email pairing.
+      seedReverseIdentity(fake, fx, "issues/email");
+      // The operator edits the identity field's target to tasks/title, then RE-CONFIRMS
+      // it — a pairing that no longer matches the counterpart. The lock rejects it.
+      await service.decideItem(
+        {
+          itemId: fx.items.emailField.id,
+          decision: {
+            kind: "edit",
+            edit: { targetRef: { resourceRef: "tasks", target: { kind: "field", path: "title" } } },
+          },
+        },
+        ACTOR,
+      );
+      await expect(
+        service.approve(
+          { proposalId: fx.proposal.id, identityKeys: [{ itemId: fx.items.emailField.id }] },
+          ACTOR,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestError);
+    });
   });
 
   it("carries a confirmed identity key forward across an incremental approve", async () => {
@@ -643,6 +667,46 @@ describe("AS-5 identity-key confirmation", () => {
     const id = fake.fieldMappings.find((f) => f.isIdentityKey === true);
     expect(id?.sourcePath).toBe("issues/email");
     expect(id?.targetLookupParamRef).toBe("email");
+  });
+
+  it("drops a carried-forward identity key when its target was edited (no silent re-pairing)", async () => {
+    const { fake, service, fx } = setupPeerPeer();
+    // Approve #1 confirms issues/email → tasks/email as the identity key.
+    await service.decideItem(
+      { itemId: fx.items.emailField.id, decision: { kind: "accept" } },
+      ACTOR,
+    );
+    await service.approve(
+      {
+        proposalId: fx.proposal.id,
+        identityKeys: [{ itemId: fx.items.emailField.id, targetLookupParamRef: "email" }],
+      },
+      ACTOR,
+    );
+    expect(fake.fieldMappings.find((f) => f.isIdentityKey === true)?.targetPath).toBe(
+      "tasks/email",
+    );
+
+    // Edit the identity field's TARGET (transform stays rename), then approve again
+    // WITHOUT re-confirming — the carry-forward must NOT silently re-pair the key.
+    await service.decideItem(
+      {
+        itemId: fx.items.emailField.id,
+        decision: {
+          kind: "edit",
+          edit: { targetRef: { resourceRef: "tasks", target: { kind: "field", path: "title" } } },
+        },
+      },
+      ACTOR,
+    );
+    await service.approve({ proposalId: fx.proposal.id }, ACTOR);
+
+    // The re-paired field carries NO identity key — an explicit re-confirmation is
+    // required (which would re-run the AS-5 locks).
+    expect(fake.fieldMappings.find((f) => f.isIdentityKey === true)).toBeUndefined();
+    const email = fake.fieldMappings.find((f) => f.sourcePath === "issues/email");
+    expect(email?.targetPath).toBe("tasks/title");
+    expect("isIdentityKey" in (email ?? {})).toBe(false);
   });
 });
 

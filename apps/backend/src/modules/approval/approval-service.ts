@@ -229,6 +229,12 @@ export class ApprovalService {
 
     // AS-6 criterion 2 + AS-5 criterion 4: the reverse-direction active mapping and
     // its identity field(s), for counterpart linking and the shared-pairing lock.
+    // NOTE: the concept keys the counterpart/shared-pairing on version-agnostic
+    // spec LINEAGE (app + role), not exact spec ids. Keying on exact
+    // `sourceSpecId`/`targetSpecId` here is correct for Phase 3 (a single spec
+    // version per lineage) and is a deliberate deferral: the version-agnostic
+    // lineage lookup (and re-pinning `counterpartMappingId` across versions) is
+    // Phase-6 work (see docs/architecture/extensibility.md, glossary "Spec lineage").
     const counterpart =
       variant === "peer-peer"
         ? await stores.approvedMappings.getActiveByDirectionalSpecPair(
@@ -257,6 +263,7 @@ export class ApprovalService {
       identity,
       existingFields,
       existingOperations,
+      counterpartFields,
       newId: this.#newId,
     });
 
@@ -308,6 +315,8 @@ export class ApprovalService {
         relatedProposalId: proposal.id,
         relatedMappingId: mapping.id,
         details: outcome,
+        // The same `now` as `approvedAt`, so the audit timestamp matches the mapping.
+        timestamp: now,
       }),
     );
 
@@ -326,6 +335,8 @@ export class ApprovalService {
     readonly relatedItemId?: string;
     readonly relatedMappingId?: string;
     readonly details?: string;
+    /** The action's clock reading, so an approve entry matches its `approvedAt`. */
+    readonly timestamp?: Date;
   }): AuditLogEntry {
     return stripUndefined({
       id: this.#newId(),
@@ -336,7 +347,7 @@ export class ApprovalService {
       relatedItemId: fields.relatedItemId,
       relatedMappingId: fields.relatedMappingId,
       details: fields.details,
-      timestamp: this.#now(),
+      timestamp: fields.timestamp ?? this.#now(),
     });
   }
 }

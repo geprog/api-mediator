@@ -30,6 +30,7 @@ export {
 } from "./persistence.js";
 export {
   assembleChildren,
+  assertIdentityInvariants,
   resolveIdentityKeys,
   resourcePairKey,
   type AssembleInput,

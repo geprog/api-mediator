@@ -181,7 +181,64 @@ export interface AssembleInput {
   /** The current `ApprovedMapping`'s existing children, for carry-forward. */
   readonly existingFields: readonly FieldMapping[];
   readonly existingOperations: readonly OperationMapping[];
+  /**
+   * The counterpart-direction mapping's `FieldMapping`s (empty when there is no
+   * approved reverse direction). Used by the final identity re-assertion to apply
+   * the shared-pairing lock to the *whole* assembled field set — new,
+   * carried-forward, or otherwise (AS-5 criterion 4).
+   */
+  readonly counterpartFields: readonly FieldMapping[];
   readonly newId: () => string;
+}
+
+/**
+ * Re-assert the AS-5 identity-key invariants over the **final assembled field
+ * set** — a defense-in-depth pass so no assembly path (a new confirmation, a
+ * carried-forward one, or two field items sharing one source ref) can emit a
+ * second or contradictory identity key. It enforces the same three locks
+ * {@link resolveIdentityKeys} applies to new confirmations: rename-only (AS-5
+ * criterion 3), exactly **one** identity key per mapped resource pair (criterion
+ * 2), and the shared-pairing lock against the counterpart direction's confirmed
+ * identity `FieldMapping` (criterion 4). Throws the same `BadRequestError` type.
+ */
+export function assertIdentityInvariants(
+  fieldMappings: readonly FieldMapping[],
+  counterpartFields: readonly FieldMapping[],
+): void {
+  const seenResourcePairs = new Set<string>();
+  for (const field of fieldMappings) {
+    if (field.isIdentityKey !== true) {
+      continue;
+    }
+    if (field.transform !== "rename") {
+      throw new BadRequestError(
+        "an identity key may carry only a value-preserving rename transform",
+      );
+    }
+    const sourceResourceRef = fieldResourceRef(field.sourcePath);
+    const targetResourceRef = fieldResourceRef(field.targetPath);
+    const rpKey = resourcePairKey(sourceResourceRef, targetResourceRef);
+    if (seenResourcePairs.has(rpKey)) {
+      throw new BadRequestError("a mapped resource pair may have only one confirmed identity key");
+    }
+    seenResourcePairs.add(rpKey);
+
+    const counterpartIdentity = counterpartFields.find(
+      (cp) =>
+        cp.isIdentityKey === true &&
+        fieldResourceRef(cp.sourcePath) === targetResourceRef &&
+        fieldResourceRef(cp.targetPath) === sourceResourceRef,
+    );
+    if (
+      counterpartIdentity !== undefined &&
+      (counterpartIdentity.sourcePath !== field.targetPath ||
+        counterpartIdentity.targetPath !== field.sourcePath)
+    ) {
+      throw new BadRequestError(
+        "shared-pairing lock: this direction's identity key must match the counterpart direction's confirmed field pairing",
+      );
+    }
+  }
 }
 
 function requireTargetRef(item: MappingProposalItem): ProposalElementRef {
@@ -225,9 +282,18 @@ function assembleFieldMapping(
       targetLookupParamRef = newConfirmation.targetLookupParamRef;
     } else if (!input.identity.confirmedResourcePairs.has(rpKey)) {
       // No new confirmation touched this resource pair: carry forward a prior
-      // identity confirmation on this exact field, but only while it stays rename.
+      // identity confirmation on this exact field — but ONLY when the FULL pairing
+      // is unchanged (same source AND target path) and still rename. An edit to the
+      // target drops the carried identity flag, forcing an explicit re-confirmation,
+      // which re-runs the AS-5 one-per-pair + shared-pairing locks (an unmatched
+      // carry-forward would otherwise silently re-pair the identity key — the
+      // contradictory-RecordLink state the shared-pairing lock exists to prevent).
       const prior = existingBySourcePath.get(sourcePath);
-      if (prior?.isIdentityKey === true && transform === "rename") {
+      if (
+        prior?.isIdentityKey === true &&
+        prior.targetPath === targetPath &&
+        transform === "rename"
+      ) {
         isIdentityKey = true;
         targetLookupParamRef = prior.targetLookupParamRef;
       }
@@ -396,6 +462,10 @@ export function assembleChildren(input: AssembleInput): MappingArtifacts {
       parameterMappings.push(assembleParameterMapping(item, operationMappingId, input.newId));
     }
   }
+
+  // Defense-in-depth: re-run the AS-5 locks over the whole assembled field set,
+  // catching any second/contradictory identity key regardless of how it got there.
+  assertIdentityInvariants(fieldMappings, input.counterpartFields);
 
   return { fieldMappings, operationMappings, parameterMappings };
 }
