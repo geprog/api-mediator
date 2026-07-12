@@ -1,10 +1,16 @@
-import { expect, GITEA_PROVIDER_SPEC, test, uniqueAppName } from "../support/fixtures.js";
+import { expect, GITEA_PROVIDER_SPEC, OPERATOR, test, uniqueAppName } from "../support/fixtures.js";
 
 /**
  * Phase-1 registration checkpoint journey (AR-1..3, SI-3, RB-3) driven through
  * the **real** Vue UI against the **real** Fastify operator API and the compose
  * Postgres. The one LLM-backed stage (mapping detection) is Phase 2 and plays no
  * part here, so the whole flow is deterministic.
+ *
+ * Since Phase-3 operator auth (OA-1), every operator-API route requires an
+ * authenticated identity and the router guard sends an anonymous visitor to
+ * `/login`, so each test signs in as `operator` first. The SPA session is
+ * in-memory (a reload signs it out), so the persistence-checking reloads go
+ * through `login.reloadAndReauth` rather than a bare `page.reload()`.
  *
  * Ground truth (scenario-1 Gitea trimmed OAS3 → `ground-truth.yaml`): the IR
  * groups operations by their path resource noun, so `/repos/.../issues[/{index}]`
@@ -19,13 +25,17 @@ const BASE_URL_VALUE = "https://gitea.example.com";
 
 test.describe("Phase-1 registration vertical (real UI + backend + Postgres)", () => {
   test("registers a Gitea PROVIDER spec, ingests its IR, and confirms a ResourceBinding", async ({
-    page,
+    login,
     registerApp,
     appList,
     appDetail,
     specPage,
   }) => {
     const appName = uniqueAppName("e2e-gitea");
+
+    // OA-1: authenticate as operator before mutating (the operator API is fully
+    // authenticated; an anonymous visitor is redirected to /login).
+    await login.openAndLogin(OPERATOR);
 
     // AR-3: open the form, fill basics, pick PROVIDER, upload the Gitea spec.
     await registerApp.open();
@@ -82,19 +92,21 @@ test.describe("Phase-1 registration vertical (real UI + backend + Postgres)", ()
     await expect(specPage.refRow("issues", "nativeIdRef")).toContainText("Confirmed by operator");
 
     // RB-2: the confirmation persisted server-side — a full reload refetches it.
-    await page.reload();
+    // The reload clears the in-memory SPA session, so re-authenticate on the way back.
+    await login.reloadAndReauth(OPERATOR);
     await expect(specPage.refState("issues", "nativeIdRef")).toHaveText("confirmed");
     await expect(specPage.refValue("issues", "nativeIdRef")).toHaveText("field: id");
   });
 
   test("corrects an applicable ResourceBinding ref via the picker and persists it", async ({
-    page,
+    login,
     registerApp,
     appDetail,
     specPage,
   }) => {
     const appName = uniqueAppName("e2e-gitea-correct");
 
+    await login.openAndLogin(OPERATOR);
     await registerApp.open();
     await registerApp.fillName(appName);
     await registerApp.fillBaseUrl(BASE_URL_VALUE);
@@ -121,8 +133,8 @@ test.describe("Phase-1 registration vertical (real UI + backend + Postgres)", ()
       "operation: issueGetIssue",
     );
 
-    // The correction persisted server-side.
-    await page.reload();
+    // The correction persisted server-side (reload clears the session; re-auth back).
+    await login.reloadAndReauth(OPERATOR);
     await expect(specPage.refState("issues", "collectionReadRef")).toHaveText("confirmed");
     await expect(specPage.refValue("issues", "collectionReadRef")).toHaveText(
       "operation: issueGetIssue",

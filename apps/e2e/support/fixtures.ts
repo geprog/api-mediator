@@ -4,6 +4,8 @@ import { test as base, expect } from "@playwright/test";
 
 import { AppDetailPage } from "./pages/app-detail.page.js";
 import { AppListPage } from "./pages/app-list.page.js";
+import { LoginPage } from "./pages/login.page.js";
+import { ProposalReviewPage } from "./pages/proposal-review.page.js";
 import { RegisterAppPage } from "./pages/register-app.page.js";
 import { SpecPage } from "./pages/spec.page.js";
 
@@ -29,14 +31,19 @@ export function uniqueAppName(prefix: string): string {
 }
 
 /** Page objects provided to every test via Playwright's fixture system. */
-interface RegistrationFixtures {
+interface MediatorFixtures {
+  login: LoginPage;
   registerApp: RegisterAppPage;
   appList: AppListPage;
   appDetail: AppDetailPage;
   specPage: SpecPage;
+  proposalReview: ProposalReviewPage;
 }
 
-export const test = base.extend<RegistrationFixtures>({
+export const test = base.extend<MediatorFixtures>({
+  login: async ({ page }, use): Promise<void> => {
+    await use(new LoginPage(page));
+  },
   registerApp: async ({ page }, use): Promise<void> => {
     await use(new RegisterAppPage(page));
   },
@@ -49,6 +56,10 @@ export const test = base.extend<RegistrationFixtures>({
   specPage: async ({ page }, use): Promise<void> => {
     await use(new SpecPage(page));
   },
+  proposalReview: async ({ page }, use): Promise<void> => {
+    await use(new ProposalReviewPage(page));
+  },
 });
 
 export { expect };
+export { OPERATOR, VIEWER, basicAuthHeader, BACKEND_ORIGIN } from "./env.js";

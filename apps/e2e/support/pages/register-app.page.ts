@@ -19,9 +19,12 @@ export class RegisterAppPage {
     this.#page = page;
   }
 
-  /** Open the app, then navigate to the registration form via the nav link. */
+  /**
+   * Navigate to the registration form via the nav link (client-side, so the
+   * in-memory SPA session survives). The caller must already be signed in — a full
+   * `page.goto` here would reload the SPA and drop the session.
+   */
   public async open(): Promise<void> {
-    await this.#page.goto("/");
     await this.#page.getByTestId("nav-register").click();
   }
 
