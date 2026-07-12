@@ -1,8 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { backendEnv, BACKEND_ORIGIN, BASE_URL, FRONTEND_PORT } from "./support/env.js";
+
 /**
- * Phase-1 Playwright config: the registration journey drives the **real** Vue UI
- * against the **real** Fastify operator API and the compose Postgres.
+ * Playwright config: the journeys drive the **real** Vue UI against the **real**
+ * Fastify operator API and the compose Postgres.
  *
  * Everything runs on dedicated test ports so a run never disturbs a developer's
  * own dev server (Vite on 5173) or backend (3333):
@@ -11,22 +13,22 @@ import { defineConfig, devices } from "@playwright/test";
  * - frontend → Vite **dev** server on `5273` (the `/api` + `/health` proxy is a
  *   dev-server feature), pointed at the test backend via `BACKEND_ORIGIN`.
  *
- * Both are started by Playwright's `webServer` and torn down after the run.
+ * Since Phase-3 operator auth (OA-1), every operator-API route requires an
+ * authenticated identity, so the backend is booted with a **fixed** set of local
+ * accounts (`OPERATOR_ACCOUNTS`, see `support/env.ts`): the whole backend
+ * environment is supplied here rather than from a repo `.env`, making the run
+ * self-contained and the login credentials the specs use deterministic.
+ *
+ * Both servers are started by Playwright's `webServer` and torn down after the run.
  * `reuseExistingServer: false` guarantees a fresh, known-state server (and fails
  * loudly if the port is already taken). The DB is the shared compose Postgres, so
- * tests self-isolate by registering apps under unique names and asserting only on
- * their own app id (see `support/fixtures.ts`).
+ * tests self-isolate by seeding/registering under unique ids and cleaning up.
  */
-
-const BACKEND_PORT = 3433;
-const FRONTEND_PORT = 5273;
-const BACKEND_ORIGIN = `http://localhost:${String(BACKEND_PORT)}`;
-const BASE_URL = `http://localhost:${String(FRONTEND_PORT)}`;
 
 export default defineConfig({
   testDir: "./tests",
   // A shared backend + Postgres is single-writer state; keep the journeys serial
-  // and deterministic rather than racing registrations through one API.
+  // and deterministic rather than racing them through one API.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env["CI"],
@@ -47,22 +49,25 @@ export default defineConfig({
   ],
   webServer: [
     {
-      // Operator API on a dedicated port; telemetry export disabled so the run
-      // has no dependency on the Grafana LGTM container.
-      command: "pnpm --filter @mediator/backend exec tsx --import ./src/otel.ts src/index.ts",
+      // Operator API on a dedicated port, seeded with the fixed local accounts and
+      // a valid-but-unused LLM config (the journeys replay seeded proposals).
+      // The dedicated e2e database is provisioned (create-if-absent + migrate) as
+      // the first link in the command, so it exists before the backend's `/health`
+      // probe pings it — Playwright waits for web-server readiness before any
+      // globalSetup, so the DB cannot be provisioned there.
+      command:
+        "pnpm --filter @mediator/e2e exec tsx support/ensure-db.ts && " +
+        "pnpm --filter @mediator/backend exec tsx --import ./src/otel.ts src/index.ts",
       url: `${BACKEND_ORIGIN}/health`,
       reuseExistingServer: false,
       timeout: 120_000,
       stdout: "pipe",
       stderr: "pipe",
-      env: {
-        HTTP_PORT: String(BACKEND_PORT),
-        OTEL_EXPORTER_OTLP_ENDPOINT: "",
-      },
+      env: backendEnv(),
     },
     {
-      // Vite dev server (not `preview`): the `/api` + `/health` proxy the journey
-      // relies on is a dev-server feature. `--strictPort` fails fast instead of
+      // Vite dev server (not `preview`): the `/api` + `/health` proxy the journeys
+      // rely on is a dev-server feature. `--strictPort` fails fast instead of
       // silently picking another port.
       command: `pnpm --filter @mediator/frontend exec vite --port ${String(FRONTEND_PORT)} --strictPort`,
       url: BASE_URL,

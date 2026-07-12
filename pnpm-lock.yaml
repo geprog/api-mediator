@@ -114,12 +114,24 @@ importers:
 
   apps/e2e:
     devDependencies:
+      '@mediator/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@mediator/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
 
   apps/frontend:
     dependencies:
