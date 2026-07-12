@@ -167,3 +167,36 @@ describe("AuditLogEntry schema — mapping-decision leaves status unset (SD-4 cr
     expect(result.success).toBe(false);
   });
 });
+
+describe("AuditLogEntry schema — credential-access row (CD-3)", () => {
+  it("accepts a credential-access row referencing relatedCredentialId + app + trace", () => {
+    const result = auditLogEntrySchema.safeParse({
+      id: "audit-cred-1",
+      type: "credential-access",
+      actor: "system",
+      relatedCredentialId: "cred-1",
+      originAppId: "app-a",
+      details: "credential accessed",
+      traceId: "trace-1",
+      spanId: "span-1",
+      timestamp: new Date("2026-07-11T00:00:00.000Z"),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts the no-credential row (distinguishable: no relatedCredentialId)", () => {
+    // CD-3 crit 3: a public app's call is auditable as "no credential used".
+    const result = auditLogEntrySchema.safeParse({
+      id: "audit-cred-2",
+      type: "credential-access",
+      actor: "system",
+      originAppId: "public-app",
+      details: "no credential used",
+      timestamp: new Date("2026-07-11T00:00:00.000Z"),
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).not.toHaveProperty("relatedCredentialId");
+    }
+  });
+});

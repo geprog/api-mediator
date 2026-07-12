@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  auditLog,
   closeDb,
   createDb,
   credential,
@@ -16,9 +17,10 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { DbCredentialPersistence } from "./db-persistence.js";
+import { DbCredentialAccessAuditor, DbCredentialPersistence } from "./db-persistence.js";
+import { openEnvelope } from "./envelope.js";
 import { EnvKeyProvider } from "./key-provider.js";
-import { CredentialStore } from "./store.js";
+import { CredentialStore, type OAuth2Refresher } from "./store.js";
 
 /**
  * Live-database integration test for the Credential Store. Requires the compose
@@ -111,5 +113,155 @@ describe("Credential Store integration (requires Postgres)", () => {
     const otherAppId = randomUUID();
     const result = await store.withCredential(otherAppId, () => Promise.resolve("unused"));
     expect(result).toStrictEqual({ outcome: "no-credential" });
+  });
+});
+
+/**
+ * Phase-4 credential decrypt-for-call, against real Postgres: the two DB writes
+ * the store introduces — persisting re-encrypted OAuth2 tokens (CD-2) and the
+ * `credential-access` audit entry (CD-3) — proven end-to-end, not just against a
+ * fake. A separate suite so it owns its own app/credential/audit rows and cleanup.
+ */
+describe("Credential Store Phase-4 decrypt-for-call integration (requires Postgres)", () => {
+  let db: Database;
+  const masterKey = Buffer.alloc(32, 7);
+  const createdAppIds: string[] = [];
+
+  function registeredAppRow(id: string): RegisteredApp {
+    return {
+      id,
+      name: "Phase-4 Credential App",
+      status: "active",
+      baseUrl: "https://app.example.test",
+      capabilities: {
+        supportsPolling: true,
+        supportsDeltaQuery: false,
+        supportsChangeTimestamps: false,
+        defaultPollInterval: 60000,
+      },
+      createdAt: new Date("2026-07-10T00:00:00.000Z"),
+    };
+  }
+
+  async function seedApp(): Promise<string> {
+    const appId = randomUUID();
+    await new RegisteredAppRepository(db).create(registeredAppRow(appId));
+    createdAppIds.push(appId);
+    return appId;
+  }
+
+  beforeAll(async () => {
+    db = createDb(resolveDatabaseUrl(process.env));
+    await runMigrations(db);
+  });
+
+  afterAll(async () => {
+    for (const appId of createdAppIds) {
+      await db.delete(auditLog).where(eq(auditLog.originAppId, appId));
+      await db.delete(credential).where(eq(credential.appId, appId));
+      await db.delete(registeredApp).where(eq(registeredApp.id, appId));
+    }
+    await closeDb(db);
+  });
+
+  it("refreshes an expired oauth2 token and persists re-encrypted tokens, preserving lastRotatedAt (CD-2)", async () => {
+    const appId = await seedApp();
+    const keyProvider = new EnvKeyProvider(masterKey);
+    const writer = new CredentialStore(new DbCredentialPersistence(db), keyProvider);
+    const metadata = await writer.store(appId, {
+      secret: {
+        type: "oauth2",
+        accessToken: "old-access-integration",
+        refreshToken: "refresh-old-integration",
+        expiresAt: "2000-01-01T00:00:00.000Z", // long expired
+      },
+      scopes: ["read"],
+    });
+
+    const refresher: OAuth2Refresher = {
+      refresh: () =>
+        Promise.resolve({
+          accessToken: "new-access-integration",
+          refreshToken: "refresh-rotated-integration",
+          expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+        }),
+    };
+    const store = new CredentialStore(new DbCredentialPersistence(db), keyProvider, undefined, {
+      oauth2Refresher: refresher,
+    });
+
+    const result = await store.withCredential(appId, (cred) => Promise.resolve(cred.secret));
+    // fn received the fresh access token and no refresh token.
+    expect(result).toStrictEqual({
+      outcome: "invoked",
+      value: { type: "oauth2", accessToken: "new-access-integration" },
+    });
+
+    // The DB row now holds the re-encrypted updated tokens (ciphertext, not plaintext).
+    const [row] = await db
+      .select({ payload: credential.encryptedPayload, lastRotatedAt: credential.lastRotatedAt })
+      .from(credential)
+      .where(eq(credential.id, metadata.id));
+    expect(row?.payload).toBeDefined();
+    expect(row?.payload).not.toContain("new-access-integration");
+    expect(row?.payload).not.toContain("refresh-rotated-integration");
+    const recovered: unknown = JSON.parse(
+      openEnvelope(row?.payload ?? "", masterKey).toString("utf8"),
+    );
+    expect(recovered).toStrictEqual({
+      type: "oauth2",
+      accessToken: "new-access-integration",
+      refreshToken: "refresh-rotated-integration",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    });
+    // lastRotatedAt is preserved across an automatic refresh (not an operator rotation).
+    expect(row?.lastRotatedAt).toStrictEqual(metadata.lastRotatedAt);
+  });
+
+  it("writes a metadata-only credential-access audit row referencing the credential + trace (CD-3)", async () => {
+    const appId = await seedApp();
+    const keyProvider = new EnvKeyProvider(masterKey);
+    const secret = `audit-secret-${randomUUID()}`;
+    const store = new CredentialStore(new DbCredentialPersistence(db), keyProvider, undefined, {
+      auditor: new DbCredentialAccessAuditor(db),
+      readTraceContext: () => ({ traceId: "trace-int-1", spanId: "span-int-1" }),
+    });
+    const metadata = await store.store(appId, { secret: { type: "apiKey", apiKey: secret } });
+
+    await store.withCredential(appId, () => Promise.resolve("ok"));
+
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.relatedCredentialId, metadata.id));
+    expect(rows).toHaveLength(1);
+    const entry = rows[0];
+    expect(entry?.type).toBe("credential-access");
+    expect(entry?.originAppId).toBe(appId);
+    expect(entry?.actor).toBe("system");
+    expect(entry?.details).toBe("credential accessed");
+    expect(entry?.traceId).toBe("trace-int-1");
+    expect(entry?.spanId).toBe("span-int-1");
+    // No secret material in any audit column.
+    expect(JSON.stringify(entry)).not.toContain(secret);
+  });
+
+  it("writes a distinguishable no-credential audit row for a public app (CD-3 crit 3)", async () => {
+    const appId = await seedApp();
+    const store = new CredentialStore(
+      new DbCredentialPersistence(db),
+      new EnvKeyProvider(masterKey),
+      undefined,
+      { auditor: new DbCredentialAccessAuditor(db) },
+    );
+
+    await store.withCredential(appId, () => Promise.resolve("ok"));
+
+    const rows = await db.select().from(auditLog).where(eq(auditLog.originAppId, appId));
+    expect(rows).toHaveLength(1);
+    const entry = rows[0];
+    expect(entry?.type).toBe("credential-access");
+    expect(entry?.details).toBe("no credential used");
+    expect(entry?.relatedCredentialId).toBeNull();
   });
 });

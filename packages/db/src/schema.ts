@@ -759,6 +759,24 @@ export const auditLog = pgTable(
     relatedItemId: uuid("related_item_id"),
     relatedMappingId: uuid("related_mapping_id"),
     details: text("details"),
+    // ── Phase-4 credential-access columns (CD-3) ──────────────────────────────
+    // The credential a `credential-access` row concerns + the app whose credential
+    // it was. Loose (no FK), like the other `related_*` refs, so the audit row
+    // survives a later rotation/deletion of the credential (and of the app). NULL
+    // on every other row type; NULL too on a `no credential used` access row,
+    // which is what makes that public-app case distinguishable from a real
+    // decrypt (CD-3 criterion 3).
+    relatedCredentialId: uuid("related_credential_id"),
+    originAppId: uuid("origin_app_id"),
+    // OpenTelemetry correlation: every `credential-access` row carries these (CD-3
+    // criterion 4) so an operator can jump from the credential access to the
+    // outbound-call trace. `text` (not `uuid`): OTel trace/span ids are hex, not
+    // UUIDs. NULL on the pre-existing `mapping-decision` rows (they set neither).
+    // The remaining SD-4 per-record columns (status/relatedRuleId/recordLinkId/
+    // sourceNativeId/idempotencyKey/payloadHash) arrive with the sync/adapter
+    // slices that write them; CD-3 adds only what a credential-access row needs.
+    traceId: text("trace_id"),
+    spanId: text("span_id"),
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
