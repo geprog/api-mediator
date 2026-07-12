@@ -20,19 +20,96 @@ import { mappingPhaseSchema, transformKindSchema } from "./mapping-enums.js";
 // ── transformConfig ──────────────────────────────────────────────────────────
 
 /**
- * The extra configuration a multi-input transform needs. Today the concept
- * documents exactly one datum here: a multi-input `aggregate`, or an `expression`
- * over several fields (`fullName = firstName + " " + lastName`), declares its
- * **additional** input paths — beyond the primary `sourcePath` — in
- * `transformConfig` (`docs/architecture/data-model.md` `FieldMapping`). A 1:1
- * transform (`rename`, single-input `coerce`) needs none, so `transformConfig` is
- * omitted entirely rather than carried empty. Shared with `ParameterMapping`.
+ * The fixed, deterministic date representations a `coerce` can convert between.
+ * A closed set (no free-form format strings) keeps the conversion locale- and
+ * wall-clock-free — a load-bearing property of transform determinism (TX-1).
+ */
+export const coerceDateFormatSchema = z.enum([
+  "iso-8601", // e.g. "2026-07-12T09:30:00.000Z" (UTC, millisecond precision)
+  "date-only", // "YYYY-MM-DD" (UTC calendar date)
+  "epoch-millis", // integer milliseconds since the Unix epoch
+  "epoch-seconds", // integer seconds since the Unix epoch
+]);
+export type CoerceDateFormat = z.infer<typeof coerceDateFormatSchema>;
+export const CoerceDateFormat = coerceDateFormatSchema.enum;
+
+/**
+ * The per-`coerce` conversion spec — the deterministic type/representation
+ * conversion a `transform = coerce` field applies (TX-1 criterion 3). Discriminated
+ * on the target representation `to`. `enum → boolean` names the exact token sets
+ * (an unlisted token is an `impossible-coercion` transform error at execution, not
+ * a best-effort guess); `date → date` names a source and target format from the
+ * closed {@link coerceDateFormatSchema} set.
+ */
+export const coerceConfigSchema = z.discriminatedUnion("to", [
+  z.object({ to: z.literal("number"), from: z.literal("string") }),
+  z.object({ to: z.literal("string"), from: z.literal("number") }),
+  z.object({
+    to: z.literal("boolean"),
+    from: z.literal("enum"),
+    truthy: z.array(z.string()),
+    falsy: z.array(z.string()),
+  }),
+  z.object({
+    to: z.literal("date"),
+    from: z.literal("date"),
+    sourceFormat: coerceDateFormatSchema,
+    targetFormat: coerceDateFormatSchema,
+  }),
+]);
+export type CoerceConfig = z.infer<typeof coerceConfigSchema>;
+
+/**
+ * The per-`aggregate` combine spec — how a `transform = aggregate` field combines
+ * its primary input (`sourcePath`) with its `additionalInputPaths` into one value
+ * (TX-2). `onMissingInput` fixes how a missing/null input resolves *deterministically*
+ * — never best-effort: `error` raises a transform error, `skip` omits the part
+ * (concat), `zero` treats it as `0` (sum). Discriminated on `strategy`.
+ */
+export const aggregateConfigSchema = z.discriminatedUnion("strategy", [
+  z.object({
+    strategy: z.literal("concat"),
+    separator: z.string(),
+    onMissingInput: z.enum(["error", "skip"]),
+  }),
+  z.object({
+    strategy: z.literal("sum"),
+    onMissingInput: z.enum(["error", "zero"]),
+  }),
+]);
+export type AggregateConfig = z.infer<typeof aggregateConfigSchema>;
+
+/**
+ * The extra configuration a transform needs beyond its `sourcePath`/`targetPath`.
  *
- * Execution semantics (how the paths feed the evaluator, the `expression`
- * sandbox) are Phase 4/5 and deliberately absent from this shape.
+ * The concept names `transformConfig` on `FieldMapping` but not its per-kind shape
+ * (a flagged open question — see the repo README). Phase 3 (AM-3) shipped the
+ * minimal `{ additionalInputPaths }` datum the concept documents explicitly. Phase 4
+ * (the Transformation Executor) derives the concrete per-kind config execution
+ * needs, added here as **optional** carriers so every existing `FieldMapping`
+ * construction stays valid:
+ *
+ * - `additionalInputPaths` — a multi-input `aggregate`, or an `expression` over
+ *   several fields, declares its inputs **beyond** the primary `sourcePath` here.
+ *   Every input, primary or additional, gets its own `SyncFieldState` row.
+ * - `coerce` — the {@link coerceConfigSchema} conversion spec, meaningful only on a
+ *   `transform = coerce` field.
+ * - `aggregate` — the {@link aggregateConfigSchema} combine spec, meaningful only on
+ *   a `transform = aggregate` field.
+ * - `expression` — the expression text, meaningful only on a `transform = expression`
+ *   field; it is parsed and evaluated inside the sandbox (`docs/architecture/security.md`).
+ *
+ * Which carrier a field must populate follows from its sibling `transform` kind;
+ * the executor validates that pairing (`@mediator/transform`), so this schema stays
+ * a permissive persisted shape rather than a discriminated union self-keyed on a
+ * field it does not hold. A tracked follow-up may tighten `transformConfig` once the
+ * executor's requirements are settled. Shared with `ParameterMapping`.
  */
 export const transformConfigSchema = z.object({
-  additionalInputPaths: z.array(z.string()),
+  additionalInputPaths: z.array(z.string()).optional(),
+  coerce: coerceConfigSchema.optional(),
+  aggregate: aggregateConfigSchema.optional(),
+  expression: z.string().optional(),
 });
 export type TransformConfig = z.infer<typeof transformConfigSchema>;
 
