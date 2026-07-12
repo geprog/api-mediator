@@ -5,6 +5,7 @@ import { registerAppRoutes } from "./apps.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
 import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
 import { registerResourceBindingRoutes } from "./resource-bindings.routes.js";
+import { registerSessionRoute } from "./session.routes.js";
 import { registerSpecRoutes } from "./specs.routes.js";
 
 export type { OperatorApiDeps } from "./deps.js";
@@ -20,6 +21,7 @@ export type { OperatorApiDeps } from "./deps.js";
  * composition root and the test kit call.
  */
 export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps): void {
+  registerSessionRoute(app);
   registerAppRoutes(app, deps);
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);

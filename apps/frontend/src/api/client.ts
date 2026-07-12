@@ -1,6 +1,7 @@
 import { errorResponseSchema } from "@mediator/contracts";
 import type { ZodType } from "zod";
 
+import { getAuthHeader, notifyForbidden, notifyUnauthenticated } from "./auth-header.js";
 import { ApiError } from "./errors.js";
 
 /**
@@ -38,6 +39,13 @@ async function sendRequest(path: string, options: RequestOptions): Promise<RawRe
   const headers: Record<string, string> = { accept: "application/json" };
   if (options.body !== undefined) {
     headers["content-type"] = "application/json";
+  }
+  // HTTP Basic identity (OA-1). The whole operator API is authenticated, so every
+  // request carries the credential when the operator is logged in; an anonymous
+  // request (no header) is rejected 401 by the backend and handled below.
+  const authHeader = getAuthHeader();
+  if (authHeader !== null) {
+    headers["authorization"] = authHeader;
   }
 
   const init: RequestInit = {
@@ -78,6 +86,16 @@ export async function apiRequest<T>(
   const { status, body } = await sendRequest(path, options);
 
   if (status < 200 || status >= 300) {
+    // Surface the two auth failures to the store (OA-1/OA-2): a 401 means the
+    // credential is missing/invalid (log out → login), a 403 means the caller is a
+    // `viewer` who attempted a mutation (read-only). The mutation is already
+    // blocked server-side; these callbacks only drive the SPA's affordances.
+    if (status === 401) {
+      notifyUnauthenticated();
+    } else if (status === 403) {
+      notifyForbidden();
+    }
+
     const parsedError = errorResponseSchema.safeParse(body);
     if (parsedError.success) {
       throw new ApiError(parsedError.data);

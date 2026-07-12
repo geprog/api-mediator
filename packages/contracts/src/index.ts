@@ -76,6 +76,13 @@ export {
 } from "./resource-bindings.js";
 
 export {
+  sessionResponseSchema,
+  sessionRoleSchema,
+  type SessionResponse,
+  type SessionRole,
+} from "./session.js";
+
+export {
   analyzeResourcePairRequestSchema,
   analyzeResourcePairResponseSchema,
   approveProposalRequestSchema,
