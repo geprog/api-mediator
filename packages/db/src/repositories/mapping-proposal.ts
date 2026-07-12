@@ -62,6 +62,15 @@ export class MappingProposalRepository {
     return rows.map(mapMappingProposalItemRow);
   }
 
+  /** A single proposal item by id — the target of a per-item review decision (AS-1). */
+  public async getItemById(itemId: string): Promise<MappingProposalItem | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(mappingProposalItem)
+      .where(eq(mappingProposalItem.id, itemId));
+    return row === undefined ? undefined : mapMappingProposalItemRow(row);
+  }
+
   /**
    * The proposals produced *for* this spec (as the source of a directional
    * analysis), served by the `source_spec_id` index.
@@ -123,6 +132,35 @@ export class MappingProposalRepository {
       .update(mappingProposalItem)
       .set({ reviewState })
       .where(eq(mappingProposalItem.id, itemId))
+      .returning();
+    return row === undefined ? undefined : mapMappingProposalItemRow(row);
+  }
+
+  /**
+   * Apply a per-item review decision (AS-1): persist the item's mutable review
+   * columns — `review_state` plus the possibly-edited `target_ref`,
+   * `transform_suggestion`, and `unmapped` — from the domain item the Approval
+   * Service computed. The immutable detection columns (`kind`, `source_ref`,
+   * `phase`, `confidence_score`, `ambiguous_alternatives`, `rationale`, and the
+   * peer-peer `identity_candidate`/`target_lookup_param_ref` metadata) are left
+   * untouched. `target_ref`/`transform_suggestion` collapse an absent domain key to
+   * a NULL column exactly as {@link toMappingProposalItemInsert} does, so the
+   * null-vs-absent `transformSuggestion` distinction still round-trips via
+   * `unmapped`. Returns the updated item, or `undefined` when no item with the id
+   * exists.
+   */
+  public async updateItemReview(
+    item: MappingProposalItem,
+  ): Promise<MappingProposalItem | undefined> {
+    const [row] = await this.db
+      .update(mappingProposalItem)
+      .set({
+        targetRef: item.targetRef ?? null,
+        transformSuggestion: item.transformSuggestion ?? null,
+        unmapped: item.unmapped,
+        reviewState: item.reviewState,
+      })
+      .where(eq(mappingProposalItem.id, item.id))
       .returning();
     return row === undefined ? undefined : mapMappingProposalItemRow(row);
   }

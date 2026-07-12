@@ -1,12 +1,19 @@
 import {
   apiSpecRoleSchema,
   apiSpecStatusSchema,
+  approvedMappingStatusSchema,
+  auditLogTypeSchema,
+  conflictPolicySchema,
   credentialTypeSchema,
+  mappingDecisionSchema,
   mappingPhaseSchema,
   mappingProposalItemKindSchema,
   mappingProposalStatusSchema,
+  mappingVariantSchema,
+  operationActionSchema,
   registeredAppStatusSchema,
   reviewStateSchema,
+  transformKindSchema,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
@@ -14,12 +21,19 @@ import {
   RESOURCE_BINDING_REF_KINDS,
   apiSpecRoleEnum,
   apiSpecStatusEnum,
+  approvedMappingStatusEnum,
+  auditLogTypeEnum,
+  conflictPolicyEnum,
   credentialTypeEnum,
+  mappingDecisionEnum,
   mappingPhaseEnum,
   mappingProposalItemKindEnum,
   mappingProposalStatusEnum,
+  mappingVariantEnum,
+  operationActionEnum,
   registeredAppStatusEnum,
   reviewStateEnum,
+  transformKindEnum,
 } from "./schema.js";
 
 /**
@@ -50,6 +64,17 @@ describe("pg enum ↔ domain parity", () => {
     ],
     ["review_state", reviewStateEnum.enumValues, reviewStateSchema.options],
     ["mapping_phase", mappingPhaseEnum.enumValues, mappingPhaseSchema.options],
+    ["mapping_variant", mappingVariantEnum.enumValues, mappingVariantSchema.options],
+    ["transform_kind", transformKindEnum.enumValues, transformKindSchema.options],
+    ["conflict_policy", conflictPolicyEnum.enumValues, conflictPolicySchema.options],
+    ["operation_action", operationActionEnum.enumValues, operationActionSchema.options],
+    [
+      "approved_mapping_status",
+      approvedMappingStatusEnum.enumValues,
+      approvedMappingStatusSchema.options,
+    ],
+    ["audit_log_type", auditLogTypeEnum.enumValues, auditLogTypeSchema.options],
+    ["mapping_decision", mappingDecisionEnum.enumValues, mappingDecisionSchema.options],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {

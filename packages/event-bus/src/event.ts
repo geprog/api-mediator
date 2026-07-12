@@ -2,10 +2,14 @@ import { randomUUID } from "node:crypto";
 
 import type { OutboxInsert, OutboxRecord } from "@mediator/db";
 import {
+  MAPPING_APPROVED_EVENT_TYPE,
+  mappingApprovedSchema,
   SPEC_INGESTED_EVENT_TYPE,
   specIngestedSchema,
   type ApiSpecRole,
   type DomainEventEnvelope,
+  type MappingApproved,
+  type MappingVariant,
   type SpecIngested,
 } from "@mediator/domain";
 
@@ -99,5 +103,39 @@ export function createSpecIngested(input: {
     apiSpecId: input.apiSpecId,
     appId: input.appId,
     role: input.role,
+  });
+}
+
+/**
+ * Validate a delivered event as a `MappingApproved`, or throw if it is not one /
+ * is malformed. The AI-* artifact-instantiation consumer uses this to recover
+ * full typing from the type-agnostic {@link DeliveredEvent}, exactly as the
+ * detection consumer does with {@link parseSpecIngested}.
+ */
+export function parseMappingApproved(event: DeliveredEvent): MappingApproved {
+  return mappingApprovedSchema.parse(flattenDeliveredEvent(event));
+}
+
+/**
+ * Construct a `MappingApproved` domain event with a fresh event id and
+ * `occurredAt`. The Approval Service calls this after creating/updating an
+ * `ApprovedMapping` and hands the result to `EventBus.emit(event, tx)`, so the
+ * event rides the same transactional-outbox discipline as `SpecIngested`: a
+ * committed approval always eventually emits exactly one deliverable event (AS-6
+ * criterion 5). The event id is what consumers deduplicate by. The payload is
+ * **identifier + variant only** — the consumer re-loads the full `ApprovedMapping`
+ * from persisted state (the `SpecIngested` convention), so the shape is identical
+ * for a first approval and a later incremental one.
+ */
+export function createMappingApproved(input: {
+  readonly approvedMappingId: string;
+  readonly variant: MappingVariant;
+}): MappingApproved {
+  return mappingApprovedSchema.parse({
+    id: randomUUID(),
+    type: MAPPING_APPROVED_EVENT_TYPE,
+    occurredAt: new Date(),
+    approvedMappingId: input.approvedMappingId,
+    variant: input.variant,
   });
 }
