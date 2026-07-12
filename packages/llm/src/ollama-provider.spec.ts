@@ -28,6 +28,7 @@ const config: MappingLlmConfig = {
   thinking: true,
   requestTimeoutMs: 5_000,
   maxRetries: 3,
+  reviewThreshold: 0.7,
 };
 
 /** A mock client that records the last request and replies with a fixed content string. */

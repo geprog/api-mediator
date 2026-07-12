@@ -47,3 +47,23 @@ export {
   refResolves,
   resolveOperation,
 } from "./target-ir.js";
+export {
+  ProposalReadService,
+  sortReviewItems,
+  type ProposalDetail,
+  type ProposalListFilter,
+  type ProposalReadServiceDeps,
+  type ProposalReader,
+} from "./proposal-read.js";
+export {
+  createEscapeHatchTelemetry,
+  EscapeHatchService,
+  noopEscapeHatchTelemetry,
+  type AnalyzeResourcePairInput,
+  type EscapeHatchOutcome,
+  type EscapeHatchProposalReader,
+  type EscapeHatchResult,
+  type EscapeHatchServiceDeps,
+  type EscapeHatchTelemetry,
+  type EscapeHatchWriter,
+} from "./escape-hatch.js";

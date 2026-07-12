@@ -35,6 +35,7 @@ const config: MappingLlmConfig = {
   thinking: false,
   requestTimeoutMs: 5_000,
   maxRetries: 3,
+  reviewThreshold: 0.7,
 };
 
 interface ReplyOptions {

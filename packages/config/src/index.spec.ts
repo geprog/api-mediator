@@ -53,6 +53,7 @@ describe("loadConfig", () => {
       thinking: true,
       requestTimeoutMs: 300000,
       maxRetries: 3,
+      reviewThreshold: 0.7,
     });
     // The master key is decoded to its exact 32 bytes.
     expect(config.credentials.masterKey).toBeInstanceOf(Buffer);
@@ -283,6 +284,20 @@ describe("loadConfig", () => {
       const env = { ...baseEnv(), MAPPING_LLM_MAX_RETRIES: "2.5" };
 
       expect(() => loadConfig(env)).toThrow(/MAPPING_LLM_MAX_RETRIES/);
+    });
+
+    it("defaults reviewThreshold to 0.7 and coerces an override (TD-5)", () => {
+      expect(loadConfig(baseEnv()).mappingLlm.reviewThreshold).toBe(0.7);
+      expect(
+        loadConfig({ ...baseEnv(), MAPPING_LLM_REVIEW_THRESHOLD: "0.85" }).mappingLlm
+          .reviewThreshold,
+      ).toBe(0.85);
+    });
+
+    it("rejects a MAPPING_LLM_REVIEW_THRESHOLD outside 0..1", () => {
+      expect(() => loadConfig({ ...baseEnv(), MAPPING_LLM_REVIEW_THRESHOLD: "1.5" })).toThrow(
+        /MAPPING_LLM_REVIEW_THRESHOLD/,
+      );
     });
 
     it("carries ANTHROPIC_API_KEY onto mappingLlm when set", () => {

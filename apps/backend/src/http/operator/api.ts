@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { installAuthentication, type AuthProvider } from "../auth/index.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
+import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
 import { registerResourceBindingRoutes } from "./resource-bindings.routes.js";
 import { registerSpecRoutes } from "./specs.routes.js";
 
@@ -22,6 +23,7 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   registerAppRoutes(app, deps);
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
+  registerMappingProposalRoutes(app, deps);
 }
 
 /**

@@ -51,6 +51,15 @@ export interface MappingLlmConfig {
   readonly requestTimeoutMs: number;
   readonly maxRetries: number;
   /**
+   * The confidence threshold (`0..1`) below which a `MappingProposalItem` is
+   * flagged `reviewRequired` in the Phase-3 review UI (`MAPPING_LLM_REVIEW_THRESHOLD`,
+   * default `0.7`). `reviewRequired` is **derived** against this value, never a
+   * stored column, so changing the threshold re-flags every item without a
+   * re-analysis (Phase-2 TD-5 / `docs/architecture/mapping-engine.md`
+   * "Confidence & ambiguity").
+   */
+  readonly reviewThreshold: number;
+  /**
    * API key for the Anthropic provider (`ANTHROPIC_API_KEY`). Optional: only the
    * `anthropic` provider needs it, and it is absent when unset so an Ollama-only
    * deployment never has to supply one. The `AnthropicProvider` fails fast when it
@@ -310,6 +319,7 @@ const envSchema = z
     MAPPING_LLM_THINKING: booleanFromEnv,
     MAPPING_LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive(),
     MAPPING_LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(3),
+    MAPPING_LLM_REVIEW_THRESHOLD: z.coerce.number().min(0).max(1).default(0.7),
 
     // API key for the Anthropic provider. Optional at the env layer (only the
     // `anthropic` provider consumes it); the AnthropicProvider fails fast if it is
@@ -395,6 +405,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
       thinking: raw.MAPPING_LLM_THINKING,
       requestTimeoutMs: raw.MAPPING_LLM_REQUEST_TIMEOUT_MS,
       maxRetries: raw.MAPPING_LLM_MAX_RETRIES,
+      reviewThreshold: raw.MAPPING_LLM_REVIEW_THRESHOLD,
       // Conditional spread, never an explicit `undefined` (exactOptionalPropertyTypes).
       ...(raw.ANTHROPIC_API_KEY !== undefined ? { anthropicApiKey: raw.ANTHROPIC_API_KEY } : {}),
     },
