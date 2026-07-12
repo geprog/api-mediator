@@ -1,14 +1,15 @@
 import {
+  AuditLogRepository,
   CredentialRepository,
   credential,
   type CredentialMetadata,
   type DbHandle,
 } from "@mediator/db";
-import type { Credential } from "@mediator/domain";
+import type { AuditLogEntry, Credential } from "@mediator/domain";
 import { and, desc, eq, ne } from "drizzle-orm";
 
 import { isStorableCredentialType } from "./material.js";
-import type { CredentialPersistence, StoredEnvelope } from "./store.js";
+import type { CredentialAccessAuditor, CredentialPersistence, StoredEnvelope } from "./store.js";
 
 /** A stored credential row had a non-storable `type` (data-integrity fault). */
 export class NonStorableStoredCredentialError extends Error {
@@ -21,11 +22,13 @@ export class NonStorableStoredCredentialError extends Error {
 /**
  * The Postgres-backed {@link CredentialPersistence} for {@link CredentialStore}.
  *
- * Writes go through `@mediator/db`'s write-only {@link CredentialRepository}. The
- * decrypt read (`loadEnvelope`) issues its own private `SELECT` including
+ * Initial writes go through `@mediator/db`'s write-only {@link CredentialRepository}.
+ * The decrypt read (`loadEnvelope`) issues its own private `SELECT` including
  * `encrypted_payload` — the store's internal accessor. That column is
  * deliberately absent from `CredentialRepository`'s public surface, so this is
- * the single place the ciphertext is read, and only for `withCredential`.
+ * the single place the ciphertext is read, and only for `withCredential`. The
+ * refresh write (`updateEnvelope`) likewise touches `encrypted_payload` directly,
+ * for the store's internal OAuth2-refresh re-encrypt — never any plaintext.
  *
  * `adapterToken` rows are excluded from the read: they hold a salted hash, not
  * envelope-encrypted material (Phase 5), and must never be fed to the decrypter.
@@ -71,5 +74,34 @@ export class DbCredentialPersistence implements CredentialPersistence {
       scopes: row.scopes,
       encryptedPayload: row.encryptedPayload,
     };
+  }
+
+  public async updateEnvelope(credentialId: string, encryptedPayload: string): Promise<void> {
+    // In-place ciphertext replacement after an internal OAuth2 refresh (CD-2). Only
+    // `encrypted_payload` changes: `last_rotated_at` is left untouched, since an
+    // automatic refresh is not an operator rotation.
+    await this.#db
+      .update(credential)
+      .set({ encryptedPayload })
+      .where(eq(credential.id, credentialId));
+  }
+}
+
+/**
+ * The Postgres-backed {@link CredentialAccessAuditor}: appends the store's
+ * metadata-only `credential-access` {@link AuditLogEntry} to the `SyncEvent`/
+ * `AuditLog` via `@mediator/db`'s {@link AuditLogRepository} (CD-3). The entry is
+ * assembled by the {@link CredentialStore} (which guarantees no secret material);
+ * this adapter only persists it.
+ */
+export class DbCredentialAccessAuditor implements CredentialAccessAuditor {
+  readonly #repository: AuditLogRepository;
+
+  public constructor(db: DbHandle) {
+    this.#repository = new AuditLogRepository(db);
+  }
+
+  public record(entry: AuditLogEntry): Promise<void> {
+    return this.#repository.insert(entry);
   }
 }

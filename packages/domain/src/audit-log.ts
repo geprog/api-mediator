@@ -109,6 +109,12 @@ export const AuditLogStatus = auditLogStatusSchema.enum;
  *   `idempotencyKey` / `payloadHash` — the per-record (`sync-execution`) context
  *   that idempotency's per-record lookback, parked-event supersession, and manual
  *   replay query by. All hashes/ids — never a live payload value.
+ * - `relatedCredentialId` — the credential a `credential-access` entry concerns
+ *   (CD-3), the same loose (no foreign key) "whichever the event type concerns"
+ *   reference the data model lists: a `credential-access` row references the
+ *   credential decrypted for an outbound call, alongside `originAppId` (the app
+ *   whose credential it was). Loose so the audit row survives a later
+ *   rotation/deletion of that credential. A metadata id — never the secret.
  * - `traceId` / `spanId` — correlation to the OpenTelemetry trace. The concept says
  *   every row carries them; they are modeled `.optional()` here so the pre-existing
  *   Phase-3 `mapping-decision` construction sites (which predate this slice and set
@@ -133,6 +139,7 @@ export const auditLogEntrySchema = z
     originAppId: z.string().optional(),
     idempotencyKey: z.string().optional(),
     payloadHash: z.string().optional(),
+    relatedCredentialId: z.string().optional(),
     traceId: z.string().optional(),
     spanId: z.string().optional(),
   })

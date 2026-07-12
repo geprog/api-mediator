@@ -41,20 +41,32 @@ export {
   parseCredentialMaterial,
   parseDecryptedSecret,
   storableCredentialTypeSchema,
+  toUsableSecret,
   StorableCredentialType,
   type CredentialMaterial,
   type CredentialSecret,
+  type UsableCredentialSecret,
 } from "./material.js";
 
-// The store service + its persistence port and result types.
+// The store service + its persistence port, result types, and Phase-4 seams.
 export {
   CredentialStore,
+  type CredentialAccessAuditor,
   type CredentialPersistence,
   type CredentialStoreLogger,
+  type CredentialStoreOptions,
   type DecryptedCredential,
+  type OAuth2Refresher,
+  type OAuth2RefreshRequest,
+  type OAuth2RefreshedTokens,
   type StoredEnvelope,
+  type TraceContext,
   type WithCredentialResult,
 } from "./store.js";
 
-// The Postgres-backed persistence adapter.
-export { DbCredentialPersistence, NonStorableStoredCredentialError } from "./db-persistence.js";
+// The Postgres-backed persistence + audit adapters.
+export {
+  DbCredentialAccessAuditor,
+  DbCredentialPersistence,
+  NonStorableStoredCredentialError,
+} from "./db-persistence.js";

@@ -11,7 +11,9 @@ export type AuditLogInsert = typeof auditLog.$inferInsert;
  * Row → domain. Every nullable column collapses NULL → an **absent** domain key
  * ({@link stripUndefined}), matching the `AuditLogEntry` `.optional()` fields: a
  * `mapping-decision` row carries `decision` + whichever `related_*` refs it
- * concerns, and NULL elsewhere. `timestamp` comes back as a real `Date`.
+ * concerns, a `credential-access` row (CD-3) carries `relatedCredentialId` /
+ * `originAppId` / `traceId` / `spanId`, and NULL elsewhere. `timestamp` comes back
+ * as a real `Date`.
  */
 export function mapAuditLogRow(row: AuditLogRow): AuditLogEntry {
   return stripUndefined({
@@ -23,6 +25,10 @@ export function mapAuditLogRow(row: AuditLogRow): AuditLogEntry {
     relatedItemId: row.relatedItemId ?? undefined,
     relatedMappingId: row.relatedMappingId ?? undefined,
     details: row.details ?? undefined,
+    relatedCredentialId: row.relatedCredentialId ?? undefined,
+    originAppId: row.originAppId ?? undefined,
+    traceId: row.traceId ?? undefined,
+    spanId: row.spanId ?? undefined,
     timestamp: row.timestamp,
   });
 }
@@ -38,6 +44,10 @@ export function toAuditLogInsert(entry: AuditLogEntry): AuditLogInsert {
     relatedItemId: entry.relatedItemId ?? null,
     relatedMappingId: entry.relatedMappingId ?? null,
     details: entry.details ?? null,
+    relatedCredentialId: entry.relatedCredentialId ?? null,
+    originAppId: entry.originAppId ?? null,
+    traceId: entry.traceId ?? null,
+    spanId: entry.spanId ?? null,
     timestamp: entry.timestamp,
   };
 }

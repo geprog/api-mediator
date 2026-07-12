@@ -50,10 +50,44 @@ export const credentialSecretSchema = z.discriminatedUnion("type", [
     type: z.literal("oauth2"),
     accessToken: z.string().min(1),
     refreshToken: z.string().min(1).optional(),
+    /**
+     * When the `accessToken` expires, as an ISO-8601 instant. The Credential
+     * Store compares it against a refresh threshold to decide whether to refresh
+     * inside `withCredential` before handing `fn` a token (CD-2). Optional: a
+     * credential with no known expiry is handed as-is (the store cannot prove it
+     * stale, so it does not speculatively refresh).
+     */
+    expiresAt: z.iso.datetime({ offset: true }).optional(),
   }),
   z.object({ type: z.literal("custom"), values: z.record(z.string(), z.string()) }),
 ]);
 export type CredentialSecret = z.infer<typeof credentialSecretSchema>;
+
+/**
+ * The secret shape handed to a {@link CredentialStore.withCredential} callback:
+ * the same as {@link CredentialSecret} except the `oauth2` variant exposes **only**
+ * the currently-valid `accessToken`. The `refreshToken` is deliberately absent —
+ * refresh is the store's job and the caller never sees it (CD-2) — and so is the
+ * internal `expiresAt` lifecycle field the caller has no use for.
+ */
+export type UsableCredentialSecret =
+  | Extract<CredentialSecret, { type: "apiKey" }>
+  | Extract<CredentialSecret, { type: "basicAuth" }>
+  | { type: "oauth2"; accessToken: string }
+  | Extract<CredentialSecret, { type: "custom" }>;
+
+/**
+ * Project a decrypted {@link CredentialSecret} down to the {@link UsableCredentialSecret}
+ * a caller receives: for `oauth2`, strip the `refreshToken` (and `expiresAt`) so
+ * only the live access token crosses into `fn` (CD-2 criterion 1); every other
+ * type is handed through unchanged.
+ */
+export function toUsableSecret(secret: CredentialSecret): UsableCredentialSecret {
+  if (secret.type === "oauth2") {
+    return { type: "oauth2", accessToken: secret.accessToken };
+  }
+  return secret;
+}
 
 /**
  * The full input to `CredentialStore.store`: the secret plus optional `scopes`.
