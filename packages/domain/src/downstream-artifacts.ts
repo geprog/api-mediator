@@ -7,38 +7,88 @@ import {
   graphEdgeTypeSchema,
   syncRuleStatusSchema,
 } from "./approved-mapping-enums.js";
+import {
+  backfillModeSchema,
+  backfillStatusSchema,
+  deletePropagationSchema,
+  targetDriftCheckSchema,
+} from "./sync-enums.js";
 
 /**
- * The **minimal, disabled** downstream artifacts Phase 3 instantiates from an
- * approved mapping (`docs/architecture/data-model.md` `SyncRule`,
- * `AdapterEndpoint`, `AdapterBinding`, `GraphEdge`, requirement AM-6). A single
- * `ApprovedMapping` instantiates **either** `SyncRule`(s) **or**
- * `AdapterBinding`(s), never both (`Modeling notes`: mutually exclusive
- * outcomes) — that exclusivity is a construction-time invariant of the parent
- * mapping's `variant`, not a within-entity constraint, so it is not re-encoded on
- * these leaf shapes.
+ * The downstream artifacts Phase 3 instantiates from an approved mapping
+ * (`docs/architecture/data-model.md` `SyncRule`, `AdapterEndpoint`,
+ * `AdapterBinding`, `GraphEdge`, requirement AM-6). A single `ApprovedMapping`
+ * instantiates **either** `SyncRule`(s) **or** `AdapterBinding`(s), never both
+ * (`Modeling notes`: mutually exclusive outcomes) — that exclusivity is a
+ * construction-time invariant of the parent mapping's `variant`, not a
+ * within-entity constraint, so it is not re-encoded on these leaf shapes.
  *
- * Only the fields AM-6 lists are modeled. All execution fields (poll cursor,
- * snapshot, backfill, delete propagation, drift check, intervals — Phase 4) and
- * all composition fields (aggregation strategy specifics, post-merge
- * filters/sorts/pagination, execution order, chaining, cache TTL — Phase 5) are
- * explicitly out of scope of these shapes.
+ * `SyncRule` now carries its Phase-4 execution fields (SD-1); the
+ * `AdapterEndpoint`/`AdapterBinding` composition fields (aggregation strategy
+ * specifics, post-merge filters/sorts/pagination, execution order, chaining,
+ * cache TTL — Phase 5) remain out of scope of these shapes.
  */
 
 // ── SyncRule (peer-peer outcome) ─────────────────────────────────────────────
 
 /**
- * One `SyncRule` per mapped resource pair of a peer-peer `ApprovedMapping`,
- * persisted **disabled**. `resourcePairRef` is the canonical, direction-agnostic
- * form of the mapped resource pair (the two sides ordered by a stable key, never
- * by this rule's direction), so both directions of a pair name the same links and
- * field state.
+ * One `SyncRule` per mapped resource pair of a peer-peer `ApprovedMapping`.
+ * `resourcePairRef` is the canonical, direction-agnostic form of the mapped
+ * resource pair (the two sides ordered by a stable key, never by this rule's
+ * direction), so both directions of a pair name the same links and field state.
+ * There is deliberately **no** `direction` field: the mapping it instantiates is
+ * one-directional (`sourceSpecId`'s app → `targetSpecId`'s app), so the rule
+ * inherits its direction from the parent `ApprovedMapping` (SD-1 criterion 4).
+ *
+ * The four AM-6 fields (`id`, `approvedMappingId`, `resourcePairRef`, `status`)
+ * are reused **unchanged**; SD-1 adds the execution/policy fields the Poller,
+ * backfill, and conflict pipeline need. **Every added field is `.optional()`** so
+ * a Phase-3 minimal-shape rule (only the four fields, as AI-1 instantiates and the
+ * db mapper reconstructs) still validates and typechecks against the extended
+ * schema — a `disabled` rule carries no live execution state (SD-1 criterion 5;
+ * AM-6 criterion 2). Two consequences of that backward-compatibility choice:
+ *
+ * - The concept's **defaults** (`deletePropagation = ignore`,
+ *   `targetDriftCheck = none`, `backfillStatus = pending`) are **not** encoded as
+ *   Zod `.default()`s here — a `.default()` makes the *inferred* field
+ *   non-optional, which would break the existing minimal-row mapper that
+ *   constructs a `SyncRule` from the four columns alone. The defaults are applied
+ *   by the persistence/instantiation layer in a later slice (BE-*).
+ * - The nullable live-state fields (`cursor`, `lastSnapshotRef`, `lastRunAt`,
+ *   `lastEventAt`) are `.nullable().optional()`: **absent** on a fresh/disabled
+ *   rule (and on the minimal Phase-3 row), and `null` once a later slice seeds
+ *   them to an explicit "unset" at the transition to live polling.
  */
 export const syncRuleSchema = z.object({
   id: z.string(),
   approvedMappingId: z.string(),
   resourcePairRef: z.string(),
   status: syncRuleStatusSchema,
+  // ── SD-1 execution/policy fields (all optional for backward compatibility) ──
+  /** Per-rule poll cadence override; falls back to `RegisteredApp.defaultPollInterval`. */
+  pollIntervalOverride: z.number().optional(),
+  /**
+   * Which source operation the Poller calls — the resource's delta-query
+   * operation when available, otherwise its confirmed collection read. Derived at
+   * rule creation, correctable by the operator.
+   */
+  pollOperationRef: z.string().optional(),
+  /** Whether a detected source-side deletion is propagated (concept default `ignore`). */
+  deletePropagation: deletePropagationSchema.optional(),
+  /** Opt-in read-before-write drift protection (concept default `none`). */
+  targetDriftCheck: targetDriftCheckSchema.optional(),
+  /** The one-time initial reconciliation mode. */
+  backfillMode: backfillModeSchema.optional(),
+  /** The backfill lifecycle status (concept default `pending`). */
+  backfillStatus: backfillStatusSchema.optional(),
+  /** Last successful poll-run completion; nullable — unset until first live poll. */
+  lastRunAt: z.date().nullable().optional(),
+  /** Last processed sync event; nullable — unset until first live event. */
+  lastEventAt: z.date().nullable().optional(),
+  /** Delta-polling cursor; nullable — only meaningful for delta polling, seeded at go-live. */
+  cursor: z.string().nullable().optional(),
+  /** Reference to the last complete full-fetch content-hash snapshot; nullable — seeded at go-live. */
+  lastSnapshotRef: z.string().nullable().optional(),
 });
 export type SyncRule = z.infer<typeof syncRuleSchema>;
 

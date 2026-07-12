@@ -7,8 +7,10 @@
  * parsing (those slices import from here). Phase 1 covers registration + spec
  * ingestion entities and the IR; Phase 2 adds the mapping-detection entities and
  * the LLM structured-output shapes; Phase 3 adds the approved-mapping entities,
- * the `MappingApproved` event, and the disabled downstream artifacts;
- * sync/adapter *execution* state arrives in later phases.
+ * the `MappingApproved` event, and the disabled downstream artifacts; Phase 4
+ * adds the sync-execution domain shapes — the `SyncRule` execution fields, the
+ * `RecordLink` and `SyncFieldState` entities, and the `SyncEvent`/`AuditLog`
+ * per-record columns; sync/adapter *behavior* arrives in later phases.
  */
 
 export * from "./enums.js";
@@ -29,3 +31,6 @@ export * from "./field-mapping.js";
 export * from "./operation-mapping.js";
 export * from "./downstream-artifacts.js";
 export * from "./audit-log.js";
+export * from "./sync-enums.js";
+export * from "./record-link.js";
+export * from "./sync-field-state.js";
