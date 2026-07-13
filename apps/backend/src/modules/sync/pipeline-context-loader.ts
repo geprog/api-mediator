@@ -1,0 +1,195 @@
+import type { FieldMapping } from "@mediator/domain";
+import { stripUndefined } from "@mediator/domain";
+import {
+  PermanentOutboundError,
+  resolveSingleRecordReadBinding,
+  type ResolvedTargetOperation,
+  type SyncPipelineContext,
+  type SyncPipelineContextLoader,
+} from "@mediator/outbound";
+import type {
+  ConflictDetectionContext,
+  DeletionConflictContext,
+  DetectedChange,
+  SingleRecordReadBinding,
+  TargetWriteShape,
+} from "@mediator/sync-engine";
+
+import {
+  buildLoopPreventionContext,
+  buildResolutionContext,
+  resolveTargetOperations,
+  toConflictField,
+} from "./context-builders.js";
+import {
+  confirmedFieldPath,
+  confirmedValue,
+  findIdentityField,
+  resolveRuleArtifacts,
+  type RuleArtifactRepos,
+  type RuleArtifacts,
+} from "./resolution.js";
+
+/**
+ * **The real {@link SyncPipelineContextLoader}** — the composition slice's central new
+ * code. It turns the persisted mapping + binding + IR state a `DetectedChange` points
+ * at into the {@link SyncPipelineContext} the `SyncPipelineHandler` feeds to every
+ * pipeline stage (RL/EP/CF/TX/OC). The handler and stages consume already-resolved
+ * *wire shapes* and *contexts*; this loader is where the DB rows become them.
+ *
+ * What it resolves, per change:
+ *  - **Canonical A/B** for the `resourcePairRef` (the `RecordLink`/`SyncFieldState`
+ *    key space) and this rule's source/target sides;
+ *  - **RL context** — the confirmed identity source/target paths, the target lookup
+ *    path (filtered-read when the identity `FieldMapping.targetLookupParamRef` is set,
+ *    else fetch-and-match over the confirmed `collectionReadRef`, else none), the
+ *    create-op policy, and the field pairings;
+ *  - **EP context** — canonical A/B + **both** directions' `FieldMapping`s (the
+ *    counterpart mapping's included when the pair is bidirectional) so the echo compare
+ *    covers every participating side-field (EP-1.2);
+ *  - **CF write + delete contexts** — the target write fields, PATCH-vs-PUT shape (from
+ *    the resolved `update` op's method), the `targetDriftCheck`/`deletePropagation`
+ *    policy, the LWW comparability AND (both apps' `supportsChangeTimestamps` AND both
+ *    resources' confirmed `changeTimestampRef`), and the single-record read binding;
+ *  - **The action-selected target operations** (`create`/`update`/`delete`) resolved to
+ *    `RestOperationBinding`s, plus the target base URL, `nativeIdRef`, and OC-3 ceilings
+ *    the Outbound Call Executor needs.
+ *
+ * A change whose rule/mapping/binding state is missing, self-inconsistent, or carries
+ * no confirmed identity key or target native id is a **config error, not a transient
+ * fault**: the loader throws a {@link PermanentOutboundError} so the dispatcher parks the
+ * entry (never a retry storm over a mapping that cannot be executed).
+ */
+export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader {
+  readonly #repos: RuleArtifactRepos;
+
+  public constructor(repos: RuleArtifactRepos) {
+    this.#repos = repos;
+  }
+
+  public async load(change: DetectedChange): Promise<SyncPipelineContext> {
+    const artifacts = await resolveRuleArtifacts(change.ruleId, this.#repos);
+    if (artifacts === undefined) {
+      throw new PermanentOutboundError(
+        `sync pipeline: rule ${change.ruleId} did not resolve to executable mapping/binding/IR state`,
+      );
+    }
+
+    const identityField = findIdentityField(artifacts.fieldMappings);
+    if (identityField === undefined) {
+      throw new PermanentOutboundError(
+        `sync pipeline: rule ${change.ruleId} has no single confirmed identity FieldMapping`,
+      );
+    }
+    const targetNativeIdRef = confirmedValue(artifacts.targetBinding.nativeIdRef);
+    if (targetNativeIdRef === undefined || targetNativeIdRef.kind !== "field") {
+      throw new PermanentOutboundError(
+        `sync pipeline: target resource has no confirmed nativeIdRef — a create's new native id cannot be read`,
+      );
+    }
+
+    const operations = resolveTargetOperations(artifacts.operationMappings, artifacts.targetGroup);
+    const targetReadBinding = resolveSingleRecordReadBinding(
+      artifacts.targetGroup,
+      artifacts.targetBinding,
+    );
+    const writableFields = artifacts.fieldMappings.filter((field) => field.isIdentityKey !== true);
+
+    const resolution = buildResolutionContext(
+      artifacts,
+      identityField,
+      operations.create !== undefined,
+    );
+    const loopPrevention = buildLoopPreventionContext(
+      artifacts,
+      change.sourceAppId,
+      await this.#counterpartFields(artifacts),
+    );
+    const conflict = this.#buildConflictContext(
+      artifacts,
+      writableFields,
+      operations.update,
+      targetReadBinding,
+    );
+    const deletion = this.#buildDeletionContext(artifacts, writableFields, targetReadBinding);
+
+    return stripUndefined({
+      resolution,
+      loopPrevention,
+      conflict,
+      deletion,
+      fieldMappings: artifacts.fieldMappings,
+      sourceResourceRef: sourceResource(change, artifacts),
+      targetResourceRef: targetResource(change, artifacts),
+      createOperation: operations.create,
+      updateOperation: operations.update,
+      deleteOperation: operations.delete,
+      targetBaseUrl: artifacts.targetBaseUrl,
+      targetResourceNativeIdRef: targetNativeIdRef,
+      targetAppLimits: artifacts.targetApp.outboundLimits,
+      sourceChangeTimestampRef: confirmedFieldPath(artifacts.sourceBinding.changeTimestampRef),
+      targetChangeTimestampRef: confirmedFieldPath(artifacts.targetBinding.changeTimestampRef),
+    });
+  }
+
+  /** The bidirectional counterpart's `FieldMapping`s (empty for a one-way rule) — EP-1.2. */
+  async #counterpartFields(artifacts: RuleArtifacts): Promise<readonly FieldMapping[]> {
+    const counterpartMappingId = artifacts.mapping.counterpartMappingId;
+    if (counterpartMappingId === undefined || counterpartMappingId === null) {
+      return [];
+    }
+    return this.#repos.mappingArtifacts.listFieldMappings(counterpartMappingId);
+  }
+
+  #buildConflictContext(
+    artifacts: RuleArtifacts,
+    writableFields: readonly FieldMapping[],
+    updateOperation: ResolvedTargetOperation | undefined,
+    targetReadBinding: SingleRecordReadBinding | undefined,
+  ): ConflictDetectionContext {
+    const changeTimestampsComparable =
+      artifacts.sourceApp.capabilities.supportsChangeTimestamps &&
+      artifacts.targetApp.capabilities.supportsChangeTimestamps &&
+      confirmedFieldPath(artifacts.sourceBinding.changeTimestampRef) !== undefined &&
+      confirmedFieldPath(artifacts.targetBinding.changeTimestampRef) !== undefined;
+    const writeShape: TargetWriteShape =
+      updateOperation?.operation.method === "PUT" ? "put" : "patch";
+    return stripUndefined({
+      appAId: artifacts.appAId,
+      appBId: artifacts.appBId,
+      fields: writableFields.map(toConflictField),
+      writeShape,
+      targetDriftCheck: artifacts.rule.targetDriftCheck ?? "none",
+      changeTimestampsComparable,
+      targetChangeTimestampRef: confirmedFieldPath(artifacts.targetBinding.changeTimestampRef),
+      targetReadBinding,
+    });
+  }
+
+  #buildDeletionContext(
+    artifacts: RuleArtifacts,
+    writableFields: readonly FieldMapping[],
+    targetReadBinding: SingleRecordReadBinding | undefined,
+  ): DeletionConflictContext {
+    return stripUndefined({
+      appAId: artifacts.appAId,
+      appBId: artifacts.appBId,
+      deletePropagation: artifacts.rule.deletePropagation ?? "ignore",
+      targetDriftCheck: artifacts.rule.targetDriftCheck ?? "none",
+      targetFields: writableFields.map((field) => field.targetPath),
+      targetReadBinding,
+    });
+  }
+}
+
+function sourceResource(change: DetectedChange, artifacts: RuleArtifacts): string {
+  return change.sourceAppId === artifacts.mapping.sourceAppId
+    ? artifacts.sourceResourceRef
+    : artifacts.targetResourceRef;
+}
+
+function targetResource(change: DetectedChange, artifacts: RuleArtifacts): string {
+  return change.targetAppId === artifacts.mapping.targetAppId
+    ? artifacts.targetResourceRef
+    : artifacts.sourceResourceRef;
+}

@@ -83,9 +83,18 @@ importers:
       '@mediator/mapping-engine':
         specifier: workspace:*
         version: link:../../packages/mapping-engine
+      '@mediator/outbound':
+        specifier: workspace:*
+        version: link:../../packages/outbound
+      '@mediator/sync-engine':
+        specifier: workspace:*
+        version: link:../../packages/sync-engine
       '@mediator/telemetry':
         specifier: workspace:*
         version: link:../../packages/telemetry
+      '@mediator/transform':
+        specifier: workspace:*
+        version: link:../../packages/transform
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1

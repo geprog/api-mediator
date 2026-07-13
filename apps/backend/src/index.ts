@@ -13,6 +13,7 @@ import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
 import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
 import { buildDetectionBackground } from "./modules/detection/background.js";
+import { buildSyncBackground } from "./modules/sync/background.js";
 
 /**
  * Dev binds loopback: the operator API is a host-local surface (the second,
@@ -39,21 +40,34 @@ const { app, shutdown: shutdownServer } = buildServer({ config, db, logger });
 // delivering it to its consumer).
 const artifactInstantiation = buildArtifactInstantiation({ db });
 
+// The Phase-4 sync-engine runtime: the Scheduler/Poller change-detection loop, the
+// ordering-queue dispatcher running the per-record pipeline over the real Outbound Call
+// Executor + REST client + credential path, and the enable/backfill flow + in-flight
+// registry. It stands up NO second dispatcher/sweep — it returns its
+// `SyncExecutionReconciler` for the single shared reconciliation sweep below. Started
+// after `listen`, stopped (gracefully — an in-flight poll/backfill/queue pass finishes)
+// before the server closes its db pool.
+const sync = buildSyncBackground({ config, db, logger });
+
 // The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers
 // `SpecIngested` to the detection consumer, which enqueues a job), the durable
 // `DetectionWorker` (runs the LLM detection off the dispatcher transaction), and
-// the periodic reconciliation sweep. It owns the single shared outbox dispatcher,
-// so the Phase-3 `MappingApproved` consumer + reconciler register on it here.
+// the periodic reconciliation sweep. It owns the single shared outbox dispatcher +
+// reconciliation sweep, so the Phase-3 `MappingApproved` consumer + reconciler and the
+// Phase-4 sync-execution reconciler register on it here.
 // Started after `listen`, stopped before the server closes its db pool.
 const detection = buildDetectionBackground({
   config,
   db,
   logger,
   additionalConsumers: [artifactInstantiation.consumer],
-  additionalReconcilers: [artifactInstantiation.reconciler],
+  additionalReconcilers: [artifactInstantiation.reconciler, sync.reconciler],
 });
 
 async function shutdown(): Promise<void> {
+  // Stop sync first (it awaits an in-flight poll/backfill/queue pass), then the
+  // detection loops, then the server + db pool.
+  await sync.stop();
   detection.stop();
   await shutdownServer();
 }
@@ -82,6 +96,7 @@ process.once("SIGINT", (signal) => {
 try {
   await app.listen({ port: config.http.port, host: HOST });
   detection.start();
+  sync.start();
 } catch (error) {
   app.log.error(
     { error: error instanceof Error ? error.message : String(error) },
