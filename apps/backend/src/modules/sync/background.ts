@@ -55,6 +55,7 @@ import {
   type EnablementDegradation,
   type EnablementRequirement,
   type PollRunOutcome,
+  type RecentlyWrittenCache,
 } from "@mediator/sync-engine";
 import { getActiveTraceContext } from "@mediator/telemetry";
 import { applyFieldMappings } from "@mediator/transform";
@@ -119,6 +120,12 @@ export interface SyncBackgroundDeps {
   readonly credentialApplier?: CredentialApplier;
   /** How often the schedule loop ticks, in ms (default {@link DEFAULT_SCHEDULE_INTERVAL_MS}). */
   readonly scheduleIntervalMs?: number;
+  /**
+   * Override the EP-2 recently-written cache (default a live {@link TtlRecentlyWrittenCache}).
+   * Correctness never depends on it; a test injects a `NullRecentlyWrittenCache` to prove
+   * the cache-independent EP-1 durable-baseline echo path end to end.
+   */
+  readonly recentlyWrittenCache?: RecentlyWrittenCache;
 }
 
 /** The verdict of the synchronous half of {@link SyncBackground.enableRule}. */
@@ -279,7 +286,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   const loopPrevention = new LoopPreventionStage({
     fieldState: syncFieldState,
     events: syncEventStore,
-    cache: new TtlRecentlyWrittenCache(RECENTLY_WRITTEN_TTL_MS),
+    cache: deps.recentlyWrittenCache ?? new TtlRecentlyWrittenCache(RECENTLY_WRITTEN_TTL_MS),
   });
   const conflictDetection = new ConflictDetectionStage({
     fieldState: syncFieldState,
@@ -348,31 +355,28 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
 
   // ── Background-run tracking (graceful shutdown awaits every in-flight enable) ─
   const activeBackfills = new Set<Promise<unknown>>();
-  const track = <T>(run: Promise<T>): Promise<T> => {
-    activeBackfills.add(run);
-    void run.finally(() => activeBackfills.delete(run));
-    return run;
-  };
 
   /**
    * The in-flight bracket (RS): `markInFlight` BEFORE the enable action flips the rule
    * `enabled`+`running`, `clear` in a `finally` AFTER the terminal status flip commits.
-   * Tracked so graceful `stop()` awaits it.
+   * Tracked so graceful `stop()` awaits it, and its rejection is HANDLED (never floated)
+   * so a transient DB fault mid-enable degrades timeliness, not the process.
    */
   const runBracketedEnable = (
     ruleId: string,
     input: Parameters<RuleEnabler["enable"]>[0],
   ): Promise<EnableRuleResult> => {
     inFlightRegistry.markInFlight(ruleId);
-    return track(
-      (async (): Promise<EnableRuleResult> => {
-        try {
-          return await ruleEnabler.enable(input);
-        } finally {
-          inFlightRegistry.clear(ruleId);
-        }
-      })(),
-    );
+    const run = (async (): Promise<EnableRuleResult> => {
+      try {
+        return await ruleEnabler.enable(input);
+      } finally {
+        inFlightRegistry.clear(ruleId);
+      }
+    })();
+    return trackBackgroundRun(run, activeBackfills, (error) => {
+      logger.error({ ruleId, err: describeError(error) }, "sync enable/backfill run failed");
+    });
   };
 
   const enableRule = async (
@@ -500,4 +504,28 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Track a background run (an in-flight enable/backfill) for graceful shutdown, with its
+ * rejection **handled** so it can never float as an unhandled rejection.
+ *
+ * A single-instance process runs enable/backfill work off the request path; its promise
+ * is added to `active` (so `stop()` can await it via `Promise.allSettled`) and gets a
+ * `catch(onError)` handler attached — which both reports a transient fault (a DB error
+ * mid-enable) and marks the promise **handled**, so ignoring the returned promise (an
+ * HTTP handler answering `202` before the backfill finishes) does not crash the process
+ * under Node's `--unhandled-rejections=throw`. The returned promise is the original run,
+ * so a caller that DOES await it (a test, graceful stop) still observes the real error.
+ */
+export function trackBackgroundRun<T>(
+  run: Promise<T>,
+  active: Set<Promise<unknown>>,
+  onError: (error: unknown) => void,
+): Promise<T> {
+  active.add(run);
+  void run.catch(onError).finally(() => {
+    active.delete(run);
+  });
+  return run;
 }

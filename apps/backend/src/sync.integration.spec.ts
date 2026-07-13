@@ -48,6 +48,7 @@ import type {
   SyncRule,
 } from "@mediator/domain";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "@mediator/outbound";
+import { NullRecentlyWrittenCache } from "@mediator/sync-engine";
 import type { JsonRecord, JsonValue } from "@mediator/transform";
 import { pino } from "pino";
 import type { FastifyBaseLogger } from "fastify";
@@ -495,23 +496,47 @@ suite(
         // ── 6. Poll the reverse direction — the target now reflects the mediator's write ──
         // App B's poll (RULE_BA) sees the record the mediator just wrote and must recognize
         // it as an ECHO of the mediator's own write: skipped-loop, NO second write.
-        const writeCountAfterFirst = landscape.writes.length;
-        const pollBA = await sync.pollOnce(RULE_BA);
-        expect(pollBA.kind).toBe("completed");
-        // The reverse poll observes the written record as a change and enqueues it...
-        if (pollBA.kind === "completed") {
-          expect(pollBA.enqueued).toHaveLength(1);
-        }
-        const echoTick = await sync.queueDispatcher.runOnce();
-        // ...which the pipeline resolves as done (a conflict/echo park is a successful done).
-        expect(echoTick.outcome).toBe("done");
+        //
+        // Run this step through a SECOND background whose EP-2 cache is COLD
+        // (NullRecentlyWrittenCache) — sharing the same DB (link + baselines from step 5).
+        // With the cache disabled, the ONLY thing that can catch the echo is the durable
+        // EP-1 field-baseline compare — the cache-independent no-echo guarantee. (The real
+        // composition's TtlRecentlyWrittenCache is a fast path; correctness never depends
+        // on it, and here we prove the backstop end to end.)
+        const syncCold = buildSyncBackground({
+          db,
+          config,
+          logger,
+          protocolClient: landscape,
+          recentlyWrittenCache: new NullRecentlyWrittenCache(),
+        });
+        try {
+          const writeCountAfterFirst = landscape.writes.length;
+          const pollBA = await syncCold.pollOnce(RULE_BA);
+          expect(pollBA.kind).toBe("completed");
+          // The reverse poll observes the written record as a change and enqueues it...
+          if (pollBA.kind === "completed") {
+            expect(pollBA.enqueued).toHaveLength(1);
+          }
+          const echoTick = await syncCold.queueDispatcher.runOnce();
+          // ...which the pipeline resolves as done (a conflict/echo park is a successful done).
+          expect(echoTick.outcome).toBe("done");
 
-        // No SECOND write happened — the echo was dropped (the loop is closed).
-        expect(landscape.writes.length).toBe(writeCountAfterFirst);
-        const skippedLoop = (await audit.listByMappingId(MAPPING_BA)).filter(
-          (entry) => entry.status === "skipped-loop",
-        );
-        expect(skippedLoop.length).toBeGreaterThan(0);
+          // No SECOND write happened — the echo was dropped (the loop is closed).
+          expect(landscape.writes.length).toBe(writeCountAfterFirst);
+          const skippedLoop = (await audit.listByMappingId(MAPPING_BA)).filter(
+            (entry) => entry.status === "skipped-loop",
+          );
+          expect(skippedLoop.length).toBeGreaterThan(0);
+          // ...and with the cache cold it was the DURABLE field-baseline path that caught it
+          // (EP-1), not the fast-path cache — the LoopPreventionStage records the `via` in
+          // the skipped-loop event detail.
+          expect(
+            skippedLoop.some((entry) => (entry.details ?? "").includes("reconciled baseline")),
+          ).toBe(true);
+        } finally {
+          await syncCold.stop();
+        }
 
         // ── 7. Graceful stop mid-loop leaves consistent state ────────────────────────
         sync.start();

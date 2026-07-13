@@ -1,4 +1,4 @@
-import type { OutboundLoadLimits, SyncRule } from "@mediator/domain";
+import type { IrParameter, OutboundLoadLimits, SyncRule } from "@mediator/domain";
 import {
   AppLoadGovernor,
   resolveSourceReadBinding,
@@ -46,12 +46,19 @@ import type { RuleArtifactRepos } from "./resolution.js";
  * queued execution retries rather than fabricating a no-match.
  */
 
+/** The resolved collection-read wire shape plus the operation's IR parameters (for filter-location checks). */
+export interface ResolvedTargetCollectionRead {
+  readonly binding: RestSourceReadBinding;
+  /** The collection read operation's IR parameters — a filtered read verifies its filter param is query-located. */
+  readonly parameters: readonly IrParameter[];
+}
+
 /** Resolves a {@link TargetReadBinding} against a target app into the collection-read wire shape. */
 export interface TargetCollectionReadResolver {
   resolve(
     targetAppId: string,
     binding: TargetReadBinding,
-  ): Promise<RestSourceReadBinding | undefined>;
+  ): Promise<ResolvedTargetCollectionRead | undefined>;
 }
 
 /**
@@ -74,7 +81,7 @@ export class RepoTargetCollectionReadResolver implements TargetCollectionReadRes
   public async resolve(
     targetAppId: string,
     binding: TargetReadBinding,
-  ): Promise<RestSourceReadBinding | undefined> {
+  ): Promise<ResolvedTargetCollectionRead | undefined> {
     const app = await this.#repos.registeredApps.getById(targetAppId);
     if (app?.baseUrl === undefined) {
       return undefined;
@@ -85,7 +92,10 @@ export class RepoTargetCollectionReadResolver implements TargetCollectionReadRes
         continue;
       }
       for (const group of spec.parsedIR) {
-        if (!group.operations.some((op) => op.operationId === binding.collectionReadOperationId)) {
+        const operation = group.operations.find(
+          (op) => op.operationId === binding.collectionReadOperationId,
+        );
+        if (operation === undefined) {
           continue;
         }
         const bindings = await this.#repos.resourceBindings.listByApiSpecId(spec.id);
@@ -105,7 +115,7 @@ export class RepoTargetCollectionReadResolver implements TargetCollectionReadRes
           sourceBinding: resourceBinding,
         });
         if (resolved !== undefined) {
-          return resolved;
+          return { binding: resolved, parameters: operation.parameters };
         }
       }
     }
@@ -171,10 +181,21 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
         `target identity filtered-read binding did not resolve for app ${request.targetAppId}`,
       );
     }
-    const filterParam = paramNameOf(request.lookupParamRef);
-    const result = await this.#readAll(request.targetAppId, wire, {
+    // FAIL CLOSED: a filtered read only means anything if the confirmed lookup parameter
+    // is actually a QUERY parameter of the collection read. A mis-confirmed path/header/
+    // cookie param sent as a query would be silently IGNORED by the target, which would
+    // then return its unfiltered first record — a wrong single-record match RL-4 cannot
+    // catch (a 1-result "filter" looks unambiguous). Refuse rather than mis-route.
+    const filterParam = queryFilterParam(wire.parameters, request.lookupParamRef);
+    const filterValue = scalarString(request.value);
+    if (filterParam === undefined || filterValue === undefined) {
+      throw new Error(
+        `target identity filtered-read: lookup parameter '${request.lookupParamRef}' does not resolve to a query parameter (or the identity value is not a scalar) for app ${request.targetAppId} — refusing an unfiltered read`,
+      );
+    }
+    const result = await this.#readAll(request.targetAppId, wire.binding, {
       name: filterParam,
-      value: scalarString(request.value),
+      value: filterValue,
     });
     if (!result.ok) {
       throw new Error(`target identity filtered-read failed: ${result.reason}`);
@@ -188,7 +209,7 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
       // Abort-on-partial: an unresolved binding is an unsound read, not "no records".
       return { complete: false };
     }
-    const result = await this.#readAll(request.targetAppId, wire, undefined);
+    const result = await this.#readAll(request.targetAppId, wire.binding, undefined);
     return result.ok ? { complete: true, records: result.records } : { complete: false };
   }
 
@@ -200,22 +221,16 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
   async #readAll(
     targetAppId: string,
     binding: RestSourceReadBinding,
-    filter: { readonly name: string | undefined; readonly value: string | undefined } | undefined,
+    filter: { readonly name: string; readonly value: string } | undefined,
   ): Promise<
     | { readonly ok: true; readonly records: MatchedTargetRecord[] }
     | { readonly ok: false; readonly reason: string }
   > {
-    if (filter !== undefined && (filter.name === undefined || filter.value === undefined)) {
-      // A filtered read whose parameter/value cannot be represented on the wire (a
-      // non-scalar identity value, or a non-query filter param) is unsound — never a
-      // silent empty result.
-      return { ok: false, reason: "filter parameter or value is not resolvable to a query param" };
-    }
     const byNativeId = new Map<string, MatchedTargetRecord>();
     let page = pageStart(binding.pagination);
     for (let count = 0; count < this.#maxPages; count += 1) {
       const query = pageQuery(binding.pagination, page);
-      if (filter?.name !== undefined && filter.value !== undefined) {
+      if (filter !== undefined) {
         query.push([filter.name, filter.value]);
       }
       const call = await this.#call(targetAppId, binding, query);
@@ -402,14 +417,22 @@ function scalarString(value: JsonValue): string | undefined {
 }
 
 /**
- * The bare parameter name from a `targetLookupParamRef` (`resourceRef/operationId#name`
- * or a bare name) — placed as a query filter. A ref that names no parameter yields
- * `undefined`, which makes the filtered read unsound (handled by the caller).
+ * The wire query-parameter name for a confirmed `targetLookupParamRef`
+ * (`resourceRef/operationId#name` or a bare name), or `undefined` when the collection
+ * read has no such parameter OR it is not a **query** parameter. Returning `undefined`
+ * makes {@link RestTargetIdentityLookup.filteredRead} fail closed — a path/header/cookie
+ * filter param must never be sent as an ignored query param over an unfiltered read.
  */
-function paramNameOf(ref: string): string | undefined {
+function queryFilterParam(parameters: readonly IrParameter[], ref: string): string | undefined {
   const hash = ref.lastIndexOf("#");
   const name = hash === -1 ? ref : ref.slice(hash + 1);
-  return name.length > 0 ? name : undefined;
+  if (name.length === 0) {
+    return undefined;
+  }
+  const match = parameters.find(
+    (parameter) => parameter.name === name && parameter.location === "query",
+  );
+  return match?.name;
 }
 
 function describeError(error: unknown): string {
