@@ -125,6 +125,17 @@ function buildReadRequest(resolved: ResolvedSingleRecordRead, nativeId: string):
   } else {
     headers[location.name] = nativeId;
   }
+  // Guard against an unfilled path template (a single-record read whose operation has
+  // path params BEYOND the record id — the constant-path-parameter-binding open
+  // question, e.g. a Gitea `/repos/{owner}/{repo}/issues/{index}`). Sending `{owner}`
+  // literally would 404, which `classifyRead` would turn into a **fabricated not-found**
+  // ("target gone"), violating this reader's own contract. Throw instead.
+  const unfilled = /\{[^}]+\}/.exec(path);
+  if (unfilled !== null) {
+    throw new Error(
+      `single-record read path still has an unfilled parameter '${unfilled[0]}' after the id substitution — constant path-parameter binding is not resolved for this operation`,
+    );
+  }
   return {
     method: resolved.method,
     url: joinUrl(resolved.baseUrl, path) + query,

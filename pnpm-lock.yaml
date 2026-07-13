@@ -395,9 +395,6 @@ importers:
       '@mediator/domain':
         specifier: workspace:*
         version: link:../domain
-      '@mediator/ir':
-        specifier: workspace:*
-        version: link:../ir
       '@mediator/sync-engine':
         specifier: workspace:*
         version: link:../sync-engine
@@ -411,6 +408,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@mediator/ir':
+        specifier: workspace:*
+        version: link:../ir
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3

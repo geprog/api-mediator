@@ -743,6 +743,23 @@ describe("RestSingleRecordTargetReader — CF-5/CF-6 single-record read", () => 
     await expect(reader.readRecord(READ_REQUEST)).rejects.toThrow(/did not resolve/);
   });
 
+  it("throws on an unfilled path template rather than sending it and fabricating a not-found", async () => {
+    // A single-record read whose op has path params beyond the record id (Gitea's
+    // `{owner}/{repo}`) — filling only `{index}` leaves `{owner}`/`{repo}` unfilled.
+    const constantParamRead: ResolvedSingleRecordRead = {
+      baseUrl: "https://gitea.test",
+      method: "GET",
+      pathTemplate: "/repos/{owner}/{repo}/issues/{index}",
+      idLocation: { name: "index", in: "path" },
+    };
+    const protocol = new FakeProtocolClient(() => ({ status: 404, headers: {}, body: undefined }));
+    await expect(
+      targetReader(protocol, constantParamRead).readRecord(READ_REQUEST),
+    ).rejects.toThrow(/unfilled parameter/);
+    // It must NOT have sent a request with a literal `{owner}` in the URL.
+    expect(protocol.requests).toHaveLength(0);
+  });
+
   it("fills a query-located id parameter", async () => {
     const queryRead: ResolvedSingleRecordRead = {
       baseUrl: "https://vikunja.test/",

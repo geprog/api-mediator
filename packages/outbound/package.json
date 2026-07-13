@@ -19,13 +19,13 @@
     "@mediator/credentials": "workspace:*",
     "@mediator/db": "workspace:*",
     "@mediator/domain": "workspace:*",
-    "@mediator/ir": "workspace:*",
     "@mediator/sync-engine": "workspace:*",
     "@mediator/telemetry": "workspace:*",
     "@mediator/transform": "workspace:*",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@mediator/ir": "workspace:*",
     "@types/node": "24.13.3",
     "vitest": "4.1.10"
   }

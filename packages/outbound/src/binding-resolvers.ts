@@ -34,8 +34,11 @@ import type {
  *
  * The module lives in `@mediator/outbound` (not `@mediator/sync-engine`) because it
  * produces the *outbound* wire shapes and depends on {@link RestSourceReadBinding} /
- * {@link RestOperationBinding} defined here; it newly imports `@mediator/ir`'s IR
- * types (`@mediator/ir → @mediator/domain` only, so no cycle).
+ * {@link RestOperationBinding} defined here. The IR types it reasons over
+ * (`IrResourceGroup`/`IrOperation`/`IrParameter`/`IrRefTarget`) are the shared-kernel
+ * shapes from `@mediator/domain` — the source imports **no** new package. (`@mediator/ir`,
+ * the OpenAPI→IR builder, is a **test-only** dependency: the spec calls `buildIr` to
+ * build fixtures from the vendored scenario specs.)
  *
  * ## The load-bearing invariant: never fabricate a binding from an unconfirmed ref
  *
