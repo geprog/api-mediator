@@ -31,6 +31,11 @@ export {
 } from "./record-link.js";
 export { SyncFieldStateRepository, type SyncFieldStateStore } from "./sync-field-state.js";
 export {
+  ParkedConflictRepository,
+  type ParkedConflictResolution,
+  type ParkedConflictStore,
+} from "./parked-conflict.js";
+export {
   DownstreamArtifactRepository,
   type DownstreamArtifactOps,
 } from "./downstream-artifacts.js";

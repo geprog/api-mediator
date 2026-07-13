@@ -69,6 +69,30 @@ export interface ConflictField {
   readonly conflictPolicy?: ConflictPolicy;
 }
 
+// ── SA-4.2 / SA-4.3: the one-shot operator resolution override ─────────────────
+
+/** The side an operator chose for a contested field (SA-4.2). */
+export type FieldResolutionChoice = "source-wins" | "target-wins";
+
+/**
+ * A **one-shot** operator resolution directive for a single contested field,
+ * threaded into {@link ConflictDetectionInput} by the SA-4 resolution re-run
+ * (`docs/requirements/phase-4-sync-api.md` SA-4.2; `docs/architecture/sync-engine.md`
+ * *Conflict handling* — *What resolution does*). It is an **additive** input that
+ * keeps the resolution **inside** CF (not a blind bypass): a field with an override
+ * skips the `manual-resolve` park / the auto last-write-wins decision and applies the
+ * chosen side instead — but **only when the field is actually drifted**, and **every
+ * other CF invariant still holds** (an undrifted field writes normally; a `target-wins`
+ * override withholds and CF forges **no** baseline; a PUT withhold still read-carries
+ * the target's current value). Consumed exactly once — the re-run enqueues it, CF
+ * honors it for that one execution, and the parked_conflict row is superseded.
+ */
+export interface FieldConflictOverride {
+  /** The contested **target** field path this directive resolves (matches a {@link ConflictField}). */
+  readonly targetPath: string;
+  readonly choice: FieldResolutionChoice;
+}
+
 // ── CF-5 / CF-6: the single-record target read port (real impl deferred) ──────
 
 /**
@@ -174,6 +198,13 @@ export interface ConflictDetectionInput {
   readonly change: DetectedChange;
   readonly link: RecordLink;
   readonly context: ConflictDetectionContext;
+  /**
+   * SA-4.2 — the operator's one-shot resolution directives for this execution (absent
+   * on an ordinary poll-driven change). A directive supersedes the `manual-resolve`
+   * park / auto last-write-wins **for its field only, when that field is drifted**; all
+   * other CF invariants still hold. See {@link FieldConflictOverride}.
+   */
+  readonly overrides?: readonly FieldConflictOverride[];
 }
 
 // ── The per-field write plan + stage outcome (write path) ─────────────────────
@@ -262,11 +293,29 @@ export interface DeletionConflictContext {
   readonly targetReadBinding?: SingleRecordReadBinding;
 }
 
+/**
+ * SA-4.3 — the operator's one-shot directive telling CF-7 the operator **accepted the
+ * drift**: proceed with the propagated delete after all instead of parking it
+ * (`docs/requirements/phase-4-sync-api.md` SA-4.3; `docs/architecture/sync-engine.md`
+ * *Conflict handling* — *Deletes vs. edits*). The only choice modeled here is
+ * `propagate` — `sever` never re-runs the delete pipeline (it tombstones the link
+ * `observed-delete` directly, deleting nothing), so it needs no CF override.
+ */
+export interface DeletionConflictOverride {
+  readonly choice: "propagate";
+}
+
 /** A delete entering Conflict Detection — carrying the resolved **active** link. */
 export interface DeletionConflictInput {
   readonly change: DetectedChange;
   readonly link: RecordLink;
   readonly context: DeletionConflictContext;
+  /**
+   * SA-4.3 — the operator's one-shot "propagate the drifted delete after all"
+   * directive (absent on an ordinary poll-driven delete). When present, CF-7 skips the
+   * drift park and proceeds to delete. See {@link DeletionConflictOverride}.
+   */
+  readonly override?: DeletionConflictOverride;
 }
 
 /**

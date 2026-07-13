@@ -43,6 +43,9 @@ import type {
   MappingVariant,
   OperationAction,
   OutboundLoadLimits,
+  ParkedConflictKind,
+  ParkedConflictResolutionChoice,
+  ParkedConflictStatus,
   ProposalElementRef,
   ProposalItemAlternative,
   RecordLinkEstablishedBy,
@@ -312,6 +315,26 @@ export const syncFieldStateStatusEnum = pgEnum("sync_field_state_status", [
   "active",
   "archived",
 ] as const satisfies readonly SyncFieldStateStatus[]);
+
+// ── Phase-4 parked-conflict enums (SA-4, pinned to @mediator/domain unions) ─────
+
+export const parkedConflictKindEnum = pgEnum("parked_conflict_kind", [
+  "manual-resolve",
+  "withheld",
+  "drifted-delete",
+] as const satisfies readonly ParkedConflictKind[]);
+
+export const parkedConflictStatusEnum = pgEnum("parked_conflict_status", [
+  "open",
+  "resolved",
+] as const satisfies readonly ParkedConflictStatus[]);
+
+export const parkedConflictResolutionChoiceEnum = pgEnum("parked_conflict_resolution_choice", [
+  "source-wins",
+  "target-wins",
+  "propagate",
+  "sever",
+] as const satisfies readonly ParkedConflictResolutionChoice[]);
 
 // ── Phase-4 SyncRule execution/policy enums (SD-1, pinned to @mediator/domain) ──
 
@@ -1375,5 +1398,80 @@ export const syncFieldState = pgTable(
       table.side,
       table.fieldPath,
     ),
+  ],
+);
+
+// ── Phase-4 parked conflict (the SA-4 structured operator-resolution record) ────
+
+/**
+ * `parked_conflict` — the **structured** record of a conflict the pipeline parked for
+ * a human to resolve (`docs/architecture/data-model.md`; `docs/requirements/phase-4-sync-api.md`
+ * SA-4; `docs/architecture/sync-engine.md` *Conflict handling*). It closes the CF-review
+ * gap: a prose `conflict` `SyncEvent` carries no addressable `(RecordLink, side, field)`
+ * and no contested-value marker, so SA-4 could not reliably resolve a specific field
+ * from it. One row per parked field conflict (`manual-resolve`/`withheld` — CF-3/CF-4/CF-5)
+ * or per parked drifted-delete (`drifted-delete` — CF-7). The pipeline handler writes it
+ * alongside the `conflict` `SyncEvent`; the operator API reads the open queue and resolves
+ * a row **through the normal pipeline** (SA-4.2/4.3).
+ *
+ * **Data-boundary invariant (load-bearing).** Only ids/enums/paths/metadata and the two
+ * contested sides' `SyncFieldState.observedHash` **at park time** are stored — **never** a
+ * raw contested value, a live payload value, or credential material
+ * (`docs/architecture/security.md`). There is deliberately no value column.
+ *
+ * `record_link_id`/`sync_rule_id`/`mapping_id` are plain `uuid` with **no FK**, exactly
+ * like `audit_log`'s loose `related_*` refs and `record_link`'s app ids: a parked
+ * conflict is retained for audit and must survive a later tombstone/deletion of the
+ * link/rule it references.
+ *
+ * **Idempotent re-park (SA-4 / the CF-review requirement).** Two partial UNIQUE indexes
+ * keep at most one **open** row per contested target: `(record_link_id, side, kind,
+ * field_path) WHERE status = 'open' AND field_path IS NOT NULL` for a field conflict, and
+ * `(record_link_id) WHERE status = 'open' AND kind = 'drifted-delete'` for a drifted
+ * delete (whose `field_path` is NULL). Re-processing the same still-conflicting field
+ * updates the open row's hashes rather than duplicating it; a `resolved` row leaves the
+ * open set, so a later re-park opens a fresh row.
+ */
+export const parkedConflict = pgTable(
+  "parked_conflict",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Loose refs (no FK) — retained for audit past a link/rule tombstone/deletion.
+    recordLinkId: uuid("record_link_id").notNull(),
+    syncRuleId: uuid("sync_rule_id").notNull(),
+    mappingId: uuid("mapping_id").notNull(),
+    kind: parkedConflictKindEnum("kind").notNull(),
+    // The contested (target) side; the target field path for a field conflict, NULL for
+    // a drifted-delete (the whole record is contested).
+    side: syncFieldStateSideEnum("side").notNull(),
+    fieldPath: text("field_path"),
+    // The two contested sides' observedHash at park time (content hashes only, never a
+    // value); NULL on a drifted-delete (the source record is gone).
+    sourceObservedHash: text("source_observed_hash"),
+    targetObservedHash: text("target_observed_hash"),
+    status: parkedConflictStatusEnum("status").notNull(),
+    // The OA-3 resolution triple — present only on a resolved row.
+    resolutionChoice: parkedConflictResolutionChoiceEnum("resolution_choice"),
+    resolvedBy: text("resolved_by"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    // The contested source record's native id (queue context) + a metadata note.
+    sourceNativeId: text("source_native_id"),
+    details: text("details"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // The SA-4.1 queue read ("open conflicts, by link") + the by-link resolve lookup.
+    index("parked_conflict_open_idx")
+      .on(table.recordLinkId)
+      .where(sql`${table.status} = 'open'`),
+    // Idempotent re-park: one open field-conflict row per (link, side, kind, field).
+    uniqueIndex("parked_conflict_open_field_uq")
+      .on(table.recordLinkId, table.side, table.kind, table.fieldPath)
+      .where(sql`${table.status} = 'open' AND ${table.fieldPath} IS NOT NULL`),
+    // Idempotent re-park: one open drifted-delete row per link.
+    uniqueIndex("parked_conflict_open_delete_uq")
+      .on(table.recordLinkId)
+      .where(sql`${table.status} = 'open' AND ${table.kind} = 'drifted-delete'`),
   ],
 );

@@ -4,6 +4,7 @@ import { installAuthentication, type AuthProvider } from "../auth/index.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
 import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
+import { registerParkedConflictRoutes } from "./parked-conflicts.routes.js";
 import { registerRecordLinkRoutes } from "./record-links.routes.js";
 import { registerResourceBindingRoutes } from "./resource-bindings.routes.js";
 import { registerSessionRoute } from "./session.routes.js";
@@ -36,6 +37,7 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
     registerSyncRuleRoutes(app, deps.sync);
     registerSyncEventRoutes(app, deps.sync);
     registerRecordLinkRoutes(app, deps.sync);
+    registerParkedConflictRoutes(app, deps.sync);
   }
 }
 

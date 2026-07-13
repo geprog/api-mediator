@@ -23,6 +23,7 @@ import type {
   ConflictRecord,
   DeletionConflictInput,
   DeletionConflictOutcome,
+  FieldConflictOverride,
   FieldPlan,
   FieldResolution,
   SingleRecordReadBinding,
@@ -146,6 +147,8 @@ export class ConflictDetectionStage {
 
     const drafts: Draft[] = [];
     const resolutions: FieldResolution[] = [];
+    // SA-4.2 — the operator's one-shot resolution directives, indexed by target path.
+    const overrideByPath = indexOverrides(input.overrides);
 
     for (const field of context.fields) {
       const targetRow = rowMap.get(rowKey(targetSide, field.targetPath));
@@ -156,6 +159,29 @@ export class ConflictDetectionStage {
       const drifted = baseline === undefined || targetObs.hash !== baseline;
       if (!drifted) {
         drafts.push({ targetPath: field.targetPath, disposition: "write" });
+        continue;
+      }
+
+      // SA-4.2 — an operator resolution override supersedes the `manual-resolve` park
+      // AND the auto last-write-wins decision, but only for a DRIFTED field and only for
+      // this one execution (a contained, additive change — the resolution stays *inside*
+      // CF, not a blind bypass). `source-wins` writes the winning source value through
+      // the normal write path; `target-wins` withholds and forges NO baseline — mirroring
+      // an auto `target-wins` exactly (`docs/architecture/sync-engine.md` *What resolution
+      // does*). Every other CF invariant (drift detection, PUT read-carry) still holds.
+      const override = overrideByPath.get(field.targetPath);
+      if (override !== undefined) {
+        if (override.choice === "source-wins") {
+          drafts.push({ targetPath: field.targetPath, disposition: "write" });
+          resolutions.push({ targetPath: field.targetPath, outcome: "source-wins" });
+        } else {
+          drafts.push({
+            targetPath: field.targetPath,
+            disposition: "withhold",
+            reason: "target-wins",
+          });
+          resolutions.push({ targetPath: field.targetPath, outcome: "target-wins" });
+        }
         continue;
       }
 
@@ -293,6 +319,13 @@ export class ConflictDetectionStage {
     }
 
     if (driftedFields.length > 0) {
+      // SA-4.3 — the operator accepted the drift (propagate the delete after all): skip
+      // the park and proceed to delete + tombstone `propagated-delete`. The delete still
+      // flows through the pipeline (the handler makes the call, OC-2's delete idempotency
+      // key applies) — never a blind delete.
+      if (input.override?.choice === "propagate") {
+        return { kind: "delete", tombstoneReason: "propagated-delete" };
+      }
       // CF-7.2/7.3/7.6 — park: recorded conflict, link left active, nothing deleted.
       const syncEventId = await this.#recordEvent(
         change,
@@ -540,6 +573,17 @@ function indexRows(rows: readonly SyncFieldState[]): Map<string, SyncFieldState>
   const map = new Map<string, SyncFieldState>();
   for (const row of rows) {
     map.set(rowKey(row.side, row.fieldPath), row);
+  }
+  return map;
+}
+
+/** SA-4.2 — index the operator's field resolution directives by their target path. */
+function indexOverrides(
+  overrides: readonly FieldConflictOverride[] | undefined,
+): Map<string, FieldConflictOverride> {
+  const map = new Map<string, FieldConflictOverride>();
+  for (const override of overrides ?? []) {
+    map.set(override.targetPath, override);
   }
   return map;
 }

@@ -5,8 +5,12 @@ import {
   backfillStatusSchema,
   conflictPolicySchema,
   deletePropagationSchema,
+  parkedConflictKindSchema,
+  parkedConflictResolutionChoiceSchema,
+  parkedConflictStatusSchema,
   recordLinkEstablishedBySchema,
   recordLinkStatusSchema,
+  syncFieldStateSideSchema,
   syncRuleStatusSchema,
   targetDriftCheckSchema,
 } from "@mediator/domain";
@@ -330,3 +334,66 @@ export const ambiguousMatchListResponseSchema = z.object({
   matches: z.array(ambiguousMatchDtoSchema),
 });
 export type AmbiguousMatchListResponse = z.infer<typeof ambiguousMatchListResponseSchema>;
+
+// ── SA-4: the parked-conflict queue + resolution ─────────────────────────────
+
+/**
+ * One parked conflict on the wire (SA-4.1): the addressable identity + decision context
+ * for a conflict the pipeline parked (a `manual-resolve`/`withheld` field, or a
+ * drifted-delete). Ids / enums / field path / **content hashes** / metadata only —
+ * **never** a raw contested value, a live payload value, or credential material
+ * (`docs/architecture/security.md`). `Date`s become ISO strings; absent optionals `null`.
+ */
+export const parkedConflictDtoSchema = z.object({
+  id: z.string(),
+  recordLinkId: z.string(),
+  syncRuleId: z.string(),
+  mappingId: z.string(),
+  kind: parkedConflictKindSchema,
+  side: syncFieldStateSideSchema,
+  /** The contested target field path (a field conflict); `null` for a drifted-delete. */
+  fieldPath: z.string().nullable(),
+  /** The two contested sides' `observedHash` at park time (hashes only, never a value). */
+  sourceObservedHash: z.string().nullable(),
+  targetObservedHash: z.string().nullable(),
+  status: parkedConflictStatusSchema,
+  resolutionChoice: parkedConflictResolutionChoiceSchema.nullable(),
+  resolvedBy: z.string().nullable(),
+  resolvedAt: isoDateTimeSchema.nullable(),
+  sourceNativeId: z.string().nullable(),
+  details: z.string().nullable(),
+  createdAt: isoDateTimeSchema,
+  updatedAt: isoDateTimeSchema,
+});
+export type ParkedConflictDto = z.infer<typeof parkedConflictDtoSchema>;
+
+/** `GET /api/parked-conflicts` response (SA-4.1) — the open parked-conflict queue. */
+export const parkedConflictListResponseSchema = z.object({
+  conflicts: z.array(parkedConflictDtoSchema),
+});
+export type ParkedConflictListResponse = z.infer<typeof parkedConflictListResponseSchema>;
+
+/**
+ * `POST /api/parked-conflicts/:id/resolve` request (SA-4.2/4.3): the operator's chosen
+ * resolution. `source-wins`/`target-wins` resolve a field conflict; `propagate`/`sever`
+ * resolve a drifted-delete. The server validates the choice against the row's kind (a
+ * mismatch is a 400).
+ */
+export const resolveParkedConflictRequestSchema = z.object({
+  resolution: parkedConflictResolutionChoiceSchema,
+});
+export type ResolveParkedConflictRequest = z.infer<typeof resolveParkedConflictRequestSchema>;
+
+/**
+ * `POST /api/parked-conflicts/:id/resolve` response (SA-4.2/4.3). `enqueued` — the
+ * resolution re-ran through the normal pipeline (the row is superseded once that re-run
+ * completes, so `conflict` may still read `open`); `applied` — a `sever` tombstoned the
+ * link directly (the returned `conflict` is `resolved`). No raw value / credential material.
+ */
+export const resolveParkedConflictResponseSchema = z.object({
+  id: z.string(),
+  outcome: z.enum(["enqueued", "applied"]),
+  resolution: parkedConflictResolutionChoiceSchema,
+  conflict: parkedConflictDtoSchema,
+});
+export type ResolveParkedConflictResponse = z.infer<typeof resolveParkedConflictResponseSchema>;
