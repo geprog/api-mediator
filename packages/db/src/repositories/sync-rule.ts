@@ -80,6 +80,28 @@ export class SyncRuleRepository {
   }
 
   /**
+   * The reconciliation sweep's **bounded** scan of enabled rules (RS-1.4;
+   * `docs/requirements/phase-4-reconciliation-sweep.md` RS-1): every `enabled`
+   * rule up to `limit`, ordered by `id` so a pass is deterministic. The sweep
+   * re-derives each rule's readiness from its persisted `backfillStatus` alone
+   * (RS-1.1, no unbounded replay) — an `enabled`+`running` rule whose backfill is
+   * not in flight is the crash-orphaned reaction it re-triggers (RS-1.2). The
+   * `limit` is the never-scan-unbounded-history guardrail (RS-1.4); a single-
+   * instance deployment holds far fewer enabled rules than the cap. Deliberately
+   * separate from {@link listPollCandidates} (the Scheduler's join): the sweep
+   * needs only the rule's own state, not the mapping/source polling inputs.
+   */
+  public async listEnabledForReconciliation(limit: number): Promise<SyncRule[]> {
+    const rows = await this.db
+      .select()
+      .from(syncRule)
+      .where(eq(syncRule.status, "enabled"))
+      .orderBy(syncRule.id)
+      .limit(limit);
+    return rows.map(mapSyncRuleRow);
+  }
+
+  /**
    * The Scheduler's candidate scan (SP-1): every `enabled` rule joined to its
    * mapping status and its source app's polling capability + default interval — the
    * inputs the eligibility gate decides on. Disabled rules are excluded up front (the

@@ -26,5 +26,11 @@ export default defineConfig({
     name: "outbound-integration",
     environment: "node",
     include: ["src/**/*.integration.spec.ts"],
+    // Run the integration spec FILES serially (as the `@mediator/db` integration
+    // project does): they share one database and both migrate it in `beforeAll`,
+    // and the reconciler-convergence file seeds FK-referenced `registered_app` /
+    // `api_spec` rows whose lifetime must not overlap the sibling file's blanket
+    // `delete(registered_app)` teardown. Serializing avoids that cross-file race.
+    fileParallelism: false,
   },
 });

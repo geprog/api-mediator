@@ -144,3 +144,22 @@ export {
   type RuleEnablerOptions,
   type SyncRuleEnableStore,
 } from "./enable-rule.js";
+
+// The Phase-4 sync-execution reconciler — the reconciliation sweep's invariant
+// guardian: re-triggers a crash-orphaned `running` backfill so bus loss / restart
+// degrades timeliness, never correctness (RS-1/RS-2). Structurally a `Reconciler`;
+// the backend registers it on the shared sweep (docs/requirements/
+// phase-4-reconciliation-sweep.md).
+export {
+  DEFAULT_RECONCILE_LIMIT,
+  FakeSyncExecutionReconcilerMetrics,
+  InMemoryBackfillInFlightRegistry,
+  SYNC_EXECUTION_RECONCILER_NAME,
+  SyncExecutionReconciler,
+  type BackfillInFlightTracker,
+  type BackfillRetrigger,
+  type EnabledRuleReader,
+  type SyncExecutionReconcilerDeps,
+  type SyncExecutionReconcilerMetrics,
+  type SyncExecutionReconcilerOptions,
+} from "./sync-execution-reconciler.js";
