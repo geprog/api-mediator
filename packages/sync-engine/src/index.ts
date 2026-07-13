@@ -28,3 +28,51 @@ export {
 // In-memory queue that faithfully mirrors the real SKIP LOCKED claim semantics —
 // the reference the OQ-2/OQ-3/OQ-4 + pipeline slices unit-test against.
 export { FakeOrderingQueue } from "./fake-ordering-queue.js";
+
+// ── Identity Resolution — the pipeline's first stage (RL-1..RL-5) ─────────────
+
+export {
+  IdentityResolutionStage,
+  IncompleteTargetFetchError,
+  type IdentityResolutionStageDeps,
+  type IdentityResolutionStageOptions,
+  type ManualLinkParams,
+} from "./identity-resolution/identity-resolution-stage.js";
+export {
+  IdentityMatchSeeder,
+  type IdentityMatchSeedInput,
+  type IdentityMatchSeederOptions,
+} from "./identity-resolution/field-state-seeder.js";
+export { canonicalJson, hashFieldValue, valuesAgree } from "./identity-resolution/hash.js";
+export {
+  FakeIdentityResolutionMetrics,
+  FakeRecordLinkStore,
+  FakeSyncEventRecorder,
+  FakeSyncFieldStateStore,
+  FakeTargetIdentityLookup,
+  UniqueActiveLinkViolation,
+  type FakeTargetConfig,
+} from "./identity-resolution/fakes.js";
+export type {
+  ChangeKind,
+  DetectedChange,
+  FetchAllRequest,
+  FilteredReadRequest,
+  IdentityResolutionMetrics,
+  MatchedTargetRecord,
+  ResolutionContext,
+  ResolutionOutcome,
+  ResolvedOutcome,
+  AmbiguousFailureOutcome,
+  SkippedPolicyOutcome,
+  SkippedPolicyReason,
+  SeveredTombstoneOutcome,
+  StraightCreateOutcome,
+  NoLinkDeleteOutcome,
+  StageTraceContext,
+  SyncEventRecorder,
+  TargetFetchResult,
+  TargetIdentityLookup,
+  TargetLookupCapability,
+  TargetReadBinding,
+} from "./identity-resolution/types.js";

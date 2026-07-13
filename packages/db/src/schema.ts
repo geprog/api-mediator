@@ -42,11 +42,17 @@ import type {
   OutboundLoadLimits,
   ProposalElementRef,
   ProposalItemAlternative,
+  RecordLinkEstablishedBy,
+  RecordLinkEstablishingQueueKey,
+  RecordLinkStatus,
   RegisteredAppStatus,
   ResourceBinding,
   ReviewState,
   ShortlistResult,
+  SyncFieldStateSide,
+  SyncFieldStateStatus,
   SyncRuleStatus,
+  TombstoneReason,
   TransformConfig,
   TransformKind,
   TransformSuggestion,
@@ -273,6 +279,35 @@ export const ORDERING_QUEUE_STATUSES = ["pending", "processing", "done", "parked
 /** One `ordering_queue` entry lifecycle state. */
 export type OrderingQueueStatus = (typeof ORDERING_QUEUE_STATUSES)[number];
 export const orderingQueueStatusEnum = pgEnum("ordering_queue_status", ORDERING_QUEUE_STATUSES);
+
+// ── Phase-4 identity-resolution / RecordLink enums (pinned to @mediator/domain) ──
+
+export const recordLinkEstablishedByEnum = pgEnum("record_link_established_by", [
+  "create-propagation",
+  "identity-match",
+  "manual",
+] as const satisfies readonly RecordLinkEstablishedBy[]);
+
+export const recordLinkStatusEnum = pgEnum("record_link_status", [
+  "active",
+  "tombstoned",
+  "archived",
+] as const satisfies readonly RecordLinkStatus[]);
+
+export const recordLinkTombstoneReasonEnum = pgEnum("record_link_tombstone_reason", [
+  "propagated-delete",
+  "observed-delete",
+] as const satisfies readonly TombstoneReason[]);
+
+export const syncFieldStateSideEnum = pgEnum("sync_field_state_side", [
+  "A",
+  "B",
+] as const satisfies readonly SyncFieldStateSide[]);
+
+export const syncFieldStateStatusEnum = pgEnum("sync_field_state_status", [
+  "active",
+  "archived",
+] as const satisfies readonly SyncFieldStateStatus[]);
 
 // ── Tables ───────────────────────────────────────────────────────────────────
 
@@ -1120,5 +1155,125 @@ export const orderingQueue = pgTable(
     index("ordering_queue_lease_idx")
       .on(table.leaseExpiresAt)
       .where(sql`${table.status} = 'processing'`),
+  ],
+);
+
+// ── Phase-4 Identity Resolution: RecordLink + SyncFieldState (RL-1..RL-5) ──────
+
+/**
+ * `RecordLink` — the persisted pairing of one logical record's native id in app A
+ * with the same record's native id in app B (`docs/architecture/data-model.md`
+ * `RecordLink`; `docs/architecture/sync-engine.md` *Identity correlation*, RL-1..RL-5).
+ * Everything stateful in sync (update routing, conflict detection, delete
+ * propagation, delete-echo detection) runs over it, so it is the pipeline's first
+ * resolved artifact.
+ *
+ * `app_a_id`/`app_b_id` are plain `uuid` with **no FK** to `registered_app`, exactly
+ * like `audit_log`'s loose `related_*` refs: a link is **tombstoned, never deleted**
+ * on a record deletion and **archived (not deleted)** when an app is deregistered
+ * (Phase 6), so it must survive its apps in the table for audit and delete-echo
+ * detection — an `ON DELETE` FK would defeat that. `resource_pair_ref` is the
+ * mapped resource pair in its **canonical direction-agnostic form** (the two
+ * `(app, resource)` sides ordered by a stable key), so both directions of a
+ * bidirectional pair name the same link.
+ *
+ * `establishing_queue_key` is the retained pre-link ordering-queue key (SD-2 /
+ * OQ-4), stored as the `RecordLinkEstablishingQueueKey` discriminated union in
+ * jsonb (the `both-native-id-queues` marker carries no value). `tombstone_reason`
+ * is NULL except on a `tombstoned` link; `tombstoned_at` is NULL until tombstoned.
+ *
+ * **The unique-active-link invariant (RL-4 safety).** Two partial UNIQUE indexes —
+ * one per side, both `WHERE status = 'active'` — guarantee **at most one active
+ * link per (resource pair, app, native id)** on each side. This is what the
+ * resolve-by-(app, native id) lookup depends on and what makes a wrong/ambiguous
+ * identity match unable to silently establish a second active link over a record
+ * that already has one. Tombstoned/archived links are excluded from the index, so a
+ * tombstone-then-recreate legitimately establishes a fresh active link.
+ */
+export const recordLink = pgTable(
+  "record_link",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    appAId: uuid("app_a_id").notNull(),
+    appANativeId: text("app_a_native_id").notNull(),
+    appBId: uuid("app_b_id").notNull(),
+    appBNativeId: text("app_b_native_id").notNull(),
+    resourcePairRef: text("resource_pair_ref").notNull(),
+    establishedBy: recordLinkEstablishedByEnum("established_by").notNull(),
+    status: recordLinkStatusEnum("status").notNull(),
+    // NULL except on a `tombstoned` link (the domain refinement enforces the pairing).
+    tombstoneReason: recordLinkTombstoneReasonEnum("tombstone_reason"),
+    // The retained pre-link ordering-queue key (SD-2 discriminated union) as jsonb.
+    establishingQueueKey: jsonb("establishing_queue_key")
+      .$type<RecordLinkEstablishingQueueKey>()
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // NULL on an active/archived link; set when the link is tombstoned.
+    tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+  },
+  (table) => [
+    // The unique-active invariant, per side (partial on active): at most one active
+    // link per (resource pair, app, native id). Also serves the resolve-by-(app,
+    // native id) lookup, which probes both sides.
+    uniqueIndex("record_link_active_side_a_uq")
+      .on(table.resourcePairRef, table.appAId, table.appANativeId)
+      .where(sql`${table.status} = 'active'`),
+    uniqueIndex("record_link_active_side_b_uq")
+      .on(table.resourcePairRef, table.appBId, table.appBNativeId)
+      .where(sql`${table.status} = 'active'`),
+    // The tombstone lookups (survivor / resurrection checks) probe by side-record too;
+    // these non-unique indexes cover a record's history across statuses.
+    index("record_link_side_a_idx").on(table.resourcePairRef, table.appAId, table.appANativeId),
+    index("record_link_side_b_idx").on(table.resourcePairRef, table.appBId, table.appBNativeId),
+  ],
+);
+
+/**
+ * `SyncFieldState` — one row per mapped field **on one side** of a linked record,
+ * in that side's own canonical representation (`docs/architecture/data-model.md`
+ * `SyncFieldState`, SD-3). Echo and conflict detection compare against these
+ * per-side baselines; RL-3 **seeds** them on an identity match (agree/disagree, the
+ * BE-4 seed invoked per link).
+ *
+ * **Keyed by (record_link_id, side, field_path)** — the SD-3 natural key and the
+ * seed's upsert key — enforced by the UNIQUE index. `record_link_id` FKs
+ * `record_link` `ON DELETE CASCADE`: a manual unlink (RL-5) severs the link and its
+ * per-side state together. `last_synced_hash`/`last_synced_at` are **both NULL**
+ * when the seed found the sides divergent for this field (no reconciled baseline —
+ * the first change is then a conflict by construction); the domain refinement
+ * enforces present-together / absent-together.
+ */
+export const syncFieldState = pgTable(
+  "sync_field_state",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    recordLinkId: uuid("record_link_id")
+      .notNull()
+      .references(() => recordLink.id, { onDelete: "cascade" }),
+    side: syncFieldStateSideEnum("side").notNull(),
+    fieldPath: text("field_path").notNull(),
+    // The last-reconciled baseline (this side's canonical representation). Both NULL
+    // on a divergent seed — present-together / absent-together (domain refinement).
+    lastSyncedHash: text("last_synced_hash"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    // The latest observed value hash + timestamp for this side-field.
+    observedHash: text("observed_hash").notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    // The app-reported change timestamp of the latest observation; NULL when the side
+    // declares no change timestamps or its ref is unconfirmed.
+    observedChangeTimestamp: timestamp("observed_change_timestamp", { withTimezone: true }),
+    // The mapping (direction) that produced the last write to this side; NULL until
+    // this side has been written (a link-only / identity-match seed writes nothing).
+    lastWrittenByMappingId: uuid("last_written_by_mapping_id"),
+    status: syncFieldStateStatusEnum("status").notNull(),
+  },
+  (table) => [
+    index("sync_field_state_record_link_id_idx").on(table.recordLinkId),
+    // The SD-3 natural key + the seed's upsert key: one row per (link, side, field).
+    uniqueIndex("sync_field_state_link_side_field_uq").on(
+      table.recordLinkId,
+      table.side,
+      table.fieldPath,
+    ),
   ],
 );
