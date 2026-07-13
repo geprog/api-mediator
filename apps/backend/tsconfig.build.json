@@ -17,6 +17,9 @@
     { "path": "../../packages/ir/tsconfig.build.json" },
     { "path": "../../packages/llm/tsconfig.build.json" },
     { "path": "../../packages/mapping-engine/tsconfig.build.json" },
-    { "path": "../../packages/telemetry/tsconfig.build.json" }
+    { "path": "../../packages/outbound/tsconfig.build.json" },
+    { "path": "../../packages/sync-engine/tsconfig.build.json" },
+    { "path": "../../packages/telemetry/tsconfig.build.json" },
+    { "path": "../../packages/transform/tsconfig.build.json" }
   ]
 }
