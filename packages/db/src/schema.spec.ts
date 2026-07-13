@@ -19,6 +19,9 @@ import {
   mappingProposalStatusSchema,
   mappingVariantSchema,
   operationActionSchema,
+  parkedConflictKindSchema,
+  parkedConflictResolutionChoiceSchema,
+  parkedConflictStatusSchema,
   recordLinkEstablishedBySchema,
   recordLinkStatusSchema,
   registeredAppStatusSchema,
@@ -54,6 +57,9 @@ import {
   mappingProposalStatusEnum,
   mappingVariantEnum,
   operationActionEnum,
+  parkedConflictKindEnum,
+  parkedConflictResolutionChoiceEnum,
+  parkedConflictStatusEnum,
   recordLinkEstablishedByEnum,
   recordLinkStatusEnum,
   recordLinkTombstoneReasonEnum,
@@ -140,6 +146,17 @@ describe("pg enum ↔ domain parity", () => {
     ["target_drift_check", targetDriftCheckEnum.enumValues, targetDriftCheckSchema.options],
     ["backfill_mode", backfillModeEnum.enumValues, backfillModeSchema.options],
     ["backfill_status", backfillStatusEnum.enumValues, backfillStatusSchema.options],
+    ["parked_conflict_kind", parkedConflictKindEnum.enumValues, parkedConflictKindSchema.options],
+    [
+      "parked_conflict_status",
+      parkedConflictStatusEnum.enumValues,
+      parkedConflictStatusSchema.options,
+    ],
+    [
+      "parked_conflict_resolution_choice",
+      parkedConflictResolutionChoiceEnum.enumValues,
+      parkedConflictResolutionChoiceSchema.options,
+    ],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {

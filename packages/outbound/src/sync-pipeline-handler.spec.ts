@@ -3,7 +3,7 @@ import type {
   UsableCredentialSecret,
   WithCredentialResult,
 } from "@mediator/credentials";
-import type { FieldMapping, RecordLink, SyncFieldState } from "@mediator/domain";
+import type { FieldMapping, ParkedConflict, RecordLink, SyncFieldState } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import {
   buildChangePayload,
@@ -37,6 +37,8 @@ import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protoc
 import { FakeSyncEventStore } from "./sync-event-store.js";
 import {
   SyncPipelineHandler,
+  type ParkedConflictResolutionRecord,
+  type ParkedConflictWriter,
   type ResolvedTargetOperation,
   type SyncPipelineContext,
 } from "./sync-pipeline-handler.js";
@@ -170,6 +172,68 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A fake `ParkedConflictWriter` mirroring the real `ParkedConflictRepository`'s
+ * idempotent-open semantics ([[fakes-must-mirror-real-repos]]): one open row per
+ * `(recordLinkId, side, kind, fieldPath)` field conflict / per `(recordLinkId,
+ * drifted-delete)`; a re-park updates the open row's hashes; `resolve` only marks an
+ * OPEN row (a double-resolve is a no-op).
+ */
+class FakeParkedConflictStore implements ParkedConflictWriter {
+  public readonly rows: ParkedConflict[] = [];
+
+  #findOpen(predicate: (row: ParkedConflict) => boolean): ParkedConflict | undefined {
+    return this.rows.find((row) => row.status === "open" && predicate(row));
+  }
+
+  public upsertOpenFieldConflict(conflict: ParkedConflict): Promise<void> {
+    const existing = this.#findOpen(
+      (row) =>
+        row.recordLinkId === conflict.recordLinkId &&
+        row.side === conflict.side &&
+        row.kind === conflict.kind &&
+        row.fieldPath === conflict.fieldPath,
+    );
+    if (existing !== undefined) {
+      existing.sourceObservedHash = conflict.sourceObservedHash;
+      existing.targetObservedHash = conflict.targetObservedHash;
+      existing.updatedAt = conflict.updatedAt;
+    } else {
+      this.rows.push({ ...conflict });
+    }
+    return Promise.resolve();
+  }
+
+  public upsertOpenDriftedDelete(conflict: ParkedConflict): Promise<void> {
+    const existing = this.#findOpen(
+      (row) => row.recordLinkId === conflict.recordLinkId && row.kind === "drifted-delete",
+    );
+    if (existing !== undefined) {
+      existing.details = conflict.details;
+      existing.updatedAt = conflict.updatedAt;
+    } else {
+      this.rows.push({ ...conflict });
+    }
+    return Promise.resolve();
+  }
+
+  public resolve(
+    id: string,
+    resolution: ParkedConflictResolutionRecord,
+  ): Promise<ParkedConflict | undefined> {
+    const row = this.rows.find((candidate) => candidate.id === id && candidate.status === "open");
+    if (row === undefined) {
+      return Promise.resolve(undefined);
+    }
+    row.status = "resolved";
+    row.resolutionChoice = resolution.choice;
+    row.resolvedBy = resolution.resolvedBy;
+    row.resolvedAt = resolution.resolvedAt;
+    row.updatedAt = resolution.resolvedAt;
+    return Promise.resolve(row);
+  }
+}
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 interface Harness {
@@ -180,6 +244,7 @@ interface Harness {
   readonly targetReader: FakeSingleRecordTargetReader;
   readonly protocol: FakeProtocolClient;
   readonly cache: TtlRecentlyWrittenCache;
+  readonly parkedConflicts: FakeParkedConflictStore;
   readonly handler: SyncPipelineHandler;
   respond: (request: OutboundRequest) => OutboundResponse;
   loader: (change: DetectedChange) => SyncPipelineContext;
@@ -274,6 +339,7 @@ function setup(): Harness {
     { now: clock },
   );
 
+  const parkedConflicts = new FakeParkedConflictStore();
   const handler = new SyncPipelineHandler(
     {
       identityResolution,
@@ -284,6 +350,7 @@ function setup(): Harness {
       fieldState,
       contextLoader: { load: (change) => Promise.resolve(state.loader(change)) },
       events,
+      parkedConflicts,
     },
     { clock, newId: nextId },
   );
@@ -296,6 +363,7 @@ function setup(): Harness {
     targetReader,
     protocol,
     cache,
+    parkedConflicts,
     handler,
     get respond(): (request: OutboundRequest) => OutboundResponse {
       return state.respond;
@@ -955,5 +1023,218 @@ describe("SyncPipelineHandler — payload parsing", () => {
     await expect(
       h.handler.handle({ id: "q", queueKey: "k", payload: { ruleId: 42 }, attempts: 1 }),
     ).rejects.toBeInstanceOf(PermanentOutboundError);
+  });
+});
+
+// ── SA-4: the handler records structured parks + consumes a resolution directive ──
+
+function runWithResolution(
+  h: Harness,
+  change: DetectedChange,
+  resolution: Record<string, unknown>,
+): Promise<void> {
+  return h.handler.handle({
+    id: "queue-entry-r",
+    queueKey: LINK_ID,
+    payload: { ...buildChangePayload(change), resolution },
+    attempts: 1,
+  });
+}
+
+function openFieldParkRow(id: string, fieldPath: string): ParkedConflict {
+  return {
+    id,
+    recordLinkId: LINK_ID,
+    syncRuleId: RULE_AB,
+    mappingId: MAP_AB,
+    kind: "manual-resolve",
+    side: "B",
+    fieldPath,
+    status: "open",
+    createdAt: T0,
+    updatedAt: T0,
+  };
+}
+
+function openDeleteParkRow(id: string): ParkedConflict {
+  return {
+    id,
+    recordLinkId: LINK_ID,
+    syncRuleId: RULE_AB,
+    mappingId: MAP_AB,
+    kind: "drifted-delete",
+    side: "B",
+    status: "open",
+    createdAt: T0,
+    updatedAt: T0,
+  };
+}
+
+describe("SyncPipelineHandler — SA-4 structured parks", () => {
+  it("a manual-resolve field conflict → records an open parked_conflict row (hashes, no value)", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    h.loader = () => ({
+      ...baseContext(),
+      conflict: {
+        ...baseContext().conflict,
+        fields: [
+          { targetPath: "email", sourcePath: "email" },
+          { targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" },
+        ],
+      },
+    });
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }), // no drift → written
+      fieldRow("B", "name", { synced: "Old", observed: "DriftName" }), // drift → manual-park
+      fieldRow("A", "name", { synced: "Old", observed: "SourceName" }),
+    ]);
+
+    await runHandle(h, updateChange({ email: "e@x", name: "SourceName" }));
+
+    const open = h.parkedConflicts.rows.filter((row) => row.status === "open");
+    expect(open).toHaveLength(1);
+    const parked = open[0];
+    expect(parked?.kind).toBe("manual-resolve");
+    expect(parked?.side).toBe("B");
+    expect(parked?.fieldPath).toBe("name");
+    // Hashes only — never a raw value.
+    expect(parked?.targetObservedHash).toBe(hashFieldValue("DriftName"));
+    expect(parked?.sourceObservedHash).toBe(hashFieldValue("SourceName"));
+    expect(JSON.stringify(parked)).not.toContain("DriftName");
+    expect(JSON.stringify(parked)).not.toContain("SourceName");
+  });
+
+  it("re-processing the same still-conflicting field keeps ONE open row (idempotent re-park)", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    h.loader = () => ({
+      ...baseContext(),
+      conflict: {
+        ...baseContext().conflict,
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      },
+    });
+    await h.fieldState.seed([
+      fieldRow("B", "name", { synced: "Old", observed: "DriftName" }),
+      fieldRow("A", "name", { synced: "Old", observed: "SourceName" }),
+    ]);
+
+    await runHandle(h, updateChange({ email: "e@x", name: "SourceName" }));
+    await runHandle(h, updateChange({ email: "e@x", name: "SourceName" }));
+
+    expect(h.parkedConflicts.rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+
+  it("a drifted delete → records an open drifted-delete parked_conflict row (no fieldPath, no value)", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "DriftedByHand" }),
+    ]);
+
+    await runHandle(h, deleteChange());
+
+    const open = h.parkedConflicts.rows.filter((row) => row.status === "open");
+    expect(open).toHaveLength(1);
+    expect(open[0]?.kind).toBe("drifted-delete");
+    expect(open[0]?.fieldPath).toBeUndefined();
+  });
+});
+
+describe("SyncPipelineHandler — SA-4 resolution re-run consumes the directive", () => {
+  it("source-wins directive → CF writes the field + the parked row is resolved", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    h.parkedConflicts.rows.push(openFieldParkRow("pc-1", "name"));
+    h.loader = () => ({
+      ...baseContext(),
+      conflict: {
+        ...baseContext().conflict,
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      },
+    });
+    await h.fieldState.seed([
+      fieldRow("B", "name", { synced: "Old", observed: "DriftName" }), // still drifted
+      fieldRow("A", "name", { synced: "Old", observed: "SourceWins" }),
+    ]);
+
+    await runWithResolution(h, updateChange({ email: "e@x", name: "SourceWins" }), {
+      overrides: [{ targetPath: "name", choice: "source-wins" }],
+      parkedConflictIds: ["pc-1"],
+      choice: "source-wins",
+      resolvedBy: "operator@x",
+    });
+
+    // The write went out (the source value propagated through the normal path).
+    expect(h.protocol.requests).toHaveLength(1);
+    expect(h.protocol.requests[0]?.method).toBe("PATCH");
+    // The parked row is superseded, attributed to the operator.
+    const row = h.parkedConflicts.rows.find((candidate) => candidate.id === "pc-1");
+    expect(row?.status).toBe("resolved");
+    expect(row?.resolutionChoice).toBe("source-wins");
+    expect(row?.resolvedBy).toBe("operator@x");
+  });
+
+  it("target-wins directive → withheld (no write), row resolved, no NEW park for that field", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    h.parkedConflicts.rows.push(openFieldParkRow("pc-1", "name"));
+    h.loader = () => ({
+      ...baseContext(),
+      conflict: {
+        ...baseContext().conflict,
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      },
+    });
+    await h.fieldState.seed([
+      fieldRow("B", "name", { synced: "Old", observed: "DriftName" }),
+      fieldRow("A", "name", { synced: "Old", observed: "SourceLoses" }),
+    ]);
+
+    await runWithResolution(h, updateChange({ email: "e@x", name: "SourceLoses" }), {
+      overrides: [{ targetPath: "name", choice: "target-wins" }],
+      parkedConflictIds: ["pc-1"],
+      choice: "target-wins",
+      resolvedBy: "operator@x",
+    });
+
+    // Withheld → no write; baselines never forged (CF wrote nothing to state).
+    expect(h.protocol.requests).toHaveLength(0);
+    const row = h.parkedConflicts.rows.find((candidate) => candidate.id === "pc-1");
+    expect(row?.status).toBe("resolved");
+    expect(row?.resolutionChoice).toBe("target-wins");
+    // The resolved field is NOT re-parked as a new open row.
+    expect(h.parkedConflicts.rows.filter((candidate) => candidate.status === "open")).toHaveLength(
+      0,
+    );
+  });
+
+  it("propagate directive on a drifted delete → delete call + tombstone + row resolved", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    h.parkedConflicts.rows.push(openDeleteParkRow("pc-del"));
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "DriftedByHand" }), // still drifted
+    ]);
+
+    await runWithResolution(h, deleteChange(), {
+      deleteOverride: { choice: "propagate" },
+      parkedConflictIds: ["pc-del"],
+      choice: "propagate",
+      resolvedBy: "operator@x",
+    });
+
+    // The delete proceeded through the pipeline (never a blind delete).
+    expect(h.protocol.requests).toHaveLength(1);
+    expect(h.protocol.requests[0]?.method).toBe("DELETE");
+    const link = h.links.all()[0];
+    expect(link?.status).toBe("tombstoned");
+    expect(link?.tombstoneReason).toBe("propagated-delete");
+    const row = h.parkedConflicts.rows.find((candidate) => candidate.id === "pc-del");
+    expect(row?.status).toBe("resolved");
+    expect(row?.resolutionChoice).toBe("propagate");
   });
 });

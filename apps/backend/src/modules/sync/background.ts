@@ -13,6 +13,7 @@ import {
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
   OrderingQueueRepository,
+  ParkedConflictRepository,
   RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
@@ -35,6 +36,7 @@ import {
   SyncExecutionReconciler,
   SyncPipelineHandler,
   classifyOutboundFailure,
+  resolveSingleRecordReadBinding,
   type BackfillMetrics,
   type CredentialApplier,
   type EnableRuleResult,
@@ -56,6 +58,7 @@ import {
   type EnablementRequirement,
   type PollRunOutcome,
   type RecentlyWrittenCache,
+  type SingleRecordReadResult,
 } from "@mediator/sync-engine";
 import { getActiveTraceContext } from "@mediator/telemetry";
 import { applyFieldMappings } from "@mediator/transform";
@@ -66,7 +69,7 @@ import { createCredentialApplier } from "./credential-applier.js";
 import { resolveEnableRuleInput } from "./enable-resolver.js";
 import { RepoPollPlanResolver } from "./poll-plan-resolver.js";
 import { RepoSyncPipelineContextLoader } from "./pipeline-context-loader.js";
-import type { RuleArtifactRepos } from "./resolution.js";
+import { resolveRuleArtifacts, type RuleArtifactRepos } from "./resolution.js";
 import {
   RepoTargetCollectionReadResolver,
   RestTargetIdentityLookup,
@@ -168,6 +171,17 @@ export interface SyncBackground {
   readonly recordLinks: RecordLinkRepository;
   readonly syncFieldState: SyncFieldStateRepository;
   readonly orderingQueue: OrderingQueueRepository;
+  /** SA-4 — the structured parked-conflict store (the operator queue + resolution reads/writes). */
+  readonly parkedConflicts: ParkedConflictRepository;
+  /**
+   * SA-4.2 — read the CURRENT source record for a resolution re-run (a single-record
+   * read of the rule's source, obeying the same OC-3 load discipline as any read). The
+   * re-run enqueues this as the change's `observedRecord`, so the source-wins value
+   * that propagates is the source's live value — against current state, never a stored
+   * park-time value. `{ found: false }` when the source record is gone (e.g. it was
+   * deleted since the park).
+   */
+  readSourceRecord(ruleId: string, sourceNativeId: string): Promise<SingleRecordReadResult>;
   readonly poller: Poller;
   readonly scheduler: Scheduler;
   readonly queueDispatcher: OrderingQueueDispatcher;
@@ -209,6 +223,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   const syncFieldState = new SyncFieldStateRepository(db);
   const auditLog = new AuditLogRepository(db);
   const orderingQueue = new OrderingQueueRepository(db);
+  const parkedConflicts = new ParkedConflictRepository(db);
   const downstreamArtifacts = new DownstreamArtifactRepository(db);
 
   const ruleArtifactRepos: RuleArtifactRepos = {
@@ -304,6 +319,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     fieldState: syncFieldState,
     contextLoader: new RepoSyncPipelineContextLoader(ruleArtifactRepos),
     events: syncEventStore,
+    parkedConflicts,
   });
   const queueDispatcher = new OrderingQueueDispatcher(orderingQueue, pipelineHandler.handle, {
     // OC-4: park a transform/permanent failure immediately, defer a throttle, retry-then-park the rest.
@@ -433,6 +449,37 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     await syncRules.applyEnableTransition(ruleId, { status: "disabled" });
   };
 
+  /**
+   * SA-4.2 — read the CURRENT source record for a resolution re-run via a single-record
+   * source read (the same `RestSingleRecordTargetReader` used for CF's target reads,
+   * pointed at the rule's source app), so it obeys the same `withCredential` + OC-3
+   * load-governor discipline as any other read. The re-run enqueues the returned record
+   * as the change's `observedRecord`, so a source-wins resolution propagates the source's
+   * **live** value through the normal write path — never a stored park-time value.
+   */
+  const readSourceRecord = async (
+    ruleId: string,
+    sourceNativeId: string,
+  ): Promise<SingleRecordReadResult> => {
+    const artifacts = await resolveRuleArtifacts(ruleId, ruleArtifactRepos);
+    if (artifacts === undefined) {
+      throw new Error(
+        `sync resolution: rule ${ruleId} did not resolve to executable mapping/binding/IR state`,
+      );
+    }
+    const binding = resolveSingleRecordReadBinding(artifacts.sourceGroup, artifacts.sourceBinding);
+    if (binding === undefined) {
+      throw new Error(
+        `sync resolution: rule ${ruleId}'s source resource offers no confirmed single-record read — cannot re-read the source record for a field resolution`,
+      );
+    }
+    return singleRecordReader.readRecord({
+      targetAppId: artifacts.mapping.sourceAppId,
+      nativeId: sourceNativeId,
+      binding,
+    });
+  };
+
   // ── The `unref`'d schedule loop (mirrors detection's sweep loop) ─────────────
   let scheduleTimer: NodeJS.Timeout | undefined;
   let scheduleRunning = false;
@@ -473,6 +520,8 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     recordLinks,
     syncFieldState,
     orderingQueue,
+    parkedConflicts,
+    readSourceRecord,
     poller,
     scheduler,
     queueDispatcher,

@@ -8,6 +8,9 @@ import type {
   IrRefTarget,
   OperationMapping,
   OutboundLoadLimits,
+  ParkedConflict,
+  ParkedConflictKind,
+  ParkedConflictResolutionChoice,
   RecordLink,
   SyncFieldState,
   SyncFieldStateSide,
@@ -29,7 +32,9 @@ import {
   type ConflictDetectionOutcome,
   type DeletionConflictInput,
   type DeletionConflictOutcome,
+  type DeletionConflictOverride,
   type DetectedChange,
+  type FieldConflictOverride,
   type FieldPlan,
   type LoopPreventionContext,
   type LoopPreventionInput,
@@ -157,6 +162,31 @@ export interface SyncFieldStateGateway {
   reBaseline(rows: readonly SyncFieldState[]): Promise<void>;
 }
 
+/** The operator's recorded resolution decision (OA-3) — mirrors the db `ParkedConflictResolution`. */
+export interface ParkedConflictResolutionRecord {
+  readonly choice: ParkedConflictResolutionChoice;
+  readonly resolvedBy: string;
+  readonly resolvedAt: Date;
+}
+
+/**
+ * The narrow `parked_conflict` write port the handler owns (SA-4): it **records** a
+ * structured park whenever CF's outcome parks (a `manual-resolve`/`withheld` field —
+ * CF-3/CF-4/CF-5 — or a drifted-delete — CF-7), and **resolves** the rows a SA-4
+ * resolution re-run referenced once that re-run completes through the pipeline. The
+ * real `ParkedConflictRepository` (`@mediator/db`) satisfies it structurally — a
+ * consumer-defined port here, exactly like {@link SyncFieldStateGateway}, so
+ * `@mediator/outbound` never imports `@mediator/db` (no cycle). The upserts are
+ * **idempotent by the open key**: re-processing the same still-conflicting field
+ * updates the existing open row rather than duplicating it (SA-4 / the CF-review gap).
+ * **Never** carries a raw contested value — only ids/paths/hashes (data boundary).
+ */
+export interface ParkedConflictWriter {
+  upsertOpenFieldConflict(conflict: ParkedConflict): Promise<void>;
+  upsertOpenDriftedDelete(conflict: ParkedConflict): Promise<void>;
+  resolve(id: string, resolution: ParkedConflictResolutionRecord): Promise<unknown>;
+}
+
 // ── The per-change context the (deferred, composition-root) loader resolves ────
 
 /** A target operation resolved to its wire binding + its `OperationMapping` (SP-3 selected which). */
@@ -230,6 +260,8 @@ export interface SyncPipelineHandlerDeps {
   readonly contextLoader: SyncPipelineContextLoader;
   /** The `SyncEvent` recorder for the one event no stage owns — a delete of a never-linked record. */
   readonly events: SyncEventRecorder;
+  /** SA-4 — the structured parked-conflict store the handler records parks into + resolves re-runs against. */
+  readonly parkedConflicts: ParkedConflictWriter;
 }
 
 export interface SyncPipelineHandlerOptions {
@@ -284,6 +316,32 @@ const changePayloadSchema = z
     }
   });
 
+/**
+ * SA-4 — the operator's one-shot resolution directive, carried on the re-run's enqueued
+ * payload under `resolution` (alongside the serialized `DetectedChange`). The mediator
+ * builds it, so a malformed one is a bug (parked, not retried). `overrides` thread into
+ * CF for a field re-run; `deleteOverride` into CF-7 for a propagate re-run; `choice` +
+ * `parkedConflictIds` are what the handler records `resolved` once the re-run completes.
+ */
+const resolutionDirectiveSchema = z.object({
+  overrides: z
+    .array(z.object({ targetPath: z.string(), choice: z.enum(["source-wins", "target-wins"]) }))
+    .default([]),
+  deleteOverride: z.object({ choice: z.literal("propagate") }).optional(),
+  parkedConflictIds: z.array(z.string()),
+  choice: z.enum(["source-wins", "target-wins", "propagate"]),
+  resolvedBy: z.string(),
+});
+
+/** The parsed SA-4 resolution directive the handler threads into CF + resolves against. */
+export interface ResolutionDirective {
+  readonly overrides: readonly FieldConflictOverride[];
+  readonly deleteOverride?: DeletionConflictOverride;
+  readonly parkedConflictIds: readonly string[];
+  readonly choice: ParkedConflictResolutionChoice;
+  readonly resolvedBy: string;
+}
+
 export class SyncPipelineHandler {
   readonly #identityResolution: IdentityResolutionPort;
   readonly #loopPrevention: LoopPreventionPort;
@@ -293,6 +351,7 @@ export class SyncPipelineHandler {
   readonly #fieldState: SyncFieldStateGateway;
   readonly #contextLoader: SyncPipelineContextLoader;
   readonly #events: SyncEventRecorder;
+  readonly #parkedConflicts: ParkedConflictWriter;
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => StageTraceContext | null;
@@ -307,6 +366,7 @@ export class SyncPipelineHandler {
     this.#fieldState = deps.fieldState;
     this.#contextLoader = deps.contextLoader;
     this.#events = deps.events;
+    this.#parkedConflicts = deps.parkedConflicts;
     this.#clock = options.clock ?? ((): Date => new Date());
     this.#newId = options.newId ?? ((): string => randomUUID());
     this.#readTraceContext = options.readTraceContext ?? ((): null => null);
@@ -324,6 +384,10 @@ export class SyncPipelineHandler {
 
   async #run(queueContext: QueueHandlerContext): Promise<void> {
     const change = parseDetectedChange(queueContext.payload);
+    // SA-4 — a resolution re-run carries the operator's one-shot directive alongside the
+    // change (an ordinary queued execution against CURRENT state; CF re-checks drift, EP
+    // re-checks echo). Absent on a poll-driven change.
+    const directive = parseResolutionDirective(queueContext.payload);
     const context = await this.#contextLoader.load(change);
 
     // ── Step 3.1: Identity Resolution ─────────────────────────────────────────
@@ -385,9 +449,9 @@ export class SyncPipelineHandler {
     }
     if (resolution.kind === "resolved") {
       if (resolution.effectiveChangeKind === "delete") {
-        await this.#runDelete(change, context, resolution.link);
+        await this.#runDelete(change, context, resolution.link, directive);
       } else {
-        await this.#runUpdate(change, context, resolution.link);
+        await this.#runUpdate(change, context, resolution.link, directive);
       }
       return;
     }
@@ -402,12 +466,19 @@ export class SyncPipelineHandler {
     change: DetectedChange,
     context: SyncPipelineContext,
     link: RecordLink,
+    directive: ResolutionDirective | undefined,
   ): Promise<void> {
-    const deletion = await this.#conflictDetection.evaluateDeletion({
-      change,
-      link,
-      context: context.deletion,
-    });
+    const sourceSide = sideOf(change, context.resolution.appAId);
+    const targetSide = opposite(sourceSide);
+    const deletion = await this.#conflictDetection.evaluateDeletion(
+      stripUndefined({
+        change,
+        link,
+        context: context.deletion,
+        // SA-4.3 — the operator's "propagate the drifted delete after all" directive.
+        override: directive?.deleteOverride,
+      }),
+    );
     switch (deletion.kind) {
       case "skipped-policy":
         // `deletePropagation = ignore` — CF recorded `skipped-policy`; tombstone the
@@ -417,16 +488,18 @@ export class SyncPipelineHandler {
       case "park":
         // The target drifted — CF recorded `conflict`, the link stays `active`, and NO
         // delete call is made (deletes are never auto-resolved against a drifted
-        // target). A conflict park: done.
+        // target). A conflict park: record the structured drifted-delete row (SA-4.1)
+        // and stop. A propagate re-run never reaches here (its override yields `delete`).
+        await this.#recordDriftedDeletePark(change, link, targetSide, deletion.driftedFields);
         return;
       case "delete":
         break;
     }
 
-    // CF-7.4 — undrifted target: call the `delete` operation (id filled per
-    // `targetIdParamRef` from the `RecordLink`), then tombstone `propagated-delete`.
+    // CF-7.4 — undrifted target (or SA-4.3 propagate override): call the `delete`
+    // operation (id filled per `targetIdParamRef` from the `RecordLink`), then tombstone
+    // `propagated-delete`.
     const operation = this.#requireOperation(context.deleteOperation, "delete");
-    const sourceSide = sideOf(change, context.resolution.appAId);
     const call: OutboundCall = {
       ...this.#commonCall(change, context, operation, link.id),
       action: "delete",
@@ -438,6 +511,8 @@ export class SyncPipelineHandler {
     // On a success OR a skipped-duplicate (a re-run of a delete already propagated),
     // tombstone `propagated-delete` — idempotent; RL-5 recognizes the other side's echo.
     await this.#identityResolution.processDeletion(link, deletion.tombstoneReason);
+    // SA-4.3 — a propagate re-run completed: supersede the parked drifted-delete row.
+    await this.#resolveDirective(directive);
   }
 
   // ── Steps 3.4–3.7: the update path (resolved link) ──────────────────────────
@@ -446,6 +521,7 @@ export class SyncPipelineHandler {
     change: DetectedChange,
     context: SyncPipelineContext,
     link: RecordLink,
+    directive: ResolutionDirective | undefined,
   ): Promise<void> {
     // A **create-only** rule (no approved `action = update` operation) records an
     // observed update as `skipped-policy` — visible, never silent — the same opt-in
@@ -476,16 +552,41 @@ export class SyncPipelineHandler {
     // baseline is re-supplied unchanged, so this never disturbs EP's baseline compare.
     await this.#persistSourceObservation(change, context, link, sourceSide, observed, now);
 
-    // Step 3.4b — Conflict Detection produces the per-field write plan.
-    const cf = await this.#conflictDetection.detect({ change, link, context: context.conflict });
+    // Step 3.4b — Conflict Detection produces the per-field write plan. SA-4.2 — a
+    // resolution re-run threads the operator's one-shot field overrides INTO CF (an
+    // overridden drifted field skips its manual-resolve park / auto-resolution and
+    // applies the chosen side; every other CF invariant still holds).
+    const cf = await this.#conflictDetection.detect(
+      stripUndefined({ change, link, context: context.conflict, overrides: directive?.overrides }),
+    );
+
+    // Read the link's rows once, post-CF: reused for the SA-4 park records (contested
+    // side hashes) and OC-2's prior reconciled state.
+    const rows = await this.#fieldState.findByLink(link.id);
+    // SA-4 — record a structured `parked_conflict` row per withheld field (except a field
+    // the operator just resolved via a directive), so the SA-4.1 queue is addressable.
+    await this.#recordFieldParks(
+      change,
+      link,
+      cf,
+      rows,
+      sourceSide,
+      targetSide,
+      context,
+      directive,
+    );
+
     if (cf.kind === "no-call") {
       // Every mapped field withheld — CF recorded the lone `conflict` event; no OC call.
-      // A conflict park: done.
+      // A conflict park: done. A target-wins re-run lands here (withheld, no write) —
+      // the resolution is complete (baselines untouched), so supersede its parked row.
+      await this.#resolveDirective(directive);
       return;
     }
     const writeSet = writeTargetPaths(cf.fields);
     if (writeSet.size === 0) {
       // A `write` outcome with no writable field (an empty mapping) — nothing to send.
+      await this.#resolveDirective(directive);
       return;
     }
 
@@ -500,7 +601,6 @@ export class SyncPipelineHandler {
 
     // OC-2 — feed the prior reconciled state (target-side `lastSyncedHash`es of the
     // written fields) so the idempotency key distinguishes a revert from a duplicate.
-    const rows = await this.#fieldState.findByLink(link.id);
     const priorReconciledState = buildPriorReconciledState(rows, targetSide, writeSet);
 
     // Step 3.6 — the Outbound Call Executor issues the `update`.
@@ -515,7 +615,10 @@ export class SyncPipelineHandler {
     const result = await this.#outbound.execute(call);
     settleOutboundResult(result); // throws → dispatcher
     if (result.outcome !== "success") {
-      return; // skipped-duplicate — the original delivery already re-baselined.
+      // skipped-duplicate — the original delivery already re-baselined; the operator's
+      // resolution is effectively applied, so supersede its parked row (idempotent).
+      await this.#resolveDirective(directive);
+      return;
     }
 
     // Steps 3.6–3.7 — EP-3 re-baseline ONLY the written fields (a withheld field keeps
@@ -534,6 +637,9 @@ export class SyncPipelineHandler {
         targetNativeId: targetNativeIdOf(link, sourceSide),
       }),
     );
+    // SA-4.2 — a source-wins re-run wrote the winning value through the normal path;
+    // supersede the parked row now that the re-run completed.
+    await this.#resolveDirective(directive);
   }
 
   // ── Steps 3.6–3.7: the create path (no link yet) ────────────────────────────
@@ -818,6 +924,116 @@ export class SyncPipelineHandler {
     });
     await this.#events.record(entry);
   }
+
+  /**
+   * SA-4 (the CF-review gap) — record a **structured** `parked_conflict` row per field
+   * CF withheld under a conflict (`manual-resolve` → kind `manual-resolve`; auto
+   * `target-wins` → kind `withheld`), so the operator queue is addressable by
+   * `(RecordLink, side, fieldPath)` instead of a prose `details` string. Idempotent by
+   * the open key (a re-park updates the open row's contested hashes, never duplicates).
+   * A field the operator just resolved via a directive is **not** re-parked. Stores only
+   * the two contested sides' `observedHash` — **never** a raw value (data boundary).
+   */
+  async #recordFieldParks(
+    change: DetectedChange,
+    link: RecordLink,
+    cf: ConflictDetectionOutcome,
+    rows: readonly SyncFieldState[],
+    sourceSide: SyncFieldStateSide,
+    targetSide: SyncFieldStateSide,
+    context: SyncPipelineContext,
+    directive: ResolutionDirective | undefined,
+  ): Promise<void> {
+    const resolutions = cf.conflict?.resolutions ?? [];
+    if (resolutions.length === 0) {
+      return;
+    }
+    const overridden = new Set((directive?.overrides ?? []).map((override) => override.targetPath));
+    const rowMap = new Map(rows.map((row) => [rowKey(row.side, row.fieldPath), row]));
+    const targetToSource = new Map(
+      context.fieldMappings.map((field) => [field.targetPath, field.sourcePath]),
+    );
+    const now = this.#clock();
+    for (const resolution of resolutions) {
+      // A source-wins field was written (not withheld) — nothing to park. A field the
+      // operator resolved this execution is superseded, not re-parked.
+      if (resolution.outcome === "source-wins" || overridden.has(resolution.targetPath)) {
+        continue;
+      }
+      const kind: ParkedConflictKind =
+        resolution.outcome === "manual-park" ? "manual-resolve" : "withheld";
+      const sourcePath = targetToSource.get(resolution.targetPath);
+      const parked: ParkedConflict = stripUndefined({
+        id: this.#newId(),
+        recordLinkId: link.id,
+        syncRuleId: change.ruleId,
+        mappingId: change.mappingId,
+        kind,
+        side: targetSide,
+        fieldPath: resolution.targetPath,
+        sourceObservedHash:
+          sourcePath !== undefined
+            ? rowMap.get(rowKey(sourceSide, sourcePath))?.observedHash
+            : undefined,
+        targetObservedHash: rowMap.get(rowKey(targetSide, resolution.targetPath))?.observedHash,
+        status: "open" as const,
+        sourceNativeId: change.sourceNativeId,
+        details: `parked ${kind} conflict on target field '${resolution.targetPath}'`,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await this.#parkedConflicts.upsertOpenFieldConflict(parked);
+    }
+  }
+
+  /**
+   * SA-4 (CF-7) — record the structured drifted-delete park: the link is left `active`
+   * and nothing is deleted; this row is what the operator resolves (propagate / sever).
+   * Addresses the whole record (no `fieldPath`); the source record is gone, so there is
+   * no source value to hash — only the drifted field paths, as a metadata note.
+   */
+  async #recordDriftedDeletePark(
+    change: DetectedChange,
+    link: RecordLink,
+    targetSide: SyncFieldStateSide,
+    driftedFields: readonly string[],
+  ): Promise<void> {
+    const now = this.#clock();
+    const parked: ParkedConflict = stripUndefined({
+      id: this.#newId(),
+      recordLinkId: link.id,
+      syncRuleId: change.ruleId,
+      mappingId: change.mappingId,
+      kind: "drifted-delete" as const,
+      side: targetSide,
+      status: "open" as const,
+      sourceNativeId: change.sourceNativeId,
+      details: `propagated delete parked — target drifted on ${String(driftedFields.length)} field(s) [${driftedFields.join(", ")}]`,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await this.#parkedConflicts.upsertOpenDriftedDelete(parked);
+  }
+
+  /**
+   * SA-4 — mark the parked_conflict row(s) a resolution re-run referenced `resolved`
+   * (superseded) **once the re-run completed** through the pipeline, attributed to the
+   * operator (OA-3, threaded on the directive). A no-op when there is no directive; a
+   * double-resolve is a safe no-op (the store only resolves an open row).
+   */
+  async #resolveDirective(directive: ResolutionDirective | undefined): Promise<void> {
+    if (directive === undefined) {
+      return;
+    }
+    const resolvedAt = this.#clock();
+    for (const id of directive.parkedConflictIds) {
+      await this.#parkedConflicts.resolve(id, {
+        choice: directive.choice,
+        resolvedBy: directive.resolvedBy,
+        resolvedAt,
+      });
+    }
+  }
 }
 
 // ── module-level pure helpers ─────────────────────────────────────────────────
@@ -841,6 +1057,34 @@ export function parseDetectedChange(payload: Record<string, unknown>): DetectedC
     sourceNativeId: value.sourceNativeId,
     changeKind: value.changeKind,
     observedRecord: value.observedRecord,
+  });
+}
+
+/**
+ * SA-4 — parse the optional operator resolution directive off the enqueued payload's
+ * `resolution` key. Absent → an ordinary poll-driven change (`undefined`). A present but
+ * malformed directive is a mediator bug, not a transient fault — parked, never retried.
+ */
+export function parseResolutionDirective(
+  payload: Record<string, unknown>,
+): ResolutionDirective | undefined {
+  const raw = payload["resolution"];
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = resolutionDirectiveSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new PermanentOutboundError(
+      `sync pipeline: malformed resolution directive — ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+    );
+  }
+  const value = parsed.data;
+  return stripUndefined({
+    overrides: value.overrides,
+    deleteOverride: value.deleteOverride,
+    parkedConflictIds: value.parkedConflictIds,
+    choice: value.choice,
+    resolvedBy: value.resolvedBy,
   });
 }
 

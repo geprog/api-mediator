@@ -3,11 +3,12 @@ import type {
   EnableSyncRuleResponse,
   EnablementDegradationDto,
   EnablementRequirementDto,
+  ParkedConflictDto,
   RecordLinkDto,
   SyncEventDto,
   SyncRuleStatusDto,
 } from "@mediator/contracts";
-import type { AuditLogEntry, RecordLink } from "@mediator/domain";
+import type { AuditLogEntry, ParkedConflict, RecordLink } from "@mediator/domain";
 import type { EnablementDegradation, EnablementRequirement } from "@mediator/sync-engine";
 
 import type {
@@ -123,6 +124,33 @@ export function toRecordLinkDto(link: RecordLink): RecordLinkDto {
     establishedBy: link.establishedBy,
     status: link.status,
     createdAt: link.createdAt.toISOString(),
+  };
+}
+
+/**
+ * A `ParkedConflict` → the SA-4 wire shape. Ids / enums / field path / **content hashes**
+ * / metadata only — never a raw contested value or credential material. `Date`s become
+ * ISO strings; absent optionals become `null`.
+ */
+export function toParkedConflictDto(conflict: ParkedConflict): ParkedConflictDto {
+  return {
+    id: conflict.id,
+    recordLinkId: conflict.recordLinkId,
+    syncRuleId: conflict.syncRuleId,
+    mappingId: conflict.mappingId,
+    kind: conflict.kind,
+    side: conflict.side,
+    fieldPath: conflict.fieldPath ?? null,
+    sourceObservedHash: conflict.sourceObservedHash ?? null,
+    targetObservedHash: conflict.targetObservedHash ?? null,
+    status: conflict.status,
+    resolutionChoice: conflict.resolutionChoice ?? null,
+    resolvedBy: conflict.resolvedBy ?? null,
+    resolvedAt: conflict.resolvedAt != null ? conflict.resolvedAt.toISOString() : null,
+    sourceNativeId: conflict.sourceNativeId ?? null,
+    details: conflict.details ?? null,
+    createdAt: conflict.createdAt.toISOString(),
+    updatedAt: conflict.updatedAt.toISOString(),
   };
 }
 

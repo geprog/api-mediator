@@ -11,16 +11,28 @@ import {
   SyncRuleRepository,
   tx,
   type Database,
+  type ParkedConflictStore,
   type SyncRuleConfigPatch,
 } from "@mediator/db";
-import type { AuditLogEntry, ConflictPolicy, RecordLink, SyncRule } from "@mediator/domain";
+import type {
+  AuditLogEntry,
+  ConflictPolicy,
+  ParkedConflict,
+  ParkedConflictResolutionChoice,
+  RecordLink,
+  SyncRule,
+  TombstoneReason,
+} from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import {
+  buildChangePayload,
   evaluateEnablement,
+  type DetectedChange,
   type EnablementDegradation,
   type EnablementInput,
   type EnablementRequirement,
   type ManualLinkParams,
+  type SingleRecordReadResult,
 } from "@mediator/sync-engine";
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
@@ -71,10 +83,20 @@ export interface SyncOperatorEngine {
   readonly identityResolution: {
     linkManually(params: ManualLinkParams): Promise<RecordLink>;
     unlink(linkId: string): Promise<void>;
+    /** RL-5.3 — tombstone (never delete) a link; SA-4.3 `sever` tombstones `observed-delete`. */
+    processDeletion(link: RecordLink, reason: TombstoneReason): Promise<RecordLink>;
   };
   readonly recordLinks: {
     getById(id: string): Promise<RecordLink | undefined>;
   };
+  /** SA-4 — the structured parked-conflict store (the operator queue + resolution reads/writes). */
+  readonly parkedConflicts: ParkedConflictStore;
+  /** SA-4 — enqueue a resolution re-run onto the record's ordering queue (an ordinary queued execution). */
+  readonly orderingQueue: {
+    enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string>;
+  };
+  /** SA-4.2 — read the CURRENT source record so a source-wins re-run propagates the live value. */
+  readSourceRecord(ruleId: string, sourceNativeId: string): Promise<SingleRecordReadResult>;
 }
 
 export interface SyncOperatorServiceDeps {
@@ -165,6 +187,29 @@ export interface ManualLinkRequest {
   readonly sourceNativeId: string;
   readonly targetNativeId: string;
 }
+
+/** The SA-4 resolve request (mirrors the DTO): the operator's chosen resolution. */
+export interface ResolveParkedConflictRequest {
+  readonly resolution: ParkedConflictResolutionChoice;
+}
+
+/**
+ * The SA-4 resolve outcome — a discriminated union: `enqueued` (a field / propagate
+ * resolution re-ran through the normal pipeline; the row is superseded when that re-run
+ * completes) or `applied` (a `sever` tombstoned the link directly — no pipeline re-run).
+ * Either way the returned `conflict` carries **no** raw value / credential material.
+ */
+export type ResolveParkedConflictOutcome =
+  | {
+      readonly kind: "enqueued";
+      readonly conflict: ParkedConflict;
+      readonly resolution: ParkedConflictResolutionChoice;
+    }
+  | {
+      readonly kind: "applied";
+      readonly conflict: ParkedConflict;
+      readonly resolution: ParkedConflictResolutionChoice;
+    };
 
 const DEFAULT_STALE_MULTIPLIER = 3;
 /** Default bound for the audit-log/ambiguous-match scans — never unbounded history. */
@@ -458,6 +503,183 @@ export class SyncOperatorService {
     return matches;
   }
 
+  // ── SA-4: resolve a parked conflict ────────────────────────────────────────
+
+  /**
+   * SA-4.1 — the parked-conflict queue: the `open` `parked_conflict` rows (manual-resolve
+   * fields, withheld fields, drifted deletes), each with the context to decide (rule/
+   * record/link, field, kind, the contested-side **hashes**). **No** raw values, **no**
+   * credential material. Viewer + operator may read (the route gates it).
+   */
+  public async listParkedConflicts(limit = DEFAULT_EVENT_LIMIT): Promise<ParkedConflict[]> {
+    return this.#sync.parkedConflicts.listOpen(limit);
+  }
+
+  /**
+   * SA-4.2/4.3 — resolve a parked conflict by an operator's chosen side/outcome.
+   *
+   * A **field** conflict (`manual-resolve`/`withheld`) resolves `source-wins`/`target-wins`
+   * and a drifted-delete `propagate`/`sever`. **source-wins / target-wins / propagate flow
+   * through the normal pipeline** (SA-4.2): the service reads current state (the live
+   * source record for a field re-run) and enqueues an ordinary queued execution carrying a
+   * one-shot resolution directive — CF re-checks drift, EP re-checks echo, and the
+   * write/delete goes through the standard write path; the `parked_conflict` row is
+   * superseded when that re-run completes (the handler resolves it). **sever** is the one
+   * direct action (SA-4.3): it tombstones the link `observed-delete` (RL-5 — keep the
+   * survivor, delete nothing) and resolves the row here. Every path is recorded as a
+   * `SyncEvent` attributed to the identity (OA-3); nothing is written outside the pipeline
+   * except the sever tombstone (a local link-state change, like a manual unlink).
+   */
+  public async resolveParkedConflict(
+    id: string,
+    request: ResolveParkedConflictRequest,
+    actor: string,
+  ): Promise<ResolveParkedConflictOutcome> {
+    const parked = await this.#sync.parkedConflicts.getById(id);
+    if (parked === undefined) {
+      throw new NotFoundError(`Parked conflict ${id} not found.`);
+    }
+    if (parked.status !== "open") {
+      throw new BadRequestError(`Parked conflict ${id} is already resolved.`);
+    }
+
+    const choice = request.resolution;
+    const isDeleteKind = parked.kind === "drifted-delete";
+    const validChoice = isDeleteKind
+      ? choice === "propagate" || choice === "sever"
+      : choice === "source-wins" || choice === "target-wins";
+    if (!validChoice) {
+      throw new BadRequestError(
+        `Resolution '${choice}' is not valid for a ${parked.kind} parked conflict.`,
+      );
+    }
+
+    const link = await this.#sync.recordLinks.getById(parked.recordLinkId);
+    if (link === undefined) {
+      throw new BadRequestError(
+        `The record link ${parked.recordLinkId} for parked conflict ${id} no longer exists.`,
+      );
+    }
+    if (link.status !== "active") {
+      throw new BadRequestError(
+        `The record link ${parked.recordLinkId} is ${link.status}; the conflict can no longer be resolved.`,
+      );
+    }
+
+    // SA-4.3 sever — a DIRECT tombstone (`observed-delete`): keep the survivor, sever the
+    // pair, delete nothing. Not a pipeline re-run (there is nothing to propagate), so the
+    // service resolves the row itself; the tombstone (not a hard unlink) prevents a slower
+    // poll cycle from resurrecting the record (RL-5 / `docs/architecture/sync-engine.md`).
+    if (choice === "sever") {
+      await this.#sync.identityResolution.processDeletion(link, "observed-delete");
+      const resolved = await this.#sync.parkedConflicts.resolve(id, {
+        choice: "sever",
+        resolvedBy: actor,
+        resolvedAt: this.#clock(),
+      });
+      await this.#auditLog.insert(
+        this.#attribution(
+          actor,
+          "parked drifted-delete resolved (sever — link tombstoned observed-delete)",
+          {
+            relatedRuleId: parked.syncRuleId,
+            relatedMappingId: parked.mappingId,
+            recordLinkId: link.id,
+            ...(parked.sourceNativeId !== undefined
+              ? { sourceNativeId: parked.sourceNativeId }
+              : {}),
+          },
+        ),
+      );
+      return { kind: "applied", conflict: resolved ?? parked, resolution: "sever" };
+    }
+
+    // SA-4.2 / SA-4.3 propagate — a pipeline RE-RUN against CURRENT state. Enqueue an
+    // ordinary queued execution under the record's link-keyed queue carrying the one-shot
+    // directive; the dispatcher runs the standard pipeline (never a blind write).
+    const artifacts = await this.#requireArtifacts(parked.syncRuleId);
+    const sourceNativeId = parked.sourceNativeId ?? sourceNativeIdOfLink(link, artifacts);
+
+    if (isDeleteKind) {
+      // choice === "propagate" (sever already returned above).
+      const change: DetectedChange = {
+        ruleId: parked.syncRuleId,
+        mappingId: artifacts.mapping.id,
+        sourceAppId: artifacts.mapping.sourceAppId,
+        targetAppId: artifacts.mapping.targetAppId,
+        resourcePairRef: artifacts.rule.resourcePairRef,
+        sourceNativeId,
+        changeKind: "delete",
+      };
+      const directive = {
+        overrides: [],
+        deleteOverride: { choice: "propagate" as const },
+        parkedConflictIds: [parked.id],
+        choice: "propagate" as const,
+        resolvedBy: actor,
+      };
+      await this.#sync.orderingQueue.enqueue(link.id, {
+        ...buildChangePayload(change),
+        resolution: directive,
+      });
+      await this.#auditLog.insert(
+        this.#attribution(actor, "parked drifted-delete resolution enqueued (propagate)", {
+          relatedRuleId: parked.syncRuleId,
+          relatedMappingId: parked.mappingId,
+          recordLinkId: link.id,
+          sourceNativeId,
+        }),
+      );
+      return { kind: "enqueued", conflict: parked, resolution: "propagate" };
+    }
+
+    // A field conflict (choice ∈ {source-wins, target-wins}). Read the CURRENT source
+    // record so a source-wins re-run propagates the live value (against current state).
+    const targetPath = parked.fieldPath;
+    if (targetPath === undefined) {
+      throw new BadRequestError(`Parked field conflict ${id} is missing its target field path.`);
+    }
+    const read = await this.#sync.readSourceRecord(parked.syncRuleId, sourceNativeId);
+    if (!read.found) {
+      throw new BadRequestError(
+        `The source record ${sourceNativeId} no longer exists — a field conflict cannot be re-run against a deleted source.`,
+      );
+    }
+    const change: DetectedChange = {
+      ruleId: parked.syncRuleId,
+      mappingId: artifacts.mapping.id,
+      sourceAppId: artifacts.mapping.sourceAppId,
+      targetAppId: artifacts.mapping.targetAppId,
+      resourcePairRef: artifacts.rule.resourcePairRef,
+      sourceNativeId,
+      changeKind: "update",
+      observedRecord: read.record,
+    };
+    const directive = {
+      overrides: [{ targetPath, choice }],
+      parkedConflictIds: [parked.id],
+      choice,
+      resolvedBy: actor,
+    };
+    await this.#sync.orderingQueue.enqueue(link.id, {
+      ...buildChangePayload(change),
+      resolution: directive,
+    });
+    await this.#auditLog.insert(
+      this.#attribution(
+        actor,
+        `parked ${parked.kind} conflict resolution enqueued (${choice} on ${targetPath})`,
+        {
+          relatedRuleId: parked.syncRuleId,
+          relatedMappingId: parked.mappingId,
+          recordLinkId: link.id,
+          sourceNativeId,
+        },
+      ),
+    );
+    return { kind: "enqueued", conflict: parked, resolution: choice };
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   async #requireArtifacts(ruleId: string): Promise<RuleArtifacts> {
@@ -579,6 +801,16 @@ export class SyncOperatorService {
 }
 
 // ── pure helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * The source-side native id of a linked record for the rule's direction — the fallback
+ * when a parked row somehow carries none (the handler always records `sourceNativeId`,
+ * so this is defensive). The link is canonical A/B; the source is whichever side is the
+ * mapping's `sourceAppId`.
+ */
+function sourceNativeIdOfLink(link: RecordLink, artifacts: RuleArtifacts): string {
+  return link.appAId === artifacts.mapping.sourceAppId ? link.appANativeId : link.appBNativeId;
+}
 
 /** Build the `SyncRuleConfigPatch` from the config payload, preserving null-vs-absent. */
 function configPatch(config: SyncRuleConfig): SyncRuleConfigPatch {

@@ -93,6 +93,12 @@ export {
   type SyncFieldStateRow,
 } from "./sync-field-state.js";
 export {
+  mapParkedConflictRow,
+  toParkedConflictInsert,
+  type ParkedConflictInsert,
+  type ParkedConflictRow,
+} from "./parked-conflict.js";
+export {
   mapAdapterEndpointRow,
   toAdapterEndpointInsert,
   type AdapterEndpointInsert,

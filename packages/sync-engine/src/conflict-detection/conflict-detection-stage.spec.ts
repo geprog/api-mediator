@@ -900,3 +900,144 @@ describe("logging / LLM-data-boundary invariant", () => {
     expect(details).not.toContain("SUPER_SECRET_SOURCE");
   });
 });
+
+// ── SA-4.2 / SA-4.3: the one-shot operator resolution override ─────────────────
+
+describe("SA-4.2 field resolution override threaded into CF.detect", () => {
+  it("a manual-resolve field WITH a source-wins override → written, NOT parked", async () => {
+    const { stage, fieldState, metrics } = harness();
+    await fieldState.seed([
+      // Target drifted → without an override, a manual-resolve field parks.
+      fieldRow({ side: "B", fieldPath: "name", baseline: "reconciled", observed: "target-edit" }),
+      fieldRow({ side: "A", fieldPath: "name", baseline: "reconciled", observed: "new-source" }),
+    ]);
+
+    const outcome = await stage.detect({
+      change: makeChange(),
+      link: makeLink(),
+      context: writeContext({
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      }),
+      overrides: [{ targetPath: "name", choice: "source-wins" }],
+    });
+
+    // The override supersedes the manual-resolve park: the field is written.
+    expect(outcome.kind).toBe("write");
+    expect(planFor(outcome, "name")).toEqual({ kind: "write", targetPath: "name" });
+    expect(outcome.kind === "write" && outcome.conflict?.resolutions).toEqual([
+      { targetPath: "name", outcome: "source-wins" },
+    ]);
+    // Still recorded as a conflict (auto-resolved to the operator's choice) + metric.
+    expect(metrics.conflicts).toEqual([RULE_ID]);
+  });
+
+  it("a manual-resolve field WITH a target-wins override → withheld, baselines untouched", async () => {
+    const { stage, fieldState } = harness();
+    const rows = [
+      fieldRow({ side: "B", fieldPath: "name", baseline: "reconciled", observed: "target-edit" }),
+      fieldRow({ side: "A", fieldPath: "name", baseline: "reconciled", observed: "new-source" }),
+    ];
+    await fieldState.seed(rows);
+
+    const outcome = await stage.detect({
+      change: makeChange(),
+      link: makeLink(),
+      context: writeContext({
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      }),
+      overrides: [{ targetPath: "name", choice: "target-wins" }],
+    });
+
+    // Every field withheld → no call; the conflict event stands alone.
+    expect(outcome.kind).toBe("no-call");
+    expect(outcome.kind === "no-call" && outcome.conflict.resolutions).toEqual([
+      { targetPath: "name", outcome: "target-wins" },
+    ]);
+    // CF forges NO baseline — both sides' persisted `lastSyncedHash` are the seeded ones.
+    const persisted = await fieldState.findByLink(LINK_ID);
+    const targetRow = persisted.find((row) => row.side === "B" && row.fieldPath === "name");
+    const sourceRow = persisted.find((row) => row.side === "A" && row.fieldPath === "name");
+    expect(targetRow?.lastSyncedHash).toBe(hashFieldValue("reconciled"));
+    expect(sourceRow?.lastSyncedHash).toBe(hashFieldValue("reconciled"));
+  });
+
+  it("regression — a drifted field with NO override still parks (manual-resolve)", async () => {
+    const { stage, fieldState } = harness();
+    await fieldState.seed([
+      fieldRow({ side: "B", fieldPath: "name", baseline: "reconciled", observed: "target-edit" }),
+      fieldRow({ side: "A", fieldPath: "name", baseline: "reconciled", observed: "new-source" }),
+    ]);
+
+    const outcome = await stage.detect({
+      change: makeChange(),
+      link: makeLink(),
+      context: writeContext({
+        fields: [{ targetPath: "name", sourcePath: "name", conflictPolicy: "manual-resolve" }],
+      }),
+      // No overrides.
+    });
+
+    expect(outcome.kind).toBe("no-call");
+    expect(outcome.kind === "no-call" && outcome.conflict.resolutions).toEqual([
+      { targetPath: "name", outcome: "manual-park" },
+    ]);
+  });
+
+  it("an override on an UNDRIFTED field is inert — the field just writes normally", async () => {
+    const { stage, fieldState, events } = harness();
+    await fieldState.seed([
+      fieldRow({ side: "B", fieldPath: "name", baseline: "same", observed: "same" }),
+      fieldRow({ side: "A", fieldPath: "name", baseline: "same", observed: "new-source" }),
+    ]);
+
+    const outcome = await stage.detect({
+      change: makeChange(),
+      link: makeLink(),
+      context: writeContext(),
+      overrides: [{ targetPath: "name", choice: "target-wins" }],
+    });
+
+    // Not drifted → written; the override is never consulted, no conflict recorded.
+    expect(outcome.kind).toBe("write");
+    expect(planFor(outcome, "name")).toEqual({ kind: "write", targetPath: "name" });
+    expect(events.all()).toHaveLength(0);
+  });
+});
+
+describe("SA-4.3 drifted-delete propagate override threaded into CF.evaluateDeletion", () => {
+  it("a drifted delete WITH a propagate override → proceeds to delete (no park)", async () => {
+    const { stage, fieldState, events } = harness();
+    await fieldState.seed([
+      // Target drifted → without an override this parks.
+      fieldRow({ side: "B", fieldPath: "name", baseline: "reconciled", observed: "target-edit" }),
+    ]);
+
+    const outcome = await stage.evaluateDeletion({
+      change: makeChange({ changeKind: "delete", observedRecord: undefined }),
+      link: makeLink(),
+      context: deleteContext(),
+      override: { choice: "propagate" },
+    });
+
+    expect(outcome.kind).toBe("delete");
+    expect(outcome.kind === "delete" && outcome.tombstoneReason).toBe("propagated-delete");
+    // No park recorded — the operator accepted the drift.
+    expect(events.all()).toHaveLength(0);
+  });
+
+  it("regression — a drifted delete with NO override still parks (nothing deleted)", async () => {
+    const { stage, fieldState, events } = harness();
+    await fieldState.seed([
+      fieldRow({ side: "B", fieldPath: "name", baseline: "reconciled", observed: "target-edit" }),
+    ]);
+
+    const outcome = await stage.evaluateDeletion({
+      change: makeChange({ changeKind: "delete", observedRecord: undefined }),
+      link: makeLink(),
+      context: deleteContext(),
+    });
+
+    expect(outcome.kind).toBe("park");
+    expect(events.all()[0]?.status).toBe("conflict");
+  });
+});

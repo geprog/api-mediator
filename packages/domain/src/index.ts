@@ -34,3 +34,4 @@ export * from "./audit-log.js";
 export * from "./sync-enums.js";
 export * from "./record-link.js";
 export * from "./sync-field-state.js";
+export * from "./parked-conflict.js";
