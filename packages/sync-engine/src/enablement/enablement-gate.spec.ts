@@ -219,6 +219,12 @@ describe("BE-1.2 — pollOperationRef", () => {
     expectBlocked(decision);
     expect(decision.stillNeeds).toContainEqual({ kind: "poll-operation-ref" });
   });
+
+  it("empty-string pollOperationRef → blocked", () => {
+    const decision = evaluateEnablement(validInput({ rule: makeRule({ pollOperationRef: "" }) }));
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({ kind: "poll-operation-ref" });
+  });
 });
 
 // ── BE-1.3 — target operations for what the rule propagates ─────────────────────
@@ -440,6 +446,42 @@ describe("BE-2.2 — collection read + pagination", () => {
     );
     expectEnable(decision);
     expect(decision.backfillRequired).toBe(false);
+  });
+
+  // Fetch-and-match is the SOLE match path (identity key has no targetLookupParamRef,
+  // but the target is enumerable) → its live paging convention must be confirmed too.
+  const noFilterKey: FieldMapping = { ...identityKey, targetLookupParamRef: undefined };
+
+  it("fetch-and-match-only + unconfirmed target paginationRef → blocked (target pagination)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        fieldMappings: [noFilterKey, plainField],
+        targetBinding: targetBinding({
+          paginationRef: unconfirmed(paramTarget("tgt.listUsers", "page")),
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "binding-ref",
+      ref: "paginationRef",
+      side: "target",
+      usedFor: "pagination",
+    });
+    // It is the ONLY blocker — everything else in the base input is confirmed.
+    expect(decision.stillNeeds).toHaveLength(1);
+  });
+
+  it("filtered-read path with an unconfirmed target paginationRef → NOT blocked", () => {
+    // Filtered read returns ≤1 and never pages, so target pagination is irrelevant.
+    const decision = evaluateEnablement(
+      validInput({
+        targetBinding: targetBinding({
+          paginationRef: unconfirmed(paramTarget("tgt.listUsers", "page")),
+        }),
+      }),
+    );
+    expectEnable(decision);
   });
 });
 

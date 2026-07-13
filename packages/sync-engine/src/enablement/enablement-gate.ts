@@ -205,6 +205,23 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
     } else {
       stillNeeds.push({ kind: "identity-lookup-path" });
     }
+  } else if (
+    // BE-2.2 (fetch-and-match target): when fetch-and-match is the SOLE match path
+    // (no filtered read), RL-3 pages the target to exhaustion via its `paginationRef`
+    // — a present-but-unconfirmed paging convention could truncate the fetch, miss a
+    // real match, and create a DUPLICATE. A filtered read returns ≤1 (never pages; a
+    // >1 result is the RL-4 ambiguous failure), so this is scoped to fetch-and-match.
+    !hasFilteredRead &&
+    hasFetchAndMatch &&
+    targetBinding.paginationRef !== undefined &&
+    !isRefConfirmed(targetBinding.paginationRef)
+  ) {
+    stillNeeds.push({
+      kind: "binding-ref",
+      ref: "paginationRef",
+      side: "target",
+      usedFor: "pagination",
+    });
   }
 
   // ── BE-2.4: changeTimestampRef is NOT a hard precondition (LWW degrades) ──────
