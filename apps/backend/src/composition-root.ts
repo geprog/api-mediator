@@ -29,6 +29,7 @@ import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
+import { SyncOperatorService, type SyncOperatorEngine } from "./modules/sync/operator.js";
 import { LocalAccountsAuthProvider } from "./http/auth/index.js";
 import { registerErrorHandler } from "./http/errors.js";
 import { registerAuthenticatedOperatorApi, type OperatorApiDeps } from "./http/operator/api.js";
@@ -53,6 +54,14 @@ export interface ServerDependencies {
   readonly config: AppConfig;
   readonly db: Database;
   readonly logger: FastifyBaseLogger;
+  /**
+   * The Sync Engine runtime's operator surface (`buildSyncBackground`), threaded in
+   * so the Phase-4 Sync HTTP API (SA-1..SA-3) can reach its enable/disable + Identity
+   * Resolution seams. Optional: a server built without it (e.g. a Phase-1..3
+   * integration test) simply does not mount the sync operator routes. The composition
+   * root builds the sync background around `buildServer` and owns its start/stop loops.
+   */
+  readonly sync?: SyncOperatorEngine;
 }
 
 export interface RunningServer {
@@ -168,6 +177,10 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     proposalReadService,
     approvalService,
     escapeHatchService,
+    // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
+    // operator surface + the pooled db (reads + the config/attribution `tx`). Only
+    // present when the sync background is wired in.
+    ...(deps.sync !== undefined ? { sync: new SyncOperatorService({ db, sync: deps.sync }) } : {}),
   };
 }
 

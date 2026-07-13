@@ -1,4 +1,9 @@
-import type { FieldMapping, OperationMapping, ParameterMapping } from "@mediator/domain";
+import type {
+  ConflictPolicy,
+  FieldMapping,
+  OperationMapping,
+  ParameterMapping,
+} from "@mediator/domain";
 import { eq } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
@@ -40,6 +45,24 @@ export class MappingArtifactsRepository {
       .from(fieldMapping)
       .where(eq(fieldMapping.mappingId, mappingId));
     return rows.map(mapFieldMappingRow);
+  }
+
+  /**
+   * Set (or clear) one peer-peer `FieldMapping`'s `conflictPolicy` override
+   * (SA-1.1). `manual-resolve` forces the field's conflict to surface for manual
+   * resolution instead of auto-resolving; `null` clears the override back to the
+   * default (last-write-wins / observation-order auto-resolution). The existing
+   * `conflict_policy` column — no migration. The caller (the SA-1 config service)
+   * verifies the field belongs to the rule's mapping first.
+   */
+  public async setFieldMappingConflictPolicy(
+    fieldMappingId: string,
+    conflictPolicy: ConflictPolicy | null,
+  ): Promise<void> {
+    await this.db
+      .update(fieldMapping)
+      .set({ conflictPolicy })
+      .where(eq(fieldMapping.id, fieldMappingId));
   }
 
   /** The `OperationMapping`s of one `ApprovedMapping`. */

@@ -9,6 +9,7 @@ import type {
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
+import type { SyncOperatorService } from "../../modules/sync/operator.js";
 
 /**
  * Everything the operator `/api` routes depend on, injected by the composition
@@ -29,6 +30,12 @@ export interface OperatorApiDeps {
   readonly proposalReadService: ProposalReadService;
   readonly approvalService: ApprovalService;
   readonly escapeHatchService: EscapeHatchService;
+  // Phase-4 Sync HTTP API (SA-1..SA-3): configure/enable/disable a `SyncRule`, read
+  // sync state, and manually link/unlink records. Optional: the sync operator
+  // surface is only mounted when the Sync Engine runtime is wired in (the real
+  // composition root always provides it; the in-memory unit harness — which has no
+  // sync runtime — legitimately omits it, and its routes are simply not registered).
+  readonly sync?: SyncOperatorService;
 }
 
 /**

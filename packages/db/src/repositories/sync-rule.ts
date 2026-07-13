@@ -1,8 +1,11 @@
 import type {
   ApprovedMappingStatus,
+  BackfillMode,
   BackfillStatus,
+  DeletePropagation,
   SyncRule,
   SyncRuleStatus,
+  TargetDriftCheck,
 } from "@mediator/domain";
 import { eq } from "drizzle-orm";
 
@@ -57,6 +60,24 @@ export interface SyncRuleEnableTransition {
 }
 
 /**
+ * The operator's execution-option configuration of a **disabled** rule (SA-1.1) —
+ * the derive-then-correct persist of `pollIntervalOverride`, `pollOperationRef`,
+ * `deletePropagation`, `targetDriftCheck` (the same pattern as `ResourceBinding`
+ * refs), plus the `backfillMode` the operator chooses at enable time (SA-1.2). All
+ * fields are existing SD-1 columns — **no migration**. Presence semantics mirror
+ * {@link SyncRuleEnableTransition}: a key **absent from the patch object** is not
+ * written (keeps its prior value); `pollIntervalOverride` present-as-`null` clears
+ * the override back to the app default.
+ */
+export interface SyncRuleConfigPatch {
+  readonly pollIntervalOverride?: number | null;
+  readonly pollOperationRef?: string;
+  readonly deletePropagation?: DeletePropagation;
+  readonly targetDriftCheck?: TargetDriftCheck;
+  readonly backfillMode?: BackfillMode;
+}
+
+/**
  * Persistence for `SyncRule` reads + the Poller's live-state advance (SP-1/SP-5).
  * Constructor-bound to a {@link DbHandle} (the pooled db or a `tx()` transaction),
  * matching the repo convention — so {@link applyAdvance} runs in the **same
@@ -71,6 +92,18 @@ export class SyncRuleRepository {
   public async getById(id: string): Promise<SyncRule | undefined> {
     const [row] = await this.db.select().from(syncRule).where(eq(syncRule.id, id)).limit(1);
     return row === undefined ? undefined : mapSyncRuleRow(row);
+  }
+
+  /**
+   * Every `SyncRule`, ordered by `id` (the SA-2 operator rule list). Deliberately
+   * unfiltered — the list surfaces enabled *and* disabled rules so an operator sees
+   * what is live, what is backfilling, and what still needs its gate satisfied. The
+   * rule count is bounded by the number of approved peer-peer mappings × resource
+   * pairs, so no server-side pagination is imposed here.
+   */
+  public async listAll(): Promise<SyncRule[]> {
+    const rows = await this.db.select().from(syncRule).orderBy(syncRule.id);
+    return rows.map(mapSyncRuleRow);
   }
 
   /** Every `enabled` rule (tests / a simple enumeration). */
@@ -173,6 +206,45 @@ export class SyncRuleRepository {
       set.backfillStatus = transition.backfillStatus;
     }
     if (set.status === undefined && set.backfillStatus === undefined) {
+      return;
+    }
+    await this.db.update(syncRule).set(set).where(eq(syncRule.id, id));
+  }
+
+  /**
+   * Persist a **disabled** rule's execution-option configuration (SA-1.1/SA-1.2).
+   * Writes **only** the fields present in `patch` (an absent key keeps its column
+   * value); `pollIntervalOverride: null` clears the override. All columns are the
+   * existing SD-1 columns — no migration. The caller (the SA-1 config service)
+   * enforces the "disabled only" precondition; this method is a plain column set.
+   * A patch with no fields is a no-op.
+   */
+  public async updateConfig(id: string, patch: SyncRuleConfigPatch): Promise<void> {
+    const set: {
+      pollIntervalOverride?: number | null;
+      pollOperationRef?: string;
+      deletePropagation?: DeletePropagation;
+      targetDriftCheck?: TargetDriftCheck;
+      backfillMode?: BackfillMode;
+    } = {};
+    // `in` (not `!== undefined`) for the nullable override, so an explicit `null`
+    // (clear the override) is written while an absent key is left untouched.
+    if ("pollIntervalOverride" in patch) {
+      set.pollIntervalOverride = patch.pollIntervalOverride ?? null;
+    }
+    if (patch.pollOperationRef !== undefined) {
+      set.pollOperationRef = patch.pollOperationRef;
+    }
+    if (patch.deletePropagation !== undefined) {
+      set.deletePropagation = patch.deletePropagation;
+    }
+    if (patch.targetDriftCheck !== undefined) {
+      set.targetDriftCheck = patch.targetDriftCheck;
+    }
+    if (patch.backfillMode !== undefined) {
+      set.backfillMode = patch.backfillMode;
+    }
+    if (Object.keys(set).length === 0) {
       return;
     }
     await this.db.update(syncRule).set(set).where(eq(syncRule.id, id));
