@@ -168,7 +168,9 @@ export {
   type ProcessedEventOps,
   type RecordLinkSideRef,
   type RecordLinkStore,
+  type SyncEventQuery,
   type SyncFieldStateStore,
   type SyncRuleAdvance,
+  type SyncRuleConfigPatch,
   type SyncRuleEnableTransition,
 } from "./repositories/index.js";

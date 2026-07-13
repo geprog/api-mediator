@@ -30,7 +30,18 @@ const logger = createServerLogger(config);
 const db = createDb(config.database.url, (error) => {
   logger.error({ error: error.message }, "database pool error (idle client) — swallowed");
 });
-const { app, shutdown: shutdownServer } = buildServer({ config, db, logger });
+// The Phase-4 sync-engine runtime: the Scheduler/Poller change-detection loop, the
+// ordering-queue dispatcher running the per-record pipeline over the real Outbound Call
+// Executor + REST client + credential path, and the enable/backfill flow + in-flight
+// registry. It stands up NO second dispatcher/sweep — it returns its
+// `SyncExecutionReconciler` for the single shared reconciliation sweep below. Built
+// BEFORE the server so its operator surface (enable/disable + Identity Resolution) can
+// be threaded into the Phase-4 Sync HTTP API (SA-1..SA-3). Its loops are started
+// after `listen`, stopped (gracefully — an in-flight poll/backfill/queue pass finishes)
+// before the server closes its db pool.
+const sync = buildSyncBackground({ config, db, logger });
+
+const { app, shutdown: shutdownServer } = buildServer({ config, db, logger, sync });
 
 // The Phase-3 artifact-instantiation reaction: the `MappingApproved` consumer that
 // instantiates an approval's disabled downstream artifacts (SyncRules /
@@ -39,15 +50,6 @@ const { app, shutdown: shutdownServer } = buildServer({ config, db, logger });
 // dispatcher over the same outbox would mark a foreign event published without
 // delivering it to its consumer).
 const artifactInstantiation = buildArtifactInstantiation({ db });
-
-// The Phase-4 sync-engine runtime: the Scheduler/Poller change-detection loop, the
-// ordering-queue dispatcher running the per-record pipeline over the real Outbound Call
-// Executor + REST client + credential path, and the enable/backfill flow + in-flight
-// registry. It stands up NO second dispatcher/sweep — it returns its
-// `SyncExecutionReconciler` for the single shared reconciliation sweep below. Started
-// after `listen`, stopped (gracefully — an in-flight poll/backfill/queue pass finishes)
-// before the server closes its db pool.
-const sync = buildSyncBackground({ config, db, logger });
 
 // The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers
 // `SpecIngested` to the detection consumer, which enqueues a job), the durable

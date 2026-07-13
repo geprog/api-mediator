@@ -23,7 +23,7 @@ export {
 } from "./ordering-queue.js";
 export { ApprovedMappingRepository } from "./approved-mapping.js";
 export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-artifacts.js";
-export { AuditLogRepository } from "./audit-log.js";
+export { AuditLogRepository, type SyncEventQuery } from "./audit-log.js";
 export {
   RecordLinkRepository,
   type RecordLinkSideRef,
@@ -38,6 +38,7 @@ export {
   SyncRuleRepository,
   type PollCandidate,
   type SyncRuleAdvance,
+  type SyncRuleConfigPatch,
   type SyncRuleEnableTransition,
 } from "./sync-rule.js";
 export { PollSnapshotRepository, type PollSnapshotRecord } from "./poll-snapshot.js";

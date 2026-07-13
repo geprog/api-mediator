@@ -1,9 +1,31 @@
-import type { AuditLogEntry } from "@mediator/domain";
-import { and, desc, eq, gte } from "drizzle-orm";
+import type { AuditLogEntry, AuditLogStatus, AuditLogType } from "@mediator/domain";
+import { and, desc, eq, gte, inArray, type SQL } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAuditLogRow, toAuditLogInsert } from "../mappers/audit-log.js";
 import { auditLog } from "../schema.js";
+
+/**
+ * The `AuditLog.type`s that make up the **sync** audit log the SA-2.3 read
+ * endpoint surfaces (`docs/architecture/data-model.md` `SyncEvent / AuditLog`): a
+ * per-record `sync-execution`, a `poll-run`, or a `backfill-run`. Deliberately
+ * excludes `mapping-decision`/`adapter-request`/`credential-access` — those belong
+ * to other read surfaces.
+ */
+const SYNC_EVENT_TYPES: readonly AuditLogType[] = ["sync-execution", "poll-run", "backfill-run"];
+
+/**
+ * The SA-2.3 sync-audit-log filter: by rule, record (link or source native id),
+ * and/or execution status. Every filter is optional (AND-combined); `limit` bounds
+ * the scan so the read is never unbounded history.
+ */
+export interface SyncEventQuery {
+  readonly relatedRuleId?: string;
+  readonly recordLinkId?: string;
+  readonly sourceNativeId?: string;
+  readonly status?: AuditLogStatus;
+  readonly limit: number;
+}
 
 /**
  * Persistence for the `SyncEvent / AuditLog` — Phase 3 writes only
@@ -39,6 +61,37 @@ export class AuditLogRepository {
       .from(auditLog)
       .where(eq(auditLog.relatedMappingId, mappingId))
       .orderBy(desc(auditLog.timestamp));
+    return rows.map(mapAuditLogRow);
+  }
+
+  /**
+   * The SA-2.3 **sync audit log** query: `sync-execution`/`poll-run`/`backfill-run`
+   * rows filtered by rule/record/status, most-recent-first, bounded by `limit`. The
+   * rows carry status/metadata/ids/hashes and `traceId`/`spanId` — **never** a
+   * payload value or credential material, by construction of the `audit_log` schema
+   * (`docs/architecture/security.md` *Audit logging*). The DTO mapper decides which
+   * columns reach the wire.
+   */
+  public async querySyncEvents(query: SyncEventQuery): Promise<AuditLogEntry[]> {
+    const conditions: SQL[] = [inArray(auditLog.type, [...SYNC_EVENT_TYPES])];
+    if (query.relatedRuleId !== undefined) {
+      conditions.push(eq(auditLog.relatedRuleId, query.relatedRuleId));
+    }
+    if (query.recordLinkId !== undefined) {
+      conditions.push(eq(auditLog.recordLinkId, query.recordLinkId));
+    }
+    if (query.sourceNativeId !== undefined) {
+      conditions.push(eq(auditLog.sourceNativeId, query.sourceNativeId));
+    }
+    if (query.status !== undefined) {
+      conditions.push(eq(auditLog.status, query.status));
+    }
+    const rows = await this.db
+      .select()
+      .from(auditLog)
+      .where(and(...conditions))
+      .orderBy(desc(auditLog.timestamp))
+      .limit(query.limit);
     return rows.map(mapAuditLogRow);
   }
 
