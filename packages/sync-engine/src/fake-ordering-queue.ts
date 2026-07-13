@@ -1,11 +1,15 @@
 import type {
   ClaimedQueueEntry,
   ClaimParams,
+  OrderingQueueDeadLetterOps,
   OrderingQueueDrainQuery,
   OrderingQueueEnqueueOps,
   OrderingQueueEntry,
   OrderingQueueStatus,
   OrderingQueueWorkerOps,
+  ParkedWriteContext,
+  ParkedWriteEntry,
+  ReactivateParkedResult,
 } from "@mediator/db";
 
 /** One in-memory queue entry — the fake's analogue of an `ordering_queue` row. */
@@ -52,7 +56,11 @@ interface FakeEntry {
  * downstream OQ-2/OQ-3/OQ-4 and pipeline slices reuse to unit-test against the queue.
  */
 export class FakeOrderingQueue
-  implements OrderingQueueEnqueueOps, OrderingQueueWorkerOps, OrderingQueueDrainQuery
+  implements
+    OrderingQueueEnqueueOps,
+    OrderingQueueWorkerOps,
+    OrderingQueueDrainQuery,
+    OrderingQueueDeadLetterOps
 {
   readonly #entries: FakeEntry[] = [];
   #seq = 0;
@@ -227,6 +235,71 @@ export class FakeOrderingQueue
     return Promise.resolve();
   }
 
+  // ── SA-5 dead-letter operations (mirror OrderingQueueRepository) ──────────────
+
+  /**
+   * The dead-letter queue (SA-5.1): `parked` entries as safe projections, newest-parked
+   * first (`finished_at DESC NULLS LAST, enqueue_seq DESC`), bounded by `limit`. Mirrors
+   * the real repo — the `superseded` flag and the ids-only payload projection are the
+   * same as the SQL, so unit tests over the fake exercise the exact behavior.
+   */
+  public listParked(limit: number): Promise<ParkedWriteEntry[]> {
+    const parked = this.#entries
+      .filter((entry) => entry.status === "parked")
+      .sort((a, b) => {
+        const fa = a.finishedAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+        const fb = b.finishedAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+        return fa !== fb ? fb - fa : b.seq - a.seq;
+      })
+      .slice(0, Math.max(0, limit))
+      .map((entry) => toParkedEntry(entry, this.#isSupersededEntry(entry)));
+    return Promise.resolve(parked);
+  }
+
+  /**
+   * Reactivate a `parked` entry to `pending` (SA-5.2) under the atomic single-active-
+   * per-key + not-superseded guards — mirrors the real repo's guarded `UPDATE` (both
+   * `NOT EXISTS` sub-selects): it applies only when NO other non-terminal
+   * (`pending`/`processing`) entry AND NO later same-key `done` entry share the
+   * `queue_key`. `superseded` is classified before `blocked-key-busy` (both-blocked →
+   * `superseded`, matching the repo). Mutates synchronously with no intervening `await`,
+   * the JS analogue of the atomic write.
+   */
+  public reactivate(id: string, now: Date): Promise<ReactivateParkedResult> {
+    const entry = this.#find(id);
+    if (entry === undefined) {
+      return Promise.resolve({ kind: "not-found" });
+    }
+    if (entry.status !== "parked") {
+      return Promise.resolve({ kind: "not-parked" });
+    }
+    if (this.#isSupersededEntry(entry)) {
+      return Promise.resolve({ kind: "superseded" });
+    }
+    const keyBusy = this.#entries.some(
+      (other) =>
+        other.id !== entry.id &&
+        other.queueKey === entry.queueKey &&
+        (other.status === "pending" || other.status === "processing"),
+    );
+    if (keyBusy) {
+      return Promise.resolve({ kind: "blocked-key-busy" });
+    }
+    entry.status = "pending";
+    entry.availableAt = now;
+    entry.leaseOwner = null;
+    entry.leaseExpiresAt = null;
+    return Promise.resolve({ kind: "reactivated", entry: toEntry(entry) });
+  }
+
+  /** A parked entry is superseded when a same-key `done` entry has a higher `seq`. */
+  #isSupersededEntry(entry: FakeEntry): boolean {
+    return this.#entries.some(
+      (later) =>
+        later.queueKey === entry.queueKey && later.status === "done" && later.seq > entry.seq,
+    );
+  }
+
   /** One entry by id (test assertions). */
   public getById(id: string): OrderingQueueEntry | undefined {
     const entry = this.#find(id);
@@ -260,5 +333,33 @@ function toEntry(entry: FakeEntry): OrderingQueueEntry {
     enqueuedAt: entry.enqueuedAt,
     claimedAt: entry.claimedAt,
     finishedAt: entry.finishedAt,
+  };
+}
+
+/** The fake's analogue of `OrderingQueueRepository.mapParkedRow` — the same safe projection (no queue key). */
+function toParkedEntry(entry: FakeEntry, superseded: boolean): ParkedWriteEntry {
+  return {
+    id: entry.id,
+    context: projectParkedContext(entry.payload),
+    lastError: entry.lastError,
+    attempts: entry.attempts,
+    superseded,
+    parkedAt: entry.finishedAt,
+    enqueuedAt: entry.enqueuedAt,
+  };
+}
+
+/** Mirror the real repo's ids-only payload projection: `observedRecord` is never read. */
+function projectParkedContext(payload: Record<string, unknown>): ParkedWriteContext {
+  const stringOrNull = (value: unknown): string | null =>
+    typeof value === "string" ? value : null;
+  return {
+    ruleId: stringOrNull(payload.ruleId),
+    mappingId: stringOrNull(payload.mappingId),
+    sourceAppId: stringOrNull(payload.sourceAppId),
+    targetAppId: stringOrNull(payload.targetAppId),
+    resourcePairRef: stringOrNull(payload.resourcePairRef),
+    sourceNativeId: stringOrNull(payload.sourceNativeId),
+    changeKind: stringOrNull(payload.changeKind),
   };
 }

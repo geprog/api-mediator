@@ -12,6 +12,8 @@ import {
   tx,
   type Database,
   type ParkedConflictStore,
+  type ParkedWriteEntry,
+  type ReactivateParkedResult,
   type SyncRuleConfigPatch,
 } from "@mediator/db";
 import type {
@@ -91,9 +93,17 @@ export interface SyncOperatorEngine {
   };
   /** SA-4 — the structured parked-conflict store (the operator queue + resolution reads/writes). */
   readonly parkedConflicts: ParkedConflictStore;
-  /** SA-4 — enqueue a resolution re-run onto the record's ordering queue (an ordinary queued execution). */
+  /**
+   * SA-4/SA-5 — the ordering-queue seam. SA-4 `enqueue`s a resolution re-run; SA-5 reads
+   * the dead-letter queue (`listParked`) and `reactivate`s a parked write back to
+   * `pending` so the running dispatcher re-claims it and re-runs the full pipeline. The
+   * replay decision (superseded / key-busy) comes from `reactivate`'s **atomic** result,
+   * never a separate read-then-act (which would race a change committing mid-replay).
+   */
   readonly orderingQueue: {
     enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string>;
+    listParked(limit: number): Promise<ParkedWriteEntry[]>;
+    reactivate(id: string, now: Date): Promise<ReactivateParkedResult>;
   };
   /** SA-4.2 — read the CURRENT source record so a source-wins re-run propagates the live value. */
   readSourceRecord(ruleId: string, sourceNativeId: string): Promise<SingleRecordReadResult>;
@@ -210,6 +220,25 @@ export type ResolveParkedConflictOutcome =
       readonly conflict: ParkedConflict;
       readonly resolution: ParkedConflictResolutionChoice;
     };
+
+/**
+ * The SA-5 replay outcome — a discriminated union the route maps to HTTP:
+ *  - **`reactivated`** (2xx) — the parked write was flipped to `pending`, so the
+ *    dispatcher re-runs the standard pipeline against current state (never a blind
+ *    re-issue of the stale payload).
+ *  - **`superseded`** (4xx) — a later same-key change already synced the record
+ *    (SA-5.3); replay is a **no-op**.
+ *  - **`blocked-key-busy`** (4xx) — another non-terminal entry shares the queue key;
+ *    reactivating would break single-active-per-key (OQ).
+ *  - **`not-parked`** (4xx) — the entry exists but is not a parked write.
+ *  - **`not-found`** (4xx) — no such entry.
+ */
+export type ReplayParkedWriteOutcome =
+  | { readonly kind: "reactivated" }
+  | { readonly kind: "superseded" }
+  | { readonly kind: "blocked-key-busy" }
+  | { readonly kind: "not-parked" }
+  | { readonly kind: "not-found" };
 
 const DEFAULT_STALE_MULTIPLIER = 3;
 /** Default bound for the audit-log/ambiguous-match scans — never unbounded history. */
@@ -680,6 +709,57 @@ export class SyncOperatorService {
     return { kind: "enqueued", conflict: parked, resolution: choice };
   }
 
+  // ── SA-5: the dead-letter queue + replay a parked write ────────────────────
+
+  /**
+   * SA-5.1 — the dead-letter queue: the `parked` `ordering_queue` writes (dead-lettered
+   * at the OC-4 retry ceiling), each as a **safe projection** — ids/refs, the non-secret
+   * `lastError` reason, attempts, timestamps, and the `superseded` flag (SA-5.3).
+   * **No** raw payload value (never the `observedRecord`), **no** credential material.
+   * Viewer + operator may read (the route gates it). Bounded by `limit`.
+   */
+  public async listDeadLetterWrites(limit = DEFAULT_EVENT_LIMIT): Promise<ParkedWriteEntry[]> {
+    return this.#sync.orderingQueue.listParked(limit);
+  }
+
+  /**
+   * SA-5.2/5.3 — replay a parked write (operator-only; the route gates OA-2).
+   *
+   * The decision comes entirely from `reactivate`'s **atomic** result — the superseded
+   * and single-active-per-key guards are `NOT EXISTS` sub-selects inside the one `UPDATE`,
+   * so a change that commits `done` (superseding this write) or enqueues (busying the key)
+   * mid-replay is caught rather than raced. A **superseded** entry — a later same-key
+   * change already synced the record — is a **no-op** (SA-5.3): an already-superseded
+   * write is never re-issued. Otherwise the entry is **reactivated** to `pending`, so the
+   * running dispatcher re-claims it and re-runs the **standard pipeline** (RL→EP→CF→TX→OC)
+   * against current state — CF re-checks drift, EP re-checks echo, OC re-computes the
+   * idempotency key — never a blind re-issue of the stale payload (SA-5.2 /
+   * `docs/architecture/sync-engine.md` *Write failures*). The reactivation is attributed
+   * to the identity (OA-3); the eventual re-run records its own `SyncEvent` through the
+   * pipeline as usual. Nothing outside the queue is written.
+   */
+  public async replayParkedWrite(id: string, actor: string): Promise<ReplayParkedWriteOutcome> {
+    const result = await this.#sync.orderingQueue.reactivate(id, this.#clock());
+    if (result.kind !== "reactivated") {
+      return { kind: result.kind };
+    }
+    // OA-3 — attribute the replay to the identity. Only ids are read from the payload
+    // (never a value); the entry id (a uuid) identifies the replayed write in `details`.
+    // Keys are spread conditionally (exactOptionalPropertyTypes — never pass `undefined`).
+    const payload = result.entry.payload;
+    const ruleId = readPayloadId(payload, "ruleId");
+    const mappingId = readPayloadId(payload, "mappingId");
+    const sourceNativeId = readPayloadId(payload, "sourceNativeId");
+    await this.#auditLog.insert(
+      this.#attribution(actor, `parked write replay reactivated (entry ${result.entry.id})`, {
+        ...(ruleId !== undefined ? { relatedRuleId: ruleId } : {}),
+        ...(mappingId !== undefined ? { relatedMappingId: mappingId } : {}),
+        ...(sourceNativeId !== undefined ? { sourceNativeId } : {}),
+      }),
+    );
+    return { kind: "reactivated" };
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   async #requireArtifacts(ruleId: string): Promise<RuleArtifacts> {
@@ -810,6 +890,16 @@ export class SyncOperatorService {
  */
 function sourceNativeIdOfLink(link: RecordLink, artifacts: RuleArtifacts): string {
   return link.appAId === artifacts.mapping.sourceAppId ? link.appANativeId : link.appBNativeId;
+}
+
+/**
+ * Read a single **id/ref** field out of a parked write's serialized `DetectedChange`
+ * payload for the OA-3 attribution row — a string field or `undefined`. Reads only the
+ * named scalar key, never a nested value, so the data boundary holds (SA-5).
+ */
+function readPayloadId(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 /** Build the `SyncRuleConfigPatch` from the config payload, preserving null-vs-absent. */

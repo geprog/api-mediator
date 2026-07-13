@@ -397,3 +397,53 @@ export const resolveParkedConflictResponseSchema = z.object({
   conflict: parkedConflictDtoSchema,
 });
 export type ResolveParkedConflictResponse = z.infer<typeof resolveParkedConflictResponseSchema>;
+
+// ── SA-5: the dead-letter queue + replay a parked write ──────────────────────
+
+/**
+ * One parked (dead-letter) write on the wire (SA-5.1): a write that exhausted its retry
+ * ceiling (OC-4), addressable for replay by its `id`. It carries **ids/refs only** — the
+ * record/rule/mapping context projected from the parked `DetectedChange` payload, the
+ * `changeKind`, the non-secret `lastError` reason, the attempt count, timestamps, and the
+ * `superseded` flag (SA-5.3). It deliberately carries **no** live field value (never the
+ * payload's `observedRecord`, and never the opaque queue key — which is a live identity-key
+ * value for a parked create) and **no** credential material (`docs/architecture/security.md`).
+ */
+export const deadLetterWriteDtoSchema = z.object({
+  id: z.string(),
+  ruleId: z.string().nullable(),
+  mappingId: z.string().nullable(),
+  sourceAppId: z.string().nullable(),
+  targetAppId: z.string().nullable(),
+  resourcePairRef: z.string().nullable(),
+  sourceNativeId: z.string().nullable(),
+  /** `create`/`update`/`delete` — the classified action, metadata only (never a value). */
+  changeKind: z.string().nullable(),
+  /** The non-secret failure reason recorded at park time (never a payload value). */
+  lastError: z.string().nullable(),
+  attempts: z.number().int(),
+  /** SA-5.3: a later same-key change already synced this record — replay is a no-op. */
+  superseded: z.boolean(),
+  parkedAt: isoDateTimeSchema.nullable(),
+  enqueuedAt: isoDateTimeSchema,
+});
+export type DeadLetterWriteDto = z.infer<typeof deadLetterWriteDtoSchema>;
+
+/** `GET /api/dead-letter-writes` response (SA-5.1) — the parked-write queue. */
+export const deadLetterQueueResponseSchema = z.object({
+  writes: z.array(deadLetterWriteDtoSchema),
+});
+export type DeadLetterQueueResponse = z.infer<typeof deadLetterQueueResponseSchema>;
+
+/**
+ * `POST /api/dead-letter-writes/:id/replay` response (SA-5.2) — `reactivated` (2xx): the
+ * parked entry was flipped back to `pending`, so the dispatcher re-claims it and re-runs
+ * the **standard pipeline** against current state (loop prevention + conflict detection),
+ * never a blind re-issue of the stale payload. The blocked/superseded/not-parked/not-found
+ * cases are reported as 4xx via the error envelope, so this success body has a single shape.
+ */
+export const replayParkedWriteResponseSchema = z.object({
+  id: z.string(),
+  outcome: z.literal("reactivated"),
+});
+export type ReplayParkedWriteResponse = z.infer<typeof replayParkedWriteResponseSchema>;
