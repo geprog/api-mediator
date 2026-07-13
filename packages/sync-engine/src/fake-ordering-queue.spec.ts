@@ -165,3 +165,149 @@ describe("FakeOrderingQueue claim semantics", () => {
     expect(await claim(queue, at(2))).toBeUndefined();
   });
 });
+
+/**
+ * Locks in that `FakeOrderingQueue` mirrors the real `OrderingQueueRepository`'s SA-5
+ * dead-letter operations (`listParked` / `isSuperseded` / `reactivate`). The SAME
+ * behaviours are re-proven against real Postgres in the db package's
+ * `ordering-queue-dead-letter.integration.spec.ts`; if the two diverge the fake has
+ * stopped being a faithful stand-in ([[fakes-must-mirror-real-repos]]).
+ */
+describe("FakeOrderingQueue SA-5 dead-letter operations", () => {
+  /** A `DetectedChange`-shaped payload whose `observedRecord` MUST never surface (data boundary). */
+  function changePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      ruleId: "rule-1",
+      mappingId: "map-1",
+      sourceAppId: "app-a",
+      targetAppId: "app-b",
+      resourcePairRef: "pair::widgets",
+      sourceNativeId: "n1",
+      changeKind: "update",
+      observedRecord: { name: "Alpha", secret: "SENSITIVE-VALUE-123" },
+      ...overrides,
+    };
+  }
+
+  /** Enqueue → claim → park an entry, returning its id (mirrors the OC-4 park at the ceiling). */
+  async function park(
+    queue: FakeOrderingQueue,
+    key: string,
+    payload: Record<string, unknown>,
+    finishedAt: Date,
+    owner = "w1",
+  ): Promise<string> {
+    const id = await queue.enqueue(key, payload);
+    const claimed = await queue.claimNext({ now: T0, leaseExpiresAt: at(LEASE_MS), owner });
+    expect(claimed?.id).toBe(id);
+    expect(await queue.park(id, "target write failed: 503", owner, finishedAt)).toBe(true);
+    return id;
+  }
+
+  it("listParked returns only parked rows as a safe projection — ids/refs, no observedRecord (SA-5.1 data boundary)", async () => {
+    const queue = new FakeOrderingQueue();
+    const parkedId = await park(queue, "link-1", changePayload(), at(1));
+    // A pending and a done entry on other keys must NOT appear.
+    await queue.enqueue("link-2", changePayload());
+    const doneId = await queue.enqueue("link-3", changePayload());
+    await queue.claimNext({ now: T0, leaseExpiresAt: at(LEASE_MS), owner: "w2" });
+    await queue.markDone(doneId, "w2", at(2));
+
+    const parked = await queue.listParked(50);
+    expect(parked).toHaveLength(1);
+    const entry = parked[0];
+    expect(entry?.id).toBe(parkedId);
+    expect(entry?.queueKey).toBe("link-1");
+    expect(entry?.lastError).toBe("target write failed: 503");
+    expect(entry?.attempts).toBe(1);
+    expect(entry?.superseded).toBe(false);
+    // The context is ids/refs only.
+    expect(entry?.context).toStrictEqual({
+      ruleId: "rule-1",
+      mappingId: "map-1",
+      sourceAppId: "app-a",
+      targetAppId: "app-b",
+      resourcePairRef: "pair::widgets",
+      sourceNativeId: "n1",
+      changeKind: "update",
+    });
+    // Data boundary: the observedRecord value never reaches the projection.
+    expect(JSON.stringify(entry)).not.toContain("SENSITIVE-VALUE-123");
+    expect(entry).not.toHaveProperty("payload");
+  });
+
+  it("listParked is newest-parked first and bounded by limit", async () => {
+    const queue = new FakeOrderingQueue();
+    const older = await park(queue, "k-old", changePayload(), at(1_000));
+    const newer = await park(queue, "k-new", changePayload(), at(2_000));
+
+    const all = await queue.listParked(50);
+    expect(all.map((entry) => entry.id)).toStrictEqual([newer, older]);
+
+    const bounded = await queue.listParked(1);
+    expect(bounded.map((entry) => entry.id)).toStrictEqual([newer]);
+  });
+
+  it("isSuperseded: true when a later same-key done entry exists, false otherwise (SA-5.3)", async () => {
+    const queue = new FakeOrderingQueue();
+    const parkedId = await park(queue, "link-1", changePayload(), at(1));
+
+    // Not superseded yet — no later same-key change.
+    expect(await queue.isSuperseded(parkedId)).toBe(false);
+
+    // A later change on the same key runs to completion → supersedes the parked write.
+    const later = await queue.enqueue("link-1", changePayload({ sourceNativeId: "n1" }));
+    await queue.claimNext({ now: at(5), leaseExpiresAt: at(LEASE_MS + 5), owner: "w2" });
+    await queue.markDone(later, "w2", at(6));
+
+    expect(await queue.isSuperseded(parkedId)).toBe(true);
+    // listParked now reflects it.
+    expect((await queue.listParked(50)).find((e) => e.id === parkedId)?.superseded).toBe(true);
+  });
+
+  it("isSuperseded: false for a non-parked or absent id", async () => {
+    const queue = new FakeOrderingQueue();
+    const doneId = await queue.enqueue("link-1", changePayload());
+    await queue.claimNext({ now: T0, leaseExpiresAt: at(LEASE_MS), owner: "w1" });
+    await queue.markDone(doneId, "w1", at(1));
+
+    expect(await queue.isSuperseded(doneId)).toBe(false); // done, not parked
+    expect(await queue.isSuperseded("no-such-id")).toBe(false); // absent
+  });
+
+  it("reactivate flips parked → pending, clears the lease, sets available_at = now (SA-5.2)", async () => {
+    const queue = new FakeOrderingQueue();
+    const parkedId = await park(queue, "link-1", changePayload(), at(1));
+
+    const result = await queue.reactivate(parkedId, at(100));
+    expect(result.kind).toBe("reactivated");
+    if (result.kind === "reactivated") {
+      expect(result.entry.status).toBe("pending");
+      expect(result.entry.availableAt?.getTime()).toBe(at(100).getTime());
+      expect(result.entry.leaseOwner).toBeNull();
+      expect(result.entry.leaseExpiresAt).toBeNull();
+    }
+    // It is claimable again → the dispatcher re-runs the pipeline.
+    const reclaimed = await claim(queue, at(200), "w2");
+    expect(reclaimed?.id).toBe(parkedId);
+  });
+
+  it("reactivate is BLOCKED when another non-terminal entry shares the queue key (single-active-per-key guard)", async () => {
+    const queue = new FakeOrderingQueue();
+    const parkedId = await park(queue, "link-1", changePayload(), at(1));
+    // A later change for the same record is still queued (pending) under the same key.
+    await queue.enqueue("link-1", changePayload());
+
+    const result = await queue.reactivate(parkedId, at(100));
+    expect(result.kind).toBe("blocked-key-busy");
+    // Untouched — still parked.
+    expect(queue.getById(parkedId)?.status).toBe("parked");
+  });
+
+  it("reactivate on a non-parked entry → not-parked; on an absent id → not-found", async () => {
+    const queue = new FakeOrderingQueue();
+    const pendingId = await queue.enqueue("link-1", changePayload());
+    expect((await queue.reactivate(pendingId, at(100))).kind).toBe("not-parked");
+    expect((await queue.reactivate("no-such-id", at(100))).kind).toBe("not-found");
+  });
+});

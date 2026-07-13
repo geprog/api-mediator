@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { installAuthentication, type AuthProvider } from "../auth/index.js";
 import { registerAppRoutes } from "./apps.routes.js";
+import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
 import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
 import { registerParkedConflictRoutes } from "./parked-conflicts.routes.js";
@@ -30,7 +31,7 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
   registerMappingProposalRoutes(app, deps);
-  // Phase-4 Sync HTTP API (SA-1..SA-3). Mounted only when the Sync Engine runtime
+  // Phase-4 Sync HTTP API (SA-1..SA-5). Mounted only when the Sync Engine runtime
   // is wired in (the real composition root always provides `deps.sync`; the
   // in-memory unit harness omits it, so its sync routes are simply not registered).
   if (deps.sync !== undefined) {
@@ -38,6 +39,7 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
     registerSyncEventRoutes(app, deps.sync);
     registerRecordLinkRoutes(app, deps.sync);
     registerParkedConflictRoutes(app, deps.sync);
+    registerDeadLetterRoutes(app, deps.sync);
   }
 }
 

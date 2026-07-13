@@ -16,10 +16,14 @@ export {
   OrderingQueueRepository,
   type ClaimParams,
   type ClaimedQueueEntry,
+  type OrderingQueueDeadLetterOps,
   type OrderingQueueDrainQuery,
   type OrderingQueueEnqueueOps,
   type OrderingQueueEntry,
   type OrderingQueueWorkerOps,
+  type ParkedWriteContext,
+  type ParkedWriteEntry,
+  type ReactivateParkedResult,
 } from "./ordering-queue.js";
 export { ApprovedMappingRepository } from "./approved-mapping.js";
 export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-artifacts.js";

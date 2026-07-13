@@ -1,5 +1,6 @@
 import type {
   AmbiguousMatchDto,
+  DeadLetterWriteDto,
   EnableSyncRuleResponse,
   EnablementDegradationDto,
   EnablementRequirementDto,
@@ -8,6 +9,7 @@ import type {
   SyncEventDto,
   SyncRuleStatusDto,
 } from "@mediator/contracts";
+import type { ParkedWriteEntry } from "@mediator/db";
 import type { AuditLogEntry, ParkedConflict, RecordLink } from "@mediator/domain";
 import type { EnablementDegradation, EnablementRequirement } from "@mediator/sync-engine";
 
@@ -151,6 +153,31 @@ export function toParkedConflictDto(conflict: ParkedConflict): ParkedConflictDto
     details: conflict.details ?? null,
     createdAt: conflict.createdAt.toISOString(),
     updatedAt: conflict.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * A `ParkedWriteEntry` → the SA-5 dead-letter wire shape. Ids/refs / `changeKind` /
+ * `lastError` / attempts / timestamps / `superseded` only — **never** a raw payload
+ * value (the `observedRecord` is already dropped at the repo projection) or credential
+ * material. `Date`s become ISO strings; absent optionals are already `null`.
+ */
+export function toDeadLetterWriteDto(entry: ParkedWriteEntry): DeadLetterWriteDto {
+  return {
+    id: entry.id,
+    queueKey: entry.queueKey,
+    ruleId: entry.context.ruleId,
+    mappingId: entry.context.mappingId,
+    sourceAppId: entry.context.sourceAppId,
+    targetAppId: entry.context.targetAppId,
+    resourcePairRef: entry.context.resourcePairRef,
+    sourceNativeId: entry.context.sourceNativeId,
+    changeKind: entry.context.changeKind,
+    lastError: entry.lastError,
+    attempts: entry.attempts,
+    superseded: entry.superseded,
+    parkedAt: entry.parkedAt !== null ? entry.parkedAt.toISOString() : null,
+    enqueuedAt: entry.enqueuedAt.toISOString(),
   };
 }
 
