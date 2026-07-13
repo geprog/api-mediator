@@ -12,6 +12,7 @@ export { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 // Schema (tables, pg enums, ref-kind vocabulary).
 export {
   DETECTION_JOB_STATUSES,
+  ORDERING_QUEUE_STATUSES,
   RESOURCE_BINDING_REF_KINDS,
   adapterBinding,
   adapterBindingRoleEnum,
@@ -43,6 +44,8 @@ export {
   mappingVariantEnum,
   operationActionEnum,
   operationMapping,
+  orderingQueue,
+  orderingQueueStatusEnum,
   parameterMapping,
   processedEvent,
   registeredApp,
@@ -55,6 +58,7 @@ export {
   syncRuleStatusEnum,
   transformKindEnum,
   type DetectionJobStatus,
+  type OrderingQueueStatus,
   type ResourceBindingRefKind,
 } from "./schema.js";
 
@@ -117,15 +121,21 @@ export {
   EventOutboxRepository,
   MappingArtifactsRepository,
   MappingProposalRepository,
+  OrderingQueueRepository,
   ProcessedEventRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   type ClaimedDetectionJob,
+  type ClaimedQueueEntry,
+  type ClaimParams,
   type DetectionJob,
   type DetectionJobEnqueueOps,
   type DetectionJobWorkerOps,
   type DownstreamArtifactOps,
   type MappingArtifacts,
+  type OrderingQueueEnqueueOps,
+  type OrderingQueueEntry,
+  type OrderingQueueWorkerOps,
   type OutboxOps,
   type ProcessedEventOps,
 } from "./repositories/index.js";
