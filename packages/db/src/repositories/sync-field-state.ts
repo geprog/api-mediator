@@ -1,5 +1,5 @@
 import type { SyncFieldState } from "@mediator/domain";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapSyncFieldStateRow, toSyncFieldStateInsert } from "../mappers/sync-field-state.js";
@@ -22,6 +22,24 @@ export interface SyncFieldStateStore {
    * the same identity match idempotent.
    */
   seed(rows: readonly SyncFieldState[]): Promise<void>;
+  /**
+   * **Re-baseline** per-side-field rows after a **successful mediator write**
+   * (EP-3 / the OC-5 re-baseline deferred to Loop Prevention). Unlike {@link seed},
+   * this **overwrites** an existing row's reconciled baseline (`lastSyncedHash`/
+   * `lastSyncedAt`) and observed state (`observedHash`/`observedAt`/
+   * `observedChangeTimestamp`) for each `(record_link_id, side, field_path)` — that
+   * is the whole point of re-baselining: the written side's baseline becomes the
+   * target's *stored* representation, the source side's the observed source value the
+   * write was computed from (`docs/architecture/sync-engine.md` *Loop prevention* —
+   * canonical-form capture). A row absent for the key is inserted. `ON CONFLICT DO
+   * UPDATE`, keyed by the same natural key {@link seed} conflicts on.
+   *
+   * `lastWrittenByMappingId` is overwritten only when the incoming row carries one
+   * (the *written* side); a re-baselined *source* side (which the mediator read, not
+   * wrote) leaves the prior value untouched via `COALESCE` — the field is
+   * audit-only, and clobbering it to NULL would erase which direction last wrote it.
+   */
+  reBaseline(rows: readonly SyncFieldState[]): Promise<void>;
   /** Every row of a link, in a stable order (side then field) — tests / downstream. */
   findByLink(recordLinkId: string): Promise<SyncFieldState[]>;
 }
@@ -45,6 +63,30 @@ export class SyncFieldStateRepository implements SyncFieldStateStore {
       // recorded baseline. The unique index backs the conflict target.
       .onConflictDoNothing({
         target: [syncFieldState.recordLinkId, syncFieldState.side, syncFieldState.fieldPath],
+      });
+  }
+
+  public async reBaseline(rows: readonly SyncFieldState[]): Promise<void> {
+    if (rows.length === 0) {
+      return;
+    }
+    await this.db
+      .insert(syncFieldState)
+      .values(rows.map(toSyncFieldStateInsert))
+      // Overwrite (not monotone): a successful write re-baselines the reconciled +
+      // observed state for each (link, side, field). `lastWrittenByMappingId` is
+      // preserved when the new row omits it (a re-baselined source side).
+      .onConflictDoUpdate({
+        target: [syncFieldState.recordLinkId, syncFieldState.side, syncFieldState.fieldPath],
+        set: {
+          lastSyncedHash: sql`excluded.last_synced_hash`,
+          lastSyncedAt: sql`excluded.last_synced_at`,
+          observedHash: sql`excluded.observed_hash`,
+          observedAt: sql`excluded.observed_at`,
+          observedChangeTimestamp: sql`excluded.observed_change_timestamp`,
+          lastWrittenByMappingId: sql`coalesce(excluded.last_written_by_mapping_id, ${syncFieldState.lastWrittenByMappingId})`,
+          status: sql`excluded.status`,
+        },
       });
   }
 

@@ -225,4 +225,114 @@ suite("Phase-4 record_link + sync_field_state integration (requires Postgres)", 
     expect(nameA?.observedHash).toBe("h-name-a"); // untouched
     expect(nameA?.lastSyncedHash).toBeUndefined(); // no forged baseline
   });
+
+  it("reBaseline (EP-3): canonical-capture round-trip — overwrites the baseline, inserts absent rows", async () => {
+    const linkRepo = new RecordLinkRepository(db);
+    const stateRepo = new SyncFieldStateRepository(db);
+    const link = makeLink();
+    await linkRepo.insert(link);
+
+    // Prior reconciled state: B/country baselined at an OLD value.
+    await stateRepo.seed([
+      fieldRow(link.id, {
+        side: "B",
+        fieldPath: "country",
+        observedHash: "old",
+        lastSyncedHash: "old",
+        lastSyncedAt: T0,
+      }),
+    ]);
+
+    // A successful A→B write re-baselines both sides in their OWN representation: the
+    // written side (B) from the target's stored value "Germany", the source side (A)
+    // from the observed source "DE". The B row EXISTS (overwrite); the A row is new
+    // (insert). The written side carries `lastWrittenByMappingId`; the source does not.
+    const T1 = new Date("2026-07-13T02:00:00.000Z");
+    const mappingId = randomUUID();
+    await stateRepo.reBaseline([
+      {
+        id: randomUUID(),
+        recordLinkId: link.id,
+        side: "B",
+        fieldPath: "country",
+        lastSyncedHash: "hash-Germany",
+        lastSyncedAt: T1,
+        observedHash: "hash-Germany",
+        observedAt: T1,
+        observedChangeTimestamp: null,
+        lastWrittenByMappingId: mappingId,
+        status: "active",
+      },
+      {
+        id: randomUUID(),
+        recordLinkId: link.id,
+        side: "A",
+        fieldPath: "country",
+        lastSyncedHash: "hash-DE",
+        lastSyncedAt: T1,
+        observedHash: "hash-DE",
+        observedAt: T1,
+        observedChangeTimestamp: null,
+        status: "active",
+      },
+    ]);
+
+    const stored = await stateRepo.findByLink(link.id);
+    expect(stored).toHaveLength(2);
+    const bCountry = stored.find((r) => r.side === "B" && r.fieldPath === "country");
+    const aCountry = stored.find((r) => r.side === "A" && r.fieldPath === "country");
+    // Written side OVERWRITTEN (not monotone) — the whole point of re-baselining.
+    expect(bCountry?.lastSyncedHash).toBe("hash-Germany");
+    expect(bCountry?.lastWrittenByMappingId).toBe(mappingId);
+    // Source side captured in its own representation, no writer id.
+    expect(aCountry?.lastSyncedHash).toBe("hash-DE");
+    expect(aCountry?.lastWrittenByMappingId).toBeUndefined();
+  });
+
+  it("reBaseline preserves lastWrittenByMappingId when the incoming row omits it (COALESCE)", async () => {
+    const linkRepo = new RecordLinkRepository(db);
+    const stateRepo = new SyncFieldStateRepository(db);
+    const link = makeLink();
+    await linkRepo.insert(link);
+    const priorWriter = randomUUID();
+
+    // A row previously written by `priorWriter` on side A.
+    await stateRepo.reBaseline([
+      {
+        id: randomUUID(),
+        recordLinkId: link.id,
+        side: "A",
+        fieldPath: "email",
+        lastSyncedHash: "h1",
+        lastSyncedAt: T0,
+        observedHash: "h1",
+        observedAt: T0,
+        observedChangeTimestamp: null,
+        lastWrittenByMappingId: priorWriter,
+        status: "active",
+      },
+    ]);
+
+    // A later re-baseline of that side (as the READ source of a counterpart write)
+    // omits the writer id — COALESCE must keep the prior writer, not clobber to NULL.
+    await stateRepo.reBaseline([
+      {
+        id: randomUUID(),
+        recordLinkId: link.id,
+        side: "A",
+        fieldPath: "email",
+        lastSyncedHash: "h2",
+        lastSyncedAt: T0,
+        observedHash: "h2",
+        observedAt: T0,
+        observedChangeTimestamp: null,
+        status: "active",
+      },
+    ]);
+
+    const stored = await stateRepo.findByLink(link.id);
+    const row = stored.find((r) => r.side === "A" && r.fieldPath === "email");
+    expect(row?.lastSyncedHash).toBe("h2"); // reconcile columns updated
+    expect(row?.lastWrittenByMappingId).toBe(priorWriter); // preserved via COALESCE
+  });
 });

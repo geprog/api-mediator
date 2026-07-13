@@ -1,0 +1,68 @@
+import type { RecentWriteKey, RecentlyWrittenCache } from "./types.js";
+
+/**
+ * The EP-2 "recently written by mediator" cache — an **in-memory**, short-TTL
+ * accelerator keyed by `(appId, resource, native id)`
+ * (`docs/architecture/sync-engine.md` *Loop prevention* — fast path). It is an
+ * **optimization only**: the durable per-side `SyncFieldState` baseline (EP-1) is
+ * the authoritative echo check, so a cold cache (TTL expired, or the process
+ * restarted and lost it) never lets an echo through — EP-1 still catches it.
+ *
+ * The clock is injected (`now`, epoch ms) so TTL expiry is deterministic in tests.
+ * Expired entries are dropped lazily on read; this bounded per-process map is fine
+ * for a cache whose entries live seconds.
+ */
+export class TtlRecentlyWrittenCache implements RecentlyWrittenCache {
+  readonly #ttlMs: number;
+  readonly #now: () => number;
+  readonly #expiryByKey = new Map<string, number>();
+
+  public constructor(ttlMs: number, options: { readonly now?: () => number } = {}) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw new Error(
+        `TtlRecentlyWrittenCache ttlMs must be a positive number, got ${String(ttlMs)}`,
+      );
+    }
+    this.#ttlMs = ttlMs;
+    this.#now = options.now ?? ((): number => Date.now());
+  }
+
+  public markWritten(key: RecentWriteKey): void {
+    this.#expiryByKey.set(cacheKey(key), this.#now() + this.#ttlMs);
+  }
+
+  public isRecentlyWritten(key: RecentWriteKey): boolean {
+    const k = cacheKey(key);
+    const expiry = this.#expiryByKey.get(k);
+    if (expiry === undefined) {
+      return false;
+    }
+    if (expiry <= this.#now()) {
+      this.#expiryByKey.delete(k); // lazy eviction — the TTL lapsed
+      return false;
+    }
+    return true;
+  }
+}
+
+/**
+ * A disabled recently-written cache — every probe misses, every write is a no-op.
+ * The stage's **default**, so a stage constructed without a cache still enforces the
+ * authoritative EP-1 check (and the "cache disabled" correctness proof, EP-2.5, is
+ * literally this class). SP wires a {@link TtlRecentlyWrittenCache} to turn the fast
+ * path on.
+ */
+export class NullRecentlyWrittenCache implements RecentlyWrittenCache {
+  public markWritten(): void {
+    /* disabled: the durable EP-1 check is the correctness backstop */
+  }
+
+  public isRecentlyWritten(): boolean {
+    return false;
+  }
+}
+
+/** NUL-joined key components (the same delimiter the field-state key uses). */
+function cacheKey(key: RecentWriteKey): string {
+  return [key.appId, key.resource, key.nativeId].join("\u0000");
+}
