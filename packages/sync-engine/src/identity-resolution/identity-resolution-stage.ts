@@ -12,7 +12,7 @@ import { stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore } from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
 
-import { canonicalJson, valuesAgree } from "./hash.js";
+import { stringifyIdentityValue, valuesAgree } from "./hash.js";
 import type { IdentityMatchSeeder } from "./field-state-seeder.js";
 import type {
   DetectedChange,
@@ -491,11 +491,6 @@ function sidesOf(
 ): { readonly sourceSide: SyncFieldStateSide; readonly targetSide: SyncFieldStateSide } {
   const sourceSide: SyncFieldStateSide = change.sourceAppId === context.appAId ? "A" : "B";
   return { sourceSide, targetSide: sourceSide === "A" ? "B" : "A" };
-}
-
-/** The queue-key string for an identity value (a string passes through; else canonical JSON). */
-function stringifyIdentityValue(value: JsonValue): string {
-  return typeof value === "string" ? value : canonicalJson(value);
 }
 
 function skippedPolicyDetails(reason: SkippedPolicyReason): string {

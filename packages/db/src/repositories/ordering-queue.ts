@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { orderingQueue, type OrderingQueueStatus } from "../schema.js";
@@ -126,6 +126,26 @@ export interface OrderingQueueWorkerOps {
   heartbeat(id: string, owner: string, leaseExpiresAt: Date): Promise<void>;
 }
 
+/**
+ * The read the OQ-4 continuation handoff depends on: "has a given queue drained?".
+ * A link-keyed entry may begin only once its establishing pre-link queue(s) hold no
+ * more work (`docs/architecture/sync-engine.md` *Ordering and consistency*;
+ * `docs/requirements/phase-4-ordering-queue.md` OQ-4). Kept a **narrow read port**,
+ * separate from the enqueue/worker ops, so the `HandoffGate` (in
+ * `@mediator/sync-engine`) is unit-testable against the in-memory fake and never
+ * needs the whole repository.
+ */
+export interface OrderingQueueDrainQuery {
+  /**
+   * Whether **any** of `queueKeys` still has a **non-terminal** (`pending` or
+   * `processing`) entry — i.e. at least one of those queues has **not drained**.
+   * `false` for an empty `queueKeys`. Uses the exact same non-terminal predicate as
+   * {@link OrderingQueueWorkerOps.claimNext}, so "drained" here means precisely "no
+   * entry OQ-1 could still claim under that key".
+   */
+  hasUndrainedEntries(queueKeys: readonly string[]): Promise<boolean>;
+}
+
 /** The subset of the raw claim's `RETURNING` row this repo reads back. */
 type ClaimResultRow = Record<string, unknown>;
 
@@ -160,8 +180,32 @@ function mapRow(row: typeof orderingQueue.$inferSelect): OrderingQueueEntry {
  * because it needs `FOR UPDATE SKIP LOCKED` and a self-referential per-key predicate
  * the builder cannot express.
  */
-export class OrderingQueueRepository implements OrderingQueueEnqueueOps, OrderingQueueWorkerOps {
+export class OrderingQueueRepository
+  implements OrderingQueueEnqueueOps, OrderingQueueWorkerOps, OrderingQueueDrainQuery
+{
   public constructor(private readonly db: DbHandle) {}
+
+  /**
+   * OQ-4 handoff read: is any of `queueKeys` still non-terminal? A single existence
+   * query over the same `status IN ('pending','processing')` predicate the claim
+   * uses, so the continuation gate and the claim agree on what "drained" means.
+   */
+  public async hasUndrainedEntries(queueKeys: readonly string[]): Promise<boolean> {
+    if (queueKeys.length === 0) {
+      return false;
+    }
+    const [row] = await this.db
+      .select({ id: orderingQueue.id })
+      .from(orderingQueue)
+      .where(
+        and(
+          inArray(orderingQueue.queueKey, [...queueKeys]),
+          inArray(orderingQueue.status, ["pending", "processing"]),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  }
 
   public async enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string> {
     const [row] = await this.db

@@ -47,3 +47,18 @@ export function hashFieldValue(value: JsonValue): string {
 export function valuesAgree(a: JsonValue, b: JsonValue): boolean {
   return canonicalJson(a) === canonicalJson(b);
 }
+
+/**
+ * The **ordering-queue key string** for an identity value: a string passes through
+ * as-is, any other JSON value is its canonical serialization. This is the single
+ * source of truth for the pre-link identity-value key, shared by the Identity
+ * Resolution stage (which retains it as `RecordLink.establishingQueueKey.value`) and
+ * the OQ-3 `QueueKeyResolver` (which computes it at enqueue). They **must** agree
+ * verbatim, or the OQ-4 continuation gate could not recognize a link-keyed entry's
+ * establishing queue — hence the one shared function (`docs/architecture/sync-engine.md`
+ * *Ordering and consistency*, *Identity correlation*: the value-preserving identity
+ * pairing makes this the same string from either direction).
+ */
+export function stringifyIdentityValue(value: JsonValue): string {
+  return typeof value === "string" ? value : canonicalJson(value);
+}

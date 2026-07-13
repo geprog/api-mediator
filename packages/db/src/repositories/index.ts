@@ -16,6 +16,7 @@ export {
   OrderingQueueRepository,
   type ClaimParams,
   type ClaimedQueueEntry,
+  type OrderingQueueDrainQuery,
   type OrderingQueueEnqueueOps,
   type OrderingQueueEntry,
   type OrderingQueueWorkerOps,
