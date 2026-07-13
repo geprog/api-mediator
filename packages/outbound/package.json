@@ -19,6 +19,7 @@
     "@mediator/credentials": "workspace:*",
     "@mediator/db": "workspace:*",
     "@mediator/domain": "workspace:*",
+    "@mediator/ir": "workspace:*",
     "@mediator/sync-engine": "workspace:*",
     "@mediator/telemetry": "workspace:*",
     "@mediator/transform": "workspace:*",

@@ -395,6 +395,9 @@ importers:
       '@mediator/domain':
         specifier: workspace:*
         version: link:../domain
+      '@mediator/ir':
+        specifier: workspace:*
+        version: link:../ir
       '@mediator/sync-engine':
         specifier: workspace:*
         version: link:../sync-engine
