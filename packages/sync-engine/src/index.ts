@@ -218,3 +218,32 @@ export {
   type FakePage,
   type FakePollState,
 } from "./poller/fakes.js";
+
+// ── SyncRule enablement gate (BE-1 / BE-2) ────────────────────────────────────
+
+// The safety-critical precondition check deciding whether a disabled `SyncRule` may
+// be turned on — the record-merge-prevention boundary (a confirmed identity key, a
+// confirmed `pollOperationRef`, the approved target operations for what it propagates,
+// and both sides' required `ResourceBinding` refs). Pure evaluation over already-loaded
+// domain objects: SA-1 loads them and calls `evaluateEnablement`; the backfill *runner*
+// (BE-3..BE-6) is a later slice.
+export { evaluateEnablement } from "./enablement/enablement-gate.js";
+export type {
+  BindingRefName,
+  BindingRefRequirement,
+  BindingRefUse,
+  BlockedDecision,
+  EnableDecision,
+  EnablementDecision,
+  EnablementDegradation,
+  EnablementInput,
+  EnablementRequirement,
+  EnablementSide,
+  IdentityKeyRequirement,
+  IdentityLookupPathRequirement,
+  LwwObservationOrderDegradation,
+  MatchFirstUnavailableDegradation,
+  PollOperationRequirement,
+  PropagatableOperationRequirement,
+  TargetOperationRequirement,
+} from "./enablement/types.js";
