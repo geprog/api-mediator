@@ -21,4 +21,14 @@ export const queryKeys = {
     "detail",
     proposalId,
   ],
+  /** Root of the sync-rules cache — invalidated wholesale after enable/disable/config. */
+  syncRules: ["sync-rules"] as const,
+  /** The sync audit log, keyed by its (serialized) filter. */
+  syncEvents: (filterKey: string): readonly string[] => ["sync-events", filterKey],
+  /** The ambiguous-match queue (SA-3.3). */
+  ambiguousMatches: ["record-links", "ambiguous-matches"] as const,
+  /** The open parked-conflict queue (SA-4.1). */
+  parkedConflicts: ["parked-conflicts"] as const,
+  /** The dead-letter (parked-write) queue (SA-5.1). */
+  deadLetterWrites: ["dead-letter-writes"] as const,
 } as const;

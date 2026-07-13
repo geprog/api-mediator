@@ -25,8 +25,8 @@ import { ApiError } from "./errors.js";
  */
 
 interface RequestOptions {
-  readonly method: "GET" | "POST" | "PATCH";
-  /** JSON request body; omit for GET. Serialized with `JSON.stringify`. */
+  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  /** JSON request body; omit for GET/DELETE. Serialized with `JSON.stringify`. */
   readonly body?: unknown;
 }
 
