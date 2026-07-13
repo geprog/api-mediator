@@ -16,6 +16,7 @@
 
 export {
   OrderingQueueDispatcher,
+  type FailureDisposition,
   type OrderingQueueDispatcherOptions,
   type QueueHandler,
   type QueueHandlerContext,

@@ -15,6 +15,12 @@ const capabilities = {
 };
 const createdAt = new Date("2026-07-10T00:00:00.000Z");
 
+const outboundLimits = {
+  maxConcurrentRequests: 4,
+  maxRequestsPerWindow: 20,
+  rateWindowMs: 1000,
+};
+
 function baseRow(): RegisteredAppRow {
   return {
     id: "app-1",
@@ -22,6 +28,7 @@ function baseRow(): RegisteredAppRow {
     status: "active",
     baseUrl: "https://gitea.example.test",
     capabilities,
+    outboundLimits,
     createdAt,
   };
 }
@@ -34,6 +41,7 @@ describe("mapRegisteredAppRow", () => {
       status: "active",
       baseUrl: "https://gitea.example.test",
       capabilities,
+      outboundLimits,
       createdAt,
     });
   });
@@ -43,6 +51,21 @@ describe("mapRegisteredAppRow", () => {
 
     expect("baseUrl" in result).toBe(false);
     expect(Object.keys(result).sort()).toStrictEqual([
+      "capabilities",
+      "createdAt",
+      "id",
+      "name",
+      "outboundLimits",
+      "status",
+    ]);
+  });
+
+  it("drops a NULL outbound_limits to an ABSENT outboundLimits key (OC-3 defaults apply)", () => {
+    const result = mapRegisteredAppRow({ ...baseRow(), outboundLimits: null });
+
+    expect("outboundLimits" in result).toBe(false);
+    expect(Object.keys(result).sort()).toStrictEqual([
+      "baseUrl",
       "capabilities",
       "createdAt",
       "id",
@@ -68,6 +91,7 @@ describe("toRegisteredAppInsert", () => {
       status: "active",
       baseUrl: null,
       capabilities,
+      outboundLimits: null,
       createdAt,
     });
   });

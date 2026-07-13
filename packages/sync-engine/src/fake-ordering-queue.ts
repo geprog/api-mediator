@@ -19,6 +19,7 @@ interface FakeEntry {
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   lastError: string | null;
+  availableAt: Date | null;
   enqueuedAt: Date;
   claimedAt: Date | null;
   finishedAt: Date | null;
@@ -68,6 +69,7 @@ export class FakeOrderingQueue implements OrderingQueueEnqueueOps, OrderingQueue
       leaseOwner: null,
       leaseExpiresAt: null,
       lastError: null,
+      availableAt: null,
       enqueuedAt: new Date(0),
       claimedAt: null,
       finishedAt: null,
@@ -94,6 +96,12 @@ export class FakeOrderingQueue implements OrderingQueueEnqueueOps, OrderingQueue
       if (hasEarlierNonTerminal) {
         continue;
       }
+      // Deferred by a retry-delay / load-discipline `defer` (OC-4 / OC-3): not
+      // claimable until its `available_at` not-before is due — mirrors the SQL
+      // `(available_at IS NULL OR available_at <= now)` gate.
+      if (c.availableAt !== null && c.availableAt.getTime() > now.getTime()) {
+        continue;
+      }
       // Claimable now: fresh, or a crashed worker's expired lease.
       const claimable =
         c.status === "pending" ||
@@ -112,6 +120,7 @@ export class FakeOrderingQueue implements OrderingQueueEnqueueOps, OrderingQueue
     chosen.leaseOwner = owner;
     chosen.leaseExpiresAt = leaseExpiresAt;
     chosen.claimedAt = now;
+    chosen.availableAt = null;
     chosen.attempts += 1;
     return Promise.resolve({
       id: chosen.id,
@@ -121,43 +130,80 @@ export class FakeOrderingQueue implements OrderingQueueEnqueueOps, OrderingQueue
     });
   }
 
-  public markDone(id: string, finishedAt: Date): Promise<void> {
+  /**
+   * The lease-owner fence (OQ-1 carried-over review fix) — mirrors the real repo's
+   * `WHERE id = $id AND lease_owner = $owner AND status = 'processing'`: a settle
+   * only applies while the entry is `processing` under this owner's lease, so a
+   * slow re-claimed worker's late settle is a safe no-op.
+   */
+  #owned(id: string, owner: string): FakeEntry | undefined {
     const entry = this.#find(id);
-    if (entry !== undefined) {
-      entry.status = "done";
-      entry.finishedAt = finishedAt;
-      entry.leaseOwner = null;
-      entry.leaseExpiresAt = null;
+    if (entry !== undefined && entry.status === "processing" && entry.leaseOwner === owner) {
+      return entry;
     }
-    return Promise.resolve();
+    return undefined;
   }
 
-  public park(id: string, reason: string, finishedAt: Date): Promise<void> {
-    const entry = this.#find(id);
-    if (entry !== undefined) {
-      entry.status = "parked";
-      entry.lastError = reason;
-      entry.finishedAt = finishedAt;
-      entry.leaseOwner = null;
-      entry.leaseExpiresAt = null;
+  public markDone(id: string, owner: string, finishedAt: Date): Promise<boolean> {
+    const entry = this.#owned(id, owner);
+    if (entry === undefined) {
+      return Promise.resolve(false);
     }
-    return Promise.resolve();
+    entry.status = "done";
+    entry.finishedAt = finishedAt;
+    entry.leaseOwner = null;
+    entry.leaseExpiresAt = null;
+    return Promise.resolve(true);
   }
 
-  public recordRetry(id: string, error: string): Promise<void> {
-    const entry = this.#find(id);
-    if (entry !== undefined) {
-      entry.status = "pending";
-      entry.lastError = error;
-      entry.leaseOwner = null;
-      entry.leaseExpiresAt = null;
+  public park(id: string, reason: string, owner: string, finishedAt: Date): Promise<boolean> {
+    const entry = this.#owned(id, owner);
+    if (entry === undefined) {
+      return Promise.resolve(false);
     }
-    return Promise.resolve();
+    entry.status = "parked";
+    entry.lastError = reason;
+    entry.finishedAt = finishedAt;
+    entry.leaseOwner = null;
+    entry.leaseExpiresAt = null;
+    return Promise.resolve(true);
   }
 
-  public heartbeat(id: string, leaseExpiresAt: Date): Promise<void> {
-    const entry = this.#find(id);
-    if (entry !== undefined && entry.status === "processing") {
+  public recordRetry(
+    id: string,
+    error: string,
+    owner: string,
+    availableAt: Date,
+  ): Promise<boolean> {
+    const entry = this.#owned(id, owner);
+    if (entry === undefined) {
+      return Promise.resolve(false);
+    }
+    entry.status = "pending";
+    entry.lastError = error;
+    entry.availableAt = availableAt;
+    entry.leaseOwner = null;
+    entry.leaseExpiresAt = null;
+    return Promise.resolve(true);
+  }
+
+  public defer(id: string, owner: string, availableAt: Date): Promise<boolean> {
+    const entry = this.#owned(id, owner);
+    if (entry === undefined) {
+      return Promise.resolve(false);
+    }
+    entry.status = "pending";
+    entry.availableAt = availableAt;
+    // Attempt-neutral: undo the claim's bump so a rate-limited app never parks.
+    entry.attempts -= 1;
+    entry.leaseOwner = null;
+    entry.leaseExpiresAt = null;
+    return Promise.resolve(true);
+  }
+
+  public heartbeat(id: string, owner: string, leaseExpiresAt: Date): Promise<void> {
+    const entry = this.#owned(id, owner);
+    if (entry !== undefined) {
       entry.leaseExpiresAt = leaseExpiresAt;
     }
     return Promise.resolve();
@@ -192,6 +238,7 @@ function toEntry(entry: FakeEntry): OrderingQueueEntry {
     leaseOwner: entry.leaseOwner,
     leaseExpiresAt: entry.leaseExpiresAt,
     lastError: entry.lastError,
+    availableAt: entry.availableAt,
     enqueuedAt: entry.enqueuedAt,
     claimedAt: entry.claimedAt,
     finishedAt: entry.finishedAt,

@@ -40,6 +40,12 @@ export interface OrderingQueueEntry {
   readonly leaseOwner: string | null;
   readonly leaseExpiresAt: Date | null;
   readonly lastError: string | null;
+  /**
+   * The **not-before** retry-delay gate (OC-4 backoff / OC-3 `defer`): `null` for
+   * an immediately-claimable entry, or a timestamp the entry is deferred until —
+   * a claim skips it while `available_at > now`. Cleared on claim.
+   */
+  readonly availableAt: Date | null;
   readonly enqueuedAt: Date;
   readonly claimedAt: Date | null;
   readonly finishedAt: Date | null;
@@ -68,32 +74,56 @@ export interface OrderingQueueEnqueueOps {
 export interface OrderingQueueWorkerOps {
   /**
    * Claim the next processable entry with `FOR UPDATE SKIP LOCKED`, flip it to
-   * `processing`, take a lease, and bump `attempts`. Returns `undefined` when
-   * nothing is claimable. See {@link OrderingQueueRepository.claimNext} for the
-   * exact predicate (at most one active worker per key; sequential per key; a
-   * crashed worker's expired-lease entry re-claimable).
+   * `processing`, take a lease, bump `attempts`, and clear any `available_at`
+   * retry-delay gate. Returns `undefined` when nothing is claimable. See
+   * {@link OrderingQueueRepository.claimNext} for the exact predicate (at most one
+   * active worker per key; sequential per key; a crashed worker's expired-lease
+   * entry re-claimable; a `available_at`-deferred entry skipped until due).
    */
   claimNext(params: ClaimParams): Promise<ClaimedQueueEntry | undefined>;
-  /** Mark a claimed entry `done` (the injected handler completed); releases its key. */
-  markDone(id: string, finishedAt: Date): Promise<void>;
+  /**
+   * Mark a claimed entry `done` (the injected handler completed); releases its key.
+   *
+   * **Lease-owner fenced** (OQ-1 carried-over review fix): the write only applies to
+   * an entry still `processing` **under this `owner`'s lease**, so a slow worker
+   * whose lease expired and was re-claimed by another worker cannot settle the
+   * entry the new worker now owns. Returns `true` when this owner settled it,
+   * `false` when the fence rejected the (stale) settle.
+   */
+  markDone(id: string, owner: string, finishedAt: Date): Promise<boolean>;
   /**
    * Park a claimed entry as `parked` (dead-letter at the retry ceiling, the OC-4
    * concept): terminal, lease cleared — so its key's next entry becomes claimable
-   * and neither that key nor any other is blocked (OQ-1 criterion 5).
+   * and neither that key nor any other is blocked (OQ-1 criterion 5). Lease-owner
+   * fenced exactly like {@link markDone}.
    */
-  park(id: string, reason: string, finishedAt: Date): Promise<void>;
+  park(id: string, reason: string, owner: string, finishedAt: Date): Promise<boolean>;
   /**
    * Return a claimed entry to `pending` after a failed run still under the ceiling,
    * recording `last_error` and clearing the lease, so it is re-claimed and retried.
-   * `attempts` was already bumped by the claim.
+   * `attempts` was already bumped by the claim. `availableAt` is the **not-before**
+   * gate implementing OC-4's exponential backoff **inside** the per-record queue —
+   * the entry is not re-claimable until then, so its record's queue waits out the
+   * backoff without holding a worker. Lease-owner fenced like {@link markDone}.
    */
-  recordRetry(id: string, error: string): Promise<void>;
+  recordRetry(id: string, error: string, owner: string, availableAt: Date): Promise<boolean>;
+  /**
+   * Return a claimed entry to `pending` **deferred** until `availableAt`, WITHOUT
+   * counting the deferral as a failed attempt (it decrements the `attempts` the
+   * claim bumped, netting zero) and without recording an error. This is the
+   * load-discipline wait (OC-3 criterion 5): a call blocked by a per-app
+   * concurrency/rate ceiling or a `Retry-After` re-queues here rather than blocking
+   * its worker, so a slow app degrades only its own throughput — and a well-behaved
+   * but rate-limited app is never dead-lettered by the retry ceiling. Lease-owner
+   * fenced like {@link markDone}.
+   */
+  defer(id: string, owner: string, availableAt: Date): Promise<boolean>;
   /**
    * Extend a still-`processing` entry's lease to `leaseExpiresAt` (a heartbeat), so
-   * a long-running handler is not mistaken for a crash and re-claimed under it. A
-   * no-op if the entry is no longer `processing`.
+   * a long-running handler is not mistaken for a crash and re-claimed under it.
+   * Lease-owner fenced: a no-op unless the entry is `processing` under this `owner`.
    */
-  heartbeat(id: string, leaseExpiresAt: Date): Promise<void>;
+  heartbeat(id: string, owner: string, leaseExpiresAt: Date): Promise<void>;
 }
 
 /** The subset of the raw claim's `RETURNING` row this repo reads back. */
@@ -113,6 +143,7 @@ function mapRow(row: typeof orderingQueue.$inferSelect): OrderingQueueEntry {
     leaseOwner: row.leaseOwner,
     leaseExpiresAt: row.leaseExpiresAt,
     lastError: row.lastError,
+    availableAt: row.availableAt,
     enqueuedAt: row.enqueuedAt,
     claimedAt: row.claimedAt,
     finishedAt: row.finishedAt,
@@ -179,6 +210,7 @@ export class OrderingQueueRepository implements OrderingQueueEnqueueOps, Orderin
               AND earlier.status IN ('pending', 'processing')
               AND earlier.enqueue_seq < c.enqueue_seq
           )
+          AND (c.available_at IS NULL OR c.available_at <= ${now})
           AND (c.status = 'pending' OR c.lease_expires_at <= ${now})
         ORDER BY c.enqueue_seq
         FOR UPDATE SKIP LOCKED
@@ -189,6 +221,7 @@ export class OrderingQueueRepository implements OrderingQueueEnqueueOps, Orderin
           lease_owner = ${owner},
           lease_expires_at = ${leaseExpiresAt},
           claimed_at = ${now},
+          available_at = NULL,
           attempts = oq.attempts + 1
       FROM claimable
       WHERE oq.id = claimable.id
@@ -211,15 +244,31 @@ export class OrderingQueueRepository implements OrderingQueueEnqueueOps, Orderin
     return { id, queueKey, payload, attempts };
   }
 
-  public async markDone(id: string, finishedAt: Date): Promise<void> {
-    await this.db
-      .update(orderingQueue)
-      .set({ status: "done", finishedAt, leaseOwner: null, leaseExpiresAt: null })
-      .where(eq(orderingQueue.id, id));
+  /**
+   * The lease-owner fence shared by every settle op (OQ-1 carried-over review fix):
+   * an entry is only mutated while it is still `processing` **under this owner's
+   * lease**. A worker whose lease expired mid-run (and whose entry was re-claimed by
+   * another worker) matches zero rows and its late settle is a safe no-op.
+   */
+  #ownedAndProcessing(id: string, owner: string) {
+    return and(
+      eq(orderingQueue.id, id),
+      eq(orderingQueue.leaseOwner, owner),
+      eq(orderingQueue.status, "processing"),
+    );
   }
 
-  public async park(id: string, reason: string, finishedAt: Date): Promise<void> {
-    await this.db
+  public async markDone(id: string, owner: string, finishedAt: Date): Promise<boolean> {
+    const settled = await this.db
+      .update(orderingQueue)
+      .set({ status: "done", finishedAt, leaseOwner: null, leaseExpiresAt: null })
+      .where(this.#ownedAndProcessing(id, owner))
+      .returning({ id: orderingQueue.id });
+    return settled.length > 0;
+  }
+
+  public async park(id: string, reason: string, owner: string, finishedAt: Date): Promise<boolean> {
+    const settled = await this.db
       .update(orderingQueue)
       .set({
         status: "parked",
@@ -228,21 +277,53 @@ export class OrderingQueueRepository implements OrderingQueueEnqueueOps, Orderin
         leaseOwner: null,
         leaseExpiresAt: null,
       })
-      .where(eq(orderingQueue.id, id));
+      .where(this.#ownedAndProcessing(id, owner))
+      .returning({ id: orderingQueue.id });
+    return settled.length > 0;
   }
 
-  public async recordRetry(id: string, error: string): Promise<void> {
-    await this.db
+  public async recordRetry(
+    id: string,
+    error: string,
+    owner: string,
+    availableAt: Date,
+  ): Promise<boolean> {
+    const settled = await this.db
       .update(orderingQueue)
-      .set({ status: "pending", lastError: error, leaseOwner: null, leaseExpiresAt: null })
-      .where(eq(orderingQueue.id, id));
+      .set({
+        status: "pending",
+        lastError: error,
+        availableAt,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      })
+      .where(this.#ownedAndProcessing(id, owner))
+      .returning({ id: orderingQueue.id });
+    return settled.length > 0;
   }
 
-  public async heartbeat(id: string, leaseExpiresAt: Date): Promise<void> {
+  public async defer(id: string, owner: string, availableAt: Date): Promise<boolean> {
+    const settled = await this.db
+      .update(orderingQueue)
+      .set({
+        status: "pending",
+        availableAt,
+        // A load-discipline deferral is not a failed attempt: undo the bump the
+        // claim applied so a rate-limited app is never dead-lettered by the ceiling.
+        attempts: sql`${orderingQueue.attempts} - 1`,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      })
+      .where(this.#ownedAndProcessing(id, owner))
+      .returning({ id: orderingQueue.id });
+    return settled.length > 0;
+  }
+
+  public async heartbeat(id: string, owner: string, leaseExpiresAt: Date): Promise<void> {
     await this.db
       .update(orderingQueue)
       .set({ leaseExpiresAt })
-      .where(and(eq(orderingQueue.id, id), eq(orderingQueue.status, "processing")));
+      .where(this.#ownedAndProcessing(id, owner));
   }
 
   /** One entry by id (observability / tests). */

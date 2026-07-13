@@ -59,7 +59,7 @@ describe("FakeOrderingQueue claim semantics", () => {
 
     const first = await claim(queue, T0);
     expect(first?.id).toBe(a);
-    await queue.markDone(a, at(10));
+    expect(await queue.markDone(a, "w1", at(10))).toBe(true);
 
     const second = await claim(queue, at(20));
     expect(second?.id).toBe(b);
@@ -116,7 +116,7 @@ describe("FakeOrderingQueue claim semantics", () => {
 
     const first = await claim(queue, T0);
     expect(first?.id).toBe(a);
-    await queue.park(a, "ceiling reached", at(5));
+    expect(await queue.park(a, "ceiling reached", "w1", at(5))).toBe(true);
 
     expect(queue.getById(a)?.status).toBe("parked");
     // The park did not hold the key: b is now claimable.
@@ -130,7 +130,8 @@ describe("FakeOrderingQueue claim semantics", () => {
 
     const first = await claim(queue, T0);
     expect(first?.attempts).toBe(1);
-    await queue.recordRetry(a, "boom");
+    // Backoff not-before at T0 (immediately re-claimable for this test).
+    expect(await queue.recordRetry(a, "boom", "w1", T0)).toBe(true);
     expect(queue.getById(a)?.status).toBe("pending");
     expect(queue.getById(a)?.lastError).toBe("boom");
 
@@ -146,7 +147,7 @@ describe("FakeOrderingQueue claim semantics", () => {
     expect(first?.id).toBe(a);
 
     // Renew the lease to T0 + 90s just before the original expiry.
-    await queue.heartbeat(a, at(90_000));
+    await queue.heartbeat(a, "w1", at(90_000));
 
     // Past the ORIGINAL lease but within the renewed one → still not re-claimable.
     expect(await claim(queue, at(LEASE_MS + 1), "w2")).toBeUndefined();
@@ -159,7 +160,7 @@ describe("FakeOrderingQueue claim semantics", () => {
     const a = await queue.enqueue("K", {});
     const first = await claim(queue, T0);
     expect(first?.id).toBe(a);
-    await queue.markDone(a, at(1));
+    expect(await queue.markDone(a, "w1", at(1))).toBe(true);
     expect(queue.getById(a)?.status).toBe("done");
     expect(await claim(queue, at(2))).toBeUndefined();
   });
