@@ -1,4 +1,5 @@
 import type { AuditLogEntry, RecordLink, SyncFieldState, TombstoneReason } from "@mediator/domain";
+import { stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore, SyncFieldStateStore } from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
 
@@ -118,7 +119,11 @@ export class FakeRecordLinkStore implements RecordLinkStore {
 /**
  * In-memory {@link SyncFieldStateStore} mirroring the real repo's monotone seed
  * (`ON CONFLICT (record_link_id, side, field_path) DO NOTHING`): a row already
- * present for a `(link, side, field)` is left untouched, never overwritten.
+ * present for a `(link, side, field)` is left untouched, never overwritten by
+ * {@link seed}. {@link reBaseline} mirrors the real repo's `ON CONFLICT DO UPDATE`
+ * — it **overwrites** the reconciled + observed columns of an existing row (and
+ * preserves `lastWrittenByMappingId` when the new row omits it, via `COALESCE`), so
+ * a loose fake cannot mask an echo-miss the real re-baseline would have caught.
  */
 export class FakeSyncFieldStateStore implements SyncFieldStateStore {
   readonly #rows: SyncFieldState[] = [];
@@ -134,6 +139,42 @@ export class FakeSyncFieldStateStore implements SyncFieldStateStore {
       if (!exists) {
         this.#rows.push({ ...row });
       }
+    }
+    return Promise.resolve();
+  }
+
+  public reBaseline(rows: readonly SyncFieldState[]): Promise<void> {
+    for (const row of rows) {
+      const index = this.#rows.findIndex(
+        (existing) =>
+          existing.recordLinkId === row.recordLinkId &&
+          existing.side === row.side &&
+          existing.fieldPath === row.fieldPath,
+      );
+      if (index < 0) {
+        this.#rows.push({ ...row });
+        continue;
+      }
+      const existing = this.#rows[index];
+      if (existing === undefined) {
+        continue; // unreachable (index came from findIndex) — satisfies noUncheckedIndexedAccess
+      }
+      // Overwrite the reconciled + observed columns unconditionally (mirroring the
+      // real `set: { ... = excluded.* }`); keep the row's id. `lastSyncedHash`/
+      // `lastSyncedAt` follow the incoming row (cleared together when it omits them);
+      // `lastWrittenByMappingId` is preserved when the incoming row omits it (the
+      // COALESCE mirror — a re-baselined source side keeps its prior writer).
+      const updated: SyncFieldState = stripUndefined({
+        ...existing,
+        observedHash: row.observedHash,
+        observedAt: row.observedAt,
+        observedChangeTimestamp: row.observedChangeTimestamp,
+        status: row.status,
+        lastSyncedHash: row.lastSyncedHash,
+        lastSyncedAt: row.lastSyncedAt,
+        lastWrittenByMappingId: row.lastWrittenByMappingId ?? existing.lastWrittenByMappingId,
+      });
+      this.#rows[index] = updated;
     }
     return Promise.resolve();
   }

@@ -98,3 +98,32 @@ export type {
   TargetLookupCapability,
   TargetReadBinding,
 } from "./identity-resolution/types.js";
+
+// ── Loop Prevention — the pipeline's second stage (EP-1..EP-4) ────────────────
+
+export {
+  LoopPreventionStage,
+  type LoopPreventionStageDeps,
+  type LoopPreventionStageOptions,
+} from "./loop-prevention/loop-prevention-stage.js";
+export {
+  NullRecentlyWrittenCache,
+  TtlRecentlyWrittenCache,
+} from "./loop-prevention/recently-written-cache.js";
+export { participatingFieldsForSide } from "./loop-prevention/participating-fields.js";
+export { FakeLoopPreventionMetrics } from "./loop-prevention/fakes.js";
+export type {
+  EchoVia,
+  LoopEchoOutcome,
+  LoopPreventionContext,
+  LoopPreventionInput,
+  LoopPreventionMetrics,
+  LoopPreventionOutcome,
+  LoopSkippedPolicyOutcome,
+  MappingDirection,
+  NotEchoOutcome,
+  RecentWriteKey,
+  RecentlyWrittenCache,
+  RecordWriteInput,
+  ResurrectionPreventedOutcome,
+} from "./loop-prevention/types.js";
