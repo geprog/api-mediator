@@ -30,6 +30,9 @@ function logOut(): void {
           <RouterLink to="/proposals" data-testid="nav-proposals">Proposals</RouterLink>
         </li>
         <li>
+          <RouterLink to="/sync" data-testid="nav-sync">Sync</RouterLink>
+        </li>
+        <li>
           <RouterLink to="/apps" data-testid="nav-apps">Apps</RouterLink>
         </li>
         <li>
