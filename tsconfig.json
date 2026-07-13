@@ -12,6 +12,7 @@
     { "path": "./packages/llm" },
     { "path": "./packages/mapping-engine" },
     { "path": "./packages/transform" },
+    { "path": "./packages/sync-engine" },
     { "path": "./eval" },
     { "path": "./apps/backend" },
     { "path": "./apps/e2e" }

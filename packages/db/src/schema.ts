@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigserial,
   boolean,
   doublePrecision,
   index,
@@ -237,6 +238,22 @@ export const DETECTION_JOB_STATUSES = ["pending", "running", "completed", "faile
 /** One `mapping_detection_job` lifecycle state. */
 export type DetectionJobStatus = (typeof DETECTION_JOB_STATUSES)[number];
 export const detectionJobStatusEnum = pgEnum("detection_job_status", DETECTION_JOB_STATUSES);
+
+/**
+ * The lifecycle of an `ordering_queue` entry (below). Like `detection_job_status`
+ * this is an **infrastructure** enum — the Sync Engine's per-key ordering substrate
+ * (`docs/architecture/sync-engine.md` *Ordering and consistency*), not a glossary
+ * entity — so it is defined here rather than pinned to a `@mediator/domain` union:
+ * `pending` (enqueued, awaiting a worker), `processing` (claimed under a live lease
+ * by one worker — the `SKIP LOCKED` discipline guarantees at most one per
+ * `queue_key`), `done` (the injected pipeline handler completed), `parked`
+ * (dead-lettered at the retry ceiling — the OC-4 concept: it releases its key's
+ * worker and blocks neither that key nor others, OQ-1 criterion 5).
+ */
+export const ORDERING_QUEUE_STATUSES = ["pending", "processing", "done", "parked"] as const;
+/** One `ordering_queue` entry lifecycle state. */
+export type OrderingQueueStatus = (typeof ORDERING_QUEUE_STATUSES)[number];
+export const orderingQueueStatusEnum = pgEnum("ordering_queue_status", ORDERING_QUEUE_STATUSES);
 
 // ── Tables ───────────────────────────────────────────────────────────────────
 
@@ -957,5 +974,95 @@ export const graphEdge = pgTable(
   (table) => [
     // Node pair + type + direction (direction = ordered node pair) → one edge.
     uniqueIndex("graph_edge_nodes_type_uq").on(table.sourceNodeId, table.targetNodeId, table.type),
+  ],
+);
+
+// ── Phase-4 ordering queue (the Sync Engine's per-key consistency backbone) ────
+
+/**
+ * `ordering_queue` — the durable, single-active-worker-per-`queue_key` queue that
+ * serializes the Sync Engine's pipeline executions (`docs/architecture/sync-engine.md`
+ * *Ordering and consistency*; requirements OQ-1). This is the queue **mechanics**
+ * only: `queue_key` is an **opaque string** supplied by the caller — what the key
+ * *is* (a `RecordLink`, an identity value, a native id) is OQ-2/OQ-3, not this table.
+ *
+ * **The claim discipline (OQ-1 criteria 1-2, 5).** A worker claims the lowest-seq
+ * non-terminal (`pending`/`processing`) entry **per key** — provided that entry is
+ * actually claimable now: either `pending`, or a `processing` entry whose lease has
+ * expired (a crashed worker, criterion 3). Because a `processing` entry is always
+ * the lowest-seq non-terminal entry of its key, "lowest-seq non-terminal" collapses
+ * the two guarantees into one predicate:
+ *   1. **at most one active worker per key** — while an entry is `processing` under a
+ *      live lease it is its key's lowest non-terminal entry, so no later entry of that
+ *      key is claimable (they are excluded by the earlier-non-terminal check); and
+ *   2. **sequential in enqueue order** — `enqueue_seq` is a `bigserial`, so a key's
+ *      earlier entry always has a lower seq and is claimed first.
+ * Entries under **different** keys have independent lowest-seq entries, so they are
+ * claimed and processed **in parallel** (criterion 4 — no cross-key serialization).
+ * The claim uses `FOR UPDATE SKIP LOCKED` so the one candidate row per key that two
+ * workers race on is taken by exactly one; the loser skips it rather than blocking,
+ * and — since only the single lowest-seq candidate per key is ever eligible — never
+ * falls through to a *later* entry of the same key. The exact SQL lives in
+ * `OrderingQueueRepository.claimNext` (raw `sql`, not the query builder).
+ *
+ * **Durability / crash recovery (criterion 3).** Entries are rows, so they survive a
+ * crash; enqueue committing before the poll cursor advances is what makes SP-5's
+ * enqueue-then-advance safe. A worker holds a **lease** (`lease_owner` +
+ * `lease_expires_at`) across its handler run; if it dies, the lease expires and the
+ * same `claimNext` predicate re-claims that still-`processing` entry (no separate
+ * sweep needed — expiry is folded into the claim), preserving its key order.
+ *
+ * **Park moves on (criterion 5).** `park`ing an entry (dead-letter at the retry
+ * ceiling) makes it terminal and clears its lease, so its key's next entry becomes
+ * the lowest non-terminal and is claimed — a park holds neither its own key nor any
+ * other. `done` is likewise terminal.
+ *
+ * `payload` is an **opaque** work descriptor (`Record<string, unknown>`): the actual
+ * pipeline (RL/EP/CF/TX/OC) that runs per entry is out of scope for OQ-1 and consumes
+ * this via an injected handler seam.
+ */
+export const orderingQueue = pgTable(
+  "ordering_queue",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The opaque ordering key (OQ-2/OQ-3 decide what goes here; this table does not).
+    queueKey: text("queue_key").notNull(),
+    // DB-assigned monotonic enqueue order. A `bigserial` gives a total order that
+    // matches insert order exactly, so a key's later entry always sorts after its
+    // earlier one (criterion 2). Only ever compared/ordered DB-side — never read
+    // into the app — so int8's >2^53 range is irrelevant.
+    enqueueSeq: bigserial("enqueue_seq", { mode: "bigint" }).notNull(),
+    // The opaque work descriptor handed to the injected pipeline handler.
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    status: orderingQueueStatusEnum("status").notNull(),
+    // Bumped on every claim (a fresh claim or a lease-expiry re-claim); the
+    // dispatcher parks an entry once this reaches its attempt ceiling (OC-4).
+    attempts: integer("attempts").notNull().default(0),
+    // The lease: who holds the entry and until when, while `processing`. Both NULL
+    // in every non-`processing` state (cleared on done/park/retry). The claim treats
+    // a `processing` entry with `lease_expires_at <= now` as a crashed worker and
+    // re-claims it.
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
+    // Stamped on each claim (observability); NULL until first claimed.
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    // Stamped when the entry reaches a terminal state (`done`/`parked`).
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => [
+    // The claim query's index: the lowest-seq non-terminal entry per key, plus the
+    // per-key "is there an earlier non-terminal / an active lease" checks. Partial so
+    // the vast majority of rows (terminal `done`/`parked`) are not indexed; the
+    // leading `queue_key` serves the per-key subqueries and `enqueue_seq` matches the
+    // `ORDER BY enqueue_seq`.
+    index("ordering_queue_claim_idx")
+      .on(table.queueKey, table.enqueueSeq)
+      .where(sql`${table.status} in ('pending', 'processing')`),
+    // Supports monitoring/reclaiming stuck leases (`processing` rows past expiry).
+    index("ordering_queue_lease_idx")
+      .on(table.leaseExpiresAt)
+      .where(sql`${table.status} = 'processing'`),
   ],
 );
