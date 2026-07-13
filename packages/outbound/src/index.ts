@@ -50,6 +50,19 @@ export {
   type AppLoadGovernorOptions,
 } from "./load-governor.js";
 
+// The REST source reader — the Sync Engine's SourceReader seam, obeying the same OC-3
+// per-app ceilings as writes (SP-2 criterion 4). Lives here (not in @mediator/sync-engine)
+// because outbound already depends on sync-engine; the reverse would be a cycle.
+export {
+  RestSourceReader,
+  type RestDeltaConvention,
+  type RestDeletionConvention,
+  type RestPaginationConvention,
+  type RestSourceBindingResolver,
+  type RestSourceReadBinding,
+  type RestSourceReaderOptions,
+} from "./rest-source-reader.js";
+
 // The SyncEvent store port + real + fake (OC-2 lookback / OC-5 write).
 export { DbSyncEventStore, FakeSyncEventStore, type SyncEventStore } from "./sync-event-store.js";
 

@@ -127,3 +127,54 @@ export type {
   RecordWriteInput,
   ResurrectionPreventedOutcome,
 } from "./loop-prevention/types.js";
+
+// ── Scheduler + Poller — the change-detection driver (SP-1..SP-5) ─────────────
+
+// SP-2..SP-5: the Poller (one poll cycle up to enqueue) + its deterministic
+// poll-trigger hook (`pollOnce`, used by SU-6). The per-record pipeline the ordering
+// queue runs on each enqueued change (RL/EP/CF/TX/OC) is a later slice.
+export { Poller, type PollerOptions } from "./poller/poller.js";
+// SP-1: the Scheduler + its pure eligibility gate.
+export { Scheduler, decidePoll, type SchedulerOptions } from "./poller/scheduler.js";
+// SP-5: the Postgres-backed atomic cursor/snapshot advance store.
+export { DbPollStateStore } from "./poller/db-poll-state-store.js";
+// The record content hash the full-fetch snapshot keys on (SP-2).
+export { contentHashOfRecord } from "./poller/content-hash.js";
+// The ports the Poller/Scheduler are defined by (consumer-side), + the enqueue payload.
+export { buildChangePayload } from "./poller/types.js";
+export type {
+  ChangeEnqueue,
+  DeltaOutcome,
+  EnqueuedChange,
+  NotPollableReason,
+  ObservedRecord,
+  PageOutcome,
+  PollAdvance,
+  PollCandidateSource,
+  PollCandidateView,
+  PollChangePayload,
+  PollDecision,
+  PollHoldReason,
+  PollPlan,
+  PollPlanResolution,
+  PollPlanResolver,
+  PollRunOutcome,
+  PollSnapshotState,
+  PollStateStore,
+  PollTrigger,
+  PollerMetrics,
+  SchedulerMetrics,
+  SourceReader,
+} from "./poller/types.js";
+// The fakes downstream slices (SU-6, the pipeline handler) unit-test against.
+export {
+  FakePollCandidateSource,
+  FakePollPlanResolver,
+  FakePollStateStore,
+  FakePollerMetrics,
+  FakeSchedulerMetrics,
+  FakeSourceReader,
+  type FakeDeltaBatch,
+  type FakePage,
+  type FakePollState,
+} from "./poller/fakes.js";

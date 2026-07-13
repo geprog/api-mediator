@@ -34,3 +34,5 @@ export {
   DownstreamArtifactRepository,
   type DownstreamArtifactOps,
 } from "./downstream-artifacts.js";
+export { SyncRuleRepository, type PollCandidate, type SyncRuleAdvance } from "./sync-rule.js";
+export { PollSnapshotRepository, type PollSnapshotRecord } from "./poll-snapshot.js";
