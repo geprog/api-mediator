@@ -78,6 +78,10 @@ export default tseslint.config(
       "**/blob-report/**",
       "**/test-results/**",
       "**/*.tsbuildinfo",
+      // Transient subagent git worktrees are full repo checkouts under .claude/;
+      // linting into them makes a root `eslint .` (via `pnpm verify`) pick up
+      // another slice's in-development files while it runs. Matches .prettierignore.
+      ".claude/**",
     ],
   },
 
