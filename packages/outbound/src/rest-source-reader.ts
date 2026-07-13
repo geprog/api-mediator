@@ -39,21 +39,33 @@ import type {
  * turns that into an aborted run: no cursor/snapshot advance, no false delete.
  */
 
-/** How the collection read pages (SP-2). The exhaustion convention is fixed per kind. */
+/**
+ * How the collection read pages (SP-2). **Exhaustion is an EMPTY page, never a short
+ * one:** `pageSize`/`limitParam` are only the *requested* batch size (advisory — larger
+ * = fewer requests), NEVER the exhaustion signal. A server may clamp a requested page
+ * (return fewer than `pageSize` on a *full* page) or use its own natural page size, so
+ * a `received < pageSize` terminator would report a truncated fetch as complete and the
+ * Poller would misread the un-fetched tail as mass deletion (SP-4). Paging therefore
+ * runs until a page returns **zero** records, with offset advancing by the **actual**
+ * received count (never `pageSize` — advancing by a clamped-past size would skip
+ * records). The Poller's `maxPages` cap bounds a non-terminating server.
+ */
 export type RestPaginationConvention =
   | { readonly kind: "single-page" }
   | {
-      /** Offset/limit: `offset` grows by `pageSize`; a short/empty page ends it. */
+      /** Offset/limit: `offset` grows by the actual page size returned; an EMPTY page ends it. */
       readonly kind: "offset";
       readonly offsetParam: string;
       readonly limitParam?: string;
+      /** The requested batch size (advisory — sent via `limitParam`); NOT the exhaustion signal. */
       readonly pageSize: number;
     }
   | {
-      /** 0/1-based page number: `page` increments; a short/empty page ends it. */
+      /** 0/1-based page number: `page` increments; an EMPTY page ends it. */
       readonly kind: "page-number";
       readonly pageParam: string;
       readonly limitParam?: string;
+      /** The requested batch size (advisory — sent via `limitParam`); NOT the exhaustion signal. */
       readonly pageSize: number;
       readonly startPage: number;
     };
@@ -320,12 +332,19 @@ function nextPage(
   if (pagination.kind === "single-page" || page.kind === "single-page") {
     return { done: true };
   }
-  // Exhaustion convention: a short (or empty) page ends the read.
-  if (received < pagination.pageSize) {
+  // Exhaustion convention: ONLY an empty page ends the read (never `received < pageSize`
+  // — a server may clamp a full page or use its own page size, and treating a short-but-
+  // non-empty page as the end would truncate the fetch → the Poller would misread the
+  // tail as mass deletion, SP-4). The Poller's `maxPages` cap bounds a non-terminating
+  // server.
+  if (received === 0) {
     return { done: true };
   }
-  const nextValue =
-    pagination.kind === "offset" ? page.value + pagination.pageSize : page.value + 1;
+  // Offset advances by the ACTUAL received count (never `pageSize`): if the server
+  // clamped (returned fewer than requested on a full page), advancing by `pageSize`
+  // would skip the un-returned records — they would then look deleted too. Page-number
+  // simply increments; it cannot skip, it only must not stop early.
+  const nextValue = pagination.kind === "offset" ? page.value + received : page.value + 1;
   return { done: false, continuation: String(nextValue) };
 }
 

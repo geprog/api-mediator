@@ -66,6 +66,41 @@ export {
 // The SyncEvent store port + real + fake (OC-2 lookback / OC-5 write).
 export { DbSyncEventStore, FakeSyncEventStore, type SyncEventStore } from "./sync-event-store.js";
 
+// The Sync-Engine binding resolvers — IR + confirmed ResourceBinding refs + SyncRule/
+// OperationMapping state → the concrete REST wire shapes (source-read binding, write-op
+// binding, single-record read binding) the Poller / pipeline handler / Conflict
+// Detection consume. The composition seam every Phase-4 slice deferred; never
+// fabricates a binding from an unconfirmed ref (docs/architecture/data-model.md
+// ResourceBinding: "an unconfirmed ref is used nowhere").
+export {
+  RepoRestSourceBindingResolver,
+  RepoSingleRecordReadResolver,
+  resolveSingleRecordRead,
+  resolveSingleRecordReadBinding,
+  resolveSourceReadBinding,
+  resolveWriteOperationBinding,
+  type ApiSpecReader,
+  type ApprovedMappingReader,
+  type BindingResolverOptions,
+  type BindingResolverRepositories,
+  type OperationMappingReader,
+  type RegisteredAppReader,
+  type ResolvedSingleRecordRead,
+  type ResourceBindingReader,
+  type SingleRecordReadBinding,
+  type SingleRecordReadResolver,
+  type SourceReadBindingInput,
+  type SyncRuleReader,
+} from "./binding-resolvers.js";
+
+// The REST single-record target reader — Conflict Detection's SingleRecordTargetReader
+// seam (CF-5/CF-6), obeying OC-3 load discipline and returning the target's stored
+// representation verbatim so hashFieldValue matches the persisted baseline.
+export {
+  RestSingleRecordTargetReader,
+  type RestSingleRecordTargetReaderOptions,
+} from "./rest-single-record-reader.js";
+
 // The failure signals + classifier the ordering queue settles outbound calls with (OC-4).
 export {
   PermanentOutboundError,

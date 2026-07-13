@@ -8,6 +8,7 @@
   "references": [
     { "path": "./tsconfig.build.json" },
     { "path": "../domain/tsconfig.build.json" },
+    { "path": "../ir/tsconfig.build.json" },
     { "path": "../db/tsconfig.build.json" },
     { "path": "../credentials/tsconfig.build.json" },
     { "path": "../transform/tsconfig.build.json" },

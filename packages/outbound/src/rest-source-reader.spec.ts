@@ -194,11 +194,15 @@ describe("RestSourceReader — SP-2.4 reads obey OC-3", () => {
 });
 
 describe("RestSourceReader — SP-2 pagination + native-id extraction", () => {
-  it("offset pagination: full page → more; short page → done; offset param in the URL", async () => {
+  it("offset pagination: pages until an EMPTY page (a short non-empty page is NOT the end)", async () => {
     const governor = new AppLoadGovernor();
+    // Page at offset 2 returns 1 record (a short, non-empty page) — the read must NOT
+    // stop there; only the empty page at offset 3 ends it.
     const protocol = new FakeProtocolClient((req) => {
-      const items = req.url.includes("offset=2") ? [{ id: "3" }] : [{ id: "1" }, { id: "2" }];
-      return { status: 200, headers: {}, body: { items } };
+      if (req.url.includes("offset=3")) return { status: 200, headers: {}, body: { items: [] } };
+      if (req.url.includes("offset=2"))
+        return { status: 200, headers: {}, body: { items: [{ id: "3" }] } };
+      return { status: 200, headers: {}, body: { items: [{ id: "1" }, { id: "2" }] } };
     });
     const b = binding({
       pagination: { kind: "offset", offsetParam: "offset", limitParam: "limit", pageSize: 2 },
@@ -209,11 +213,60 @@ describe("RestSourceReader — SP-2 pagination + native-id extraction", () => {
     expect(page1.ok && page1.records.map((x) => x.nativeId)).toStrictEqual(["1", "2"]);
     expect(page1.ok && page1.next).toStrictEqual({ done: false, continuation: "2" });
 
+    // The short page (1 record) advances offset by the ACTUAL count (2 + 1 = 3), NOT by
+    // pageSize, and is NOT treated as done.
     const page2 = await r.readCollectionPage("rule-1", "2");
     expect(page2.ok && page2.records.map((x) => x.nativeId)).toStrictEqual(["3"]);
-    expect(page2.ok && page2.next).toStrictEqual({ done: true });
+    expect(page2.ok && page2.next).toStrictEqual({ done: false, continuation: "3" });
     expect(protocol.requests[1]?.url).toContain("offset=2");
     expect(protocol.requests[1]?.url).toContain("limit=2");
+
+    const page3 = await r.readCollectionPage("rule-1", "3");
+    expect(page3.ok && page3.records).toStrictEqual([]);
+    expect(page3.ok && page3.next).toStrictEqual({ done: true });
+  });
+
+  it("clamped pages (server returns fewer than the requested pageSize) enumerate ALL records with no truncation or skip", async () => {
+    const governor = new AppLoadGovernor();
+    // The rule requests pageSize=100, but the server CLAMPS every full page to 50 records
+    // — the real-Vikunja `per_page` cap. 120 records total: 50 + 50 + 20, then empty.
+    const all = Array.from({ length: 120 }, (_v, i) => ({ id: String(i) }));
+    const protocol = new FakeProtocolClient((req) => {
+      const match = /offset=(\d+)/.exec(req.url);
+      const offset = match?.[1] !== undefined ? Number(match[1]) : 0;
+      // A "full" page is clamped to 50; the tail (100..119) is 20; past the end is empty.
+      return { status: 200, headers: {}, body: { items: all.slice(offset, offset + 50) } };
+    });
+    const b = binding({
+      pagination: { kind: "offset", offsetParam: "offset", limitParam: "limit", pageSize: 100 },
+    });
+    const r = reader(b, protocol, governor);
+
+    // Drive the paging loop exactly as the Poller does, following the reader's own token.
+    const collected: string[] = [];
+    let continuation: string | undefined;
+    for (let guard = 0; guard < 1000; guard += 1) {
+      const page = await r.readCollectionPage("rule-1", continuation);
+      expect(page.ok).toBe(true);
+      if (!page.ok) break;
+      collected.push(...page.records.map((x) => x.nativeId));
+      if (page.next.done) break;
+      continuation = page.next.continuation;
+    }
+
+    // Every record enumerated exactly once (no truncation at page 1, no skip of 50..99),
+    // and the loop terminated on the empty page.
+    expect(collected).toEqual(all.map((x) => x.id));
+    expect(new Set(collected).size).toBe(120);
+    // Offsets requested: 0, 50, 100 (full/clamped pages), then 120 = 100 + the ACTUAL 20
+    // returned (NOT 100 + pageSize 100) — the empty terminator. Advancing by pageSize
+    // would have jumped to offset 200 and skipped records 120..199 had they existed.
+    expect(protocol.requests.map((req) => /offset=(\d+)/.exec(req.url)?.[1])).toEqual([
+      "0",
+      "50",
+      "100",
+      "120",
+    ]);
   });
 
   it("extracts native ids; a record missing its native id ABORTS (never a false-empty page)", async () => {
