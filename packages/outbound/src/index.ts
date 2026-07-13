@@ -87,3 +87,21 @@ export {
   type TransformFailureContext,
   type WrittenRepresentation,
 } from "./executor.js";
+
+// The Phase-4 sync pipeline handler — the QueueHandler that composes RL/EP/CF/TX/OC
+// per enqueued DetectedChange (docs/flows/sync-polling-pull.md steps 3.1–3.7 + 4).
+export {
+  SyncPipelineHandler,
+  parseDetectedChange,
+  type ApplyFieldMappingsFn,
+  type ConflictDetectionPort,
+  type IdentityResolutionPort,
+  type LoopPreventionPort,
+  type OutboundExecutorPort,
+  type ResolvedTargetOperation,
+  type SyncFieldStateGateway,
+  type SyncPipelineContext,
+  type SyncPipelineContextLoader,
+  type SyncPipelineHandlerDeps,
+  type SyncPipelineHandlerOptions,
+} from "./sync-pipeline-handler.js";
