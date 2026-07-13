@@ -560,12 +560,13 @@ suite("SA-5 replay a parked (dead-letter) write — live Postgres", () => {
       queueRes.json<DeadLetterQueueResponse>().writes.find((w) => w.id === parkedId)?.superseded,
     ).toBe(true);
 
-    // Replay is a no-op — nothing reactivated, nothing written.
+    // Replay is a no-op (409 conflict) — nothing reactivated, nothing written. The
+    // superseded verdict comes from the ATOMIC reactivate guard, not a separate read.
     const replayRes = await injectAs(app, TEST_OPERATOR, {
       method: "POST",
       url: `/api/dead-letter-writes/${parkedId}/replay`,
     });
-    expect(replayRes.statusCode).toBe(400);
+    expect(replayRes.statusCode).toBe(409);
     expect((await queue().getById(parkedId))?.status).toBe("parked");
     await sync.runQueueOnce();
     expect(landscape.appB.get("b1")?.name).toBe("Alpha");
@@ -592,7 +593,7 @@ suite("SA-5 replay a parked (dead-letter) write — live Postgres", () => {
       method: "POST",
       url: `/api/dead-letter-writes/${parkedId}/replay`,
     });
-    expect(replayRes.statusCode).toBe(400);
+    expect(replayRes.statusCode).toBe(409);
     expect((await queue().getById(parkedId))?.status).toBe("parked");
   });
 
@@ -604,6 +605,41 @@ suite("SA-5 replay a parked (dead-letter) write — live Postgres", () => {
     });
     expect(res.statusCode).toBe(403);
     expect((await queue().getById(parkedId))?.status).toBe("parked");
+  });
+
+  it("data boundary: a parked CREATE never leaks its identity-key value (the queue key) or field values", async () => {
+    // A parked create has no link yet, so its ordering-queue key IS the identity-key
+    // VALUE (a synced business key). The dead-letter read must never surface it.
+    const IDENTITY_VALUE = "SECRET-SKU-9999";
+    const change: DetectedChange = {
+      ruleId: RULE_AB,
+      mappingId: MAPPING_AB,
+      sourceAppId: APP_A,
+      targetAppId: APP_B,
+      resourcePairRef: RESOURCE_PAIR_REF,
+      sourceNativeId: "a-new",
+      changeKind: "create",
+      observedRecord: { id: "a-new", code: IDENTITY_VALUE, name: "SecretName", status: "open" },
+    };
+    const repo = queue();
+    const parkedId = await repo.enqueue(IDENTITY_VALUE, buildChangePayload(change));
+    const claimed = await repo.claimNext({
+      now: CREATED_AT,
+      leaseExpiresAt: new Date(CREATED_AT.getTime() + 30_000),
+      owner: "seed",
+    });
+    expect(claimed?.id).toBe(parkedId);
+    await repo.park(parkedId, PARK_ERROR, "seed", new Date(CREATED_AT.getTime() + 1_000));
+
+    const res = await injectAs(app, TEST_VIEWER, { method: "GET", url: "/api/dead-letter-writes" });
+    expect(res.statusCode).toBe(200);
+    const dto = res.json<DeadLetterQueueResponse>().writes.find((w) => w.id === parkedId);
+    expect(dto).toBeDefined();
+    expect(dto?.changeKind).toBe("create");
+    expect(dto?.sourceNativeId).toBe("a-new");
+    // Neither the identity value (which is the queue key) nor any field value appears.
+    expect(res.body).not.toContain(IDENTITY_VALUE);
+    expect(res.body).not.toContain("SecretName");
   });
 
   it("replay of an absent entry → 404", async () => {

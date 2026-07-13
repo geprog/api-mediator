@@ -402,16 +402,15 @@ export type ResolveParkedConflictResponse = z.infer<typeof resolveParkedConflict
 
 /**
  * One parked (dead-letter) write on the wire (SA-5.1): a write that exhausted its retry
- * ceiling (OC-4), addressable for replay. It carries **ids/refs only** — the queue key,
- * the record/rule/mapping context projected from the parked `DetectedChange` payload, the
+ * ceiling (OC-4), addressable for replay by its `id`. It carries **ids/refs only** — the
+ * record/rule/mapping context projected from the parked `DetectedChange` payload, the
  * `changeKind`, the non-secret `lastError` reason, the attempt count, timestamps, and the
  * `superseded` flag (SA-5.3). It deliberately carries **no** live field value (never the
- * payload's `observedRecord`) and **no** credential material (`docs/architecture/security.md`).
+ * payload's `observedRecord`, and never the opaque queue key — which is a live identity-key
+ * value for a parked create) and **no** credential material (`docs/architecture/security.md`).
  */
 export const deadLetterWriteDtoSchema = z.object({
   id: z.string(),
-  /** The opaque ordering key the write serialized on (a `RecordLink` id, identity value, or native id). */
-  queueKey: z.string(),
   ruleId: z.string().nullable(),
   mappingId: z.string().nullable(),
   sourceAppId: z.string().nullable(),

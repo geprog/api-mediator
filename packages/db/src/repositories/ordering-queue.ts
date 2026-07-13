@@ -151,11 +151,15 @@ export interface ParkedWriteContext {
  * the addressable identity + decision context (ids/refs, `last_error`, attempts,
  * timestamps) and the {@link superseded} flag, and it deliberately **omits the raw
  * `payload`** so a live field value never reaches a response ({@link ParkedWriteContext}).
+ *
+ * The opaque `queue_key` is **deliberately not exposed**: for a parked *create* it is the
+ * record's identity-key **value** (email/SKU — a synced field value), so surfacing it on
+ * the viewer-readable dead-letter read would breach the data boundary. The entry `id`
+ * addresses the write for replay; `context.ruleId`/`sourceNativeId`/`resourcePairRef`
+ * identify the record without any value.
  */
 export interface ParkedWriteEntry {
   readonly id: string;
-  /** The opaque ordering key the entry serialized on (a `RecordLink` id, identity value, or native id). */
-  readonly queueKey: string;
   /** The record/rule context projected from the payload — ids/refs only, never a value. */
   readonly context: ParkedWriteContext;
   readonly lastError: string | null;
@@ -183,6 +187,13 @@ export interface ParkedWriteEntry {
  */
 export type ReactivateParkedResult =
   | { readonly kind: "reactivated"; readonly entry: OrderingQueueEntry }
+  /**
+   * A later same-key change already reached `done` (higher `enqueue_seq`), so this write
+   * has been superseded (SA-5.3) — reactivating it would re-run a stale change. Decided
+   * **atomically** inside the reactivating `UPDATE`, so a change that commits `done`
+   * mid-replay is caught rather than re-run.
+   */
+  | { readonly kind: "superseded" }
   /** Another non-terminal (`pending`/`processing`) entry shares the `queue_key`; reactivating would break single-active-per-key (OQ). */
   | { readonly kind: "blocked-key-busy" }
   /** The entry exists but is not `parked` (already `done`/`pending`/`processing`) — nothing to replay. */
@@ -192,32 +203,29 @@ export type ReactivateParkedResult =
 
 /**
  * The SA-5 dead-letter operations the operator API drives over the `ordering_queue`:
- * read the parked writes ({@link listParked}), test one for supersession
- * ({@link isSuperseded}), and reactivate one back to `pending` under the
- * single-active-per-key guard ({@link reactivate}). A narrow interface (separate from
- * the enqueue/worker/drain ops) so it is unit-testable against the in-memory fake
- * ([[fakes-must-mirror-real-repos]]).
+ * read the parked writes ({@link listParked}) and reactivate one back to `pending`
+ * under the atomic single-active-per-key + not-superseded guards ({@link reactivate}).
+ * A narrow interface (separate from the enqueue/worker/drain ops) so it is
+ * unit-testable against the in-memory fake ([[fakes-must-mirror-real-repos]]).
  */
 export interface OrderingQueueDeadLetterOps {
   /**
    * The dead-letter queue (SA-5.1): the `parked` entries as **safe projections**
    * ({@link ParkedWriteEntry} — ids/refs/error/attempts/timestamps + `superseded`,
-   * **no raw payload**), newest-parked first, bounded by `limit`.
+   * **no raw payload, no queue key**), newest-parked first, bounded by `limit`.
    */
   listParked(limit: number): Promise<ParkedWriteEntry[]>;
   /**
-   * Whether the entry `id` is a `parked` write that a later same-key change has
-   * superseded (SA-5.3) — see {@link ParkedWriteEntry.superseded}. `false` for a
-   * non-parked or absent id.
-   */
-  isSuperseded(id: string): Promise<boolean>;
-  /**
    * Reactivate a `parked` entry to `pending` (SA-5.2): clear its lease and set
    * `available_at = now` so the dispatcher re-claims it and re-runs the full pipeline.
-   * **Single-active-per-key guard (OQ):** applies **only** when no other non-terminal
-   * (`pending`/`processing`) entry shares the `queue_key` — reactivating beside a live
-   * entry would put two active entries on one key and break per-key ordering. The guard
-   * is enforced atomically inside the write; see {@link ReactivateParkedResult}.
+   * Two guards are enforced **atomically inside the one `UPDATE`**, so no interleaving
+   * change can defeat them (see {@link ReactivateParkedResult}):
+   *  - **single-active-per-key (OQ):** no other non-terminal (`pending`/`processing`)
+   *    entry may share the `queue_key` — else two active entries on one key would break
+   *    per-key ordering (`blocked-key-busy`);
+   *  - **not-superseded (SA-5.3):** no same-key `done` entry with a higher `enqueue_seq`
+   *    may exist — else a later change already handled the record and re-running this
+   *    stale write would forge divergence (`superseded`).
    */
   reactivate(id: string, now: Date): Promise<ReactivateParkedResult>;
 }
@@ -269,12 +277,15 @@ function mapRow(row: typeof orderingQueue.$inferSelect): OrderingQueueEntry {
 /** The raw `listParked` `execute` row (validated + narrowed by {@link mapParkedRow}). */
 type ParkedRow = Record<string, unknown>;
 
-/** Map a raw parked-write row to its {@link ParkedWriteEntry} safe projection. */
+/**
+ * Map a raw parked-write row to its {@link ParkedWriteEntry} safe projection. The
+ * `queue_key` is intentionally NOT selected/mapped — it can be a live identity-key value
+ * for a parked create (data boundary); only the payload's id/ref keys are projected.
+ */
 function mapParkedRow(row: ParkedRow): ParkedWriteEntry {
   const payload = isJsonObject(row.payload) ? row.payload : {};
   return {
     id: requireString(row.id, "id"),
-    queueKey: requireString(row.queue_key, "queue_key"),
     context: projectParkedContext(payload),
     lastError: nullableString(row.last_error),
     attempts: requireNumber(row.attempts, "attempts"),
@@ -583,7 +594,6 @@ export class OrderingQueueRepository
   public async listParked(limit: number): Promise<ParkedWriteEntry[]> {
     const rows = await this.db.execute<ParkedRow>(sql`
       SELECT p.id AS id,
-             p.queue_key AS queue_key,
              p.payload AS payload,
              p.last_error AS last_error,
              p.attempts AS attempts,
@@ -605,38 +615,21 @@ export class OrderingQueueRepository
   }
 
   /**
-   * Whether `id` is a `parked` write superseded by a later same-key `done` entry
-   * (SA-5.3). `false` for a non-parked or absent id — so a replay of a superseded entry
-   * is a no-op decided over the same authoritative queue signal {@link listParked} uses.
-   */
-  public async isSuperseded(id: string): Promise<boolean> {
-    const result = await this.db.execute<{ superseded: boolean }>(sql`
-      SELECT EXISTS (
-        SELECT 1
-        FROM ${orderingQueue} AS later
-        WHERE later.queue_key = p.queue_key
-          AND later.status = 'done'
-          AND later.enqueue_seq > p.enqueue_seq
-      ) AS superseded
-      FROM ${orderingQueue} AS p
-      WHERE p.id = ${id} AND p.status = 'parked'
-      LIMIT 1
-    `);
-    return result.rows[0]?.superseded === true;
-  }
-
-  /**
-   * Reactivate a `parked` entry to `pending` (SA-5.2) — atomically **guarded** so it can
-   * never break single-active-per-key: the `UPDATE` applies only when the row is still
-   * `parked` **and** no other non-terminal (`pending`/`processing`) entry shares its
-   * `queue_key`. The guard lives *inside* the write (a `NOT EXISTS` sub-select), so a
-   * concurrent enqueue/claim on the same key can never race a second active entry onto
-   * it. On success the entry is claimable immediately (`available_at = now`, lease
-   * cleared) and the running dispatcher re-runs the full pipeline against current state.
+   * Reactivate a `parked` entry to `pending` (SA-5.2) — atomically **guarded** by two
+   * `NOT EXISTS` sub-selects *inside the one `UPDATE`*, so no interleaving change can
+   * defeat either. The write applies only when the row is still `parked` **and** (a) no
+   * other non-terminal (`pending`/`processing`) entry shares its `queue_key` — else two
+   * active entries on one key would break per-key ordering — **and** (b) no same-key
+   * `done` entry with a higher `enqueue_seq` exists — else a later change already handled
+   * the record (SA-5.3) and re-running this stale write would forge divergence. On
+   * success the entry is claimable immediately (`available_at = now`, lease cleared) and
+   * the running dispatcher re-runs the full pipeline against current state.
    *
-   * A zero-row `UPDATE` is then classified by a follow-up read (advisory only — the
-   * guard already protected the invariant): absent → `not-found`; not `parked` →
-   * `not-parked`; still `parked` → `blocked-key-busy` (the key-busy guard rejected it).
+   * A zero-row `UPDATE` is classified by a follow-up read (advisory only — the atomic
+   * guards already protected the invariants): absent → `not-found`; not `parked` →
+   * `not-parked`; still `parked` and superseded → `superseded`; otherwise →
+   * `blocked-key-busy`. `superseded` is checked first so an entry both overtaken and
+   * key-busy reports the no-op outcome (replay is pointless either way).
    */
   public async reactivate(id: string, now: Date): Promise<ReactivateParkedResult> {
     const updated = await this.db.execute<{ id: string }>(sql`
@@ -652,6 +645,13 @@ export class OrderingQueueRepository
           FROM ${orderingQueue} AS other
           WHERE other.queue_key = oq.queue_key
             AND other.status IN ('pending', 'processing')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${orderingQueue} AS later
+          WHERE later.queue_key = oq.queue_key
+            AND later.status = 'done'
+            AND later.enqueue_seq > oq.enqueue_seq
         )
       RETURNING oq.id AS id
     `);
@@ -670,6 +670,30 @@ export class OrderingQueueRepository
     if (current.status !== "parked") {
       return { kind: "not-parked" };
     }
+    if (await this.#isSupersededParked(id)) {
+      return { kind: "superseded" };
+    }
     return { kind: "blocked-key-busy" };
+  }
+
+  /**
+   * Whether `id` is a `parked` write superseded by a later same-key `done` entry — the
+   * same authoritative queue signal {@link listParked} exposes and {@link reactivate}
+   * guards on. Used only to classify a blocked reactivation (advisory).
+   */
+  async #isSupersededParked(id: string): Promise<boolean> {
+    const result = await this.db.execute<{ superseded: boolean }>(sql`
+      SELECT EXISTS (
+        SELECT 1
+        FROM ${orderingQueue} AS later
+        WHERE later.queue_key = p.queue_key
+          AND later.status = 'done'
+          AND later.enqueue_seq > p.enqueue_seq
+      ) AS superseded
+      FROM ${orderingQueue} AS p
+      WHERE p.id = ${id} AND p.status = 'parked'
+      LIMIT 1
+    `);
+    return result.rows[0]?.superseded === true;
   }
 }

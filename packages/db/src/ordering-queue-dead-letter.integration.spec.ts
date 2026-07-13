@@ -105,7 +105,6 @@ suite("SA-5 ordering_queue dead-letter operations — live Postgres", () => {
     expect(parked).toHaveLength(1);
     const entry = parked[0];
     expect(entry?.id).toBe(parkedId);
-    expect(entry?.queueKey).toBe("link-1");
     expect(entry?.lastError).toBe("target write failed: 503");
     expect(entry?.attempts).toBe(1);
     expect(entry?.superseded).toBe(false);
@@ -119,9 +118,10 @@ suite("SA-5 ordering_queue dead-letter operations — live Postgres", () => {
       sourceNativeId: "n1",
       changeKind: "update",
     });
-    // Data boundary: the observedRecord value never reaches the projection.
+    // Data boundary: neither the observedRecord value nor the opaque queue key surfaces.
     expect(JSON.stringify(entry)).not.toContain("SENSITIVE-VALUE-123");
     expect(entry).not.toHaveProperty("payload");
+    expect(entry).not.toHaveProperty("queueKey");
   });
 
   it("listParked is newest-parked first and bounded by limit", async () => {
@@ -133,23 +133,28 @@ suite("SA-5 ordering_queue dead-letter operations — live Postgres", () => {
     expect((await repo.listParked(1)).map((entry) => entry.id)).toStrictEqual([newer]);
   });
 
-  it("isSuperseded: true when a later same-key done entry exists, false otherwise (SA-5.3)", async () => {
+  it("listParked flags a superseded entry once a later same-key done exists (SA-5.3)", async () => {
     const repo = new OrderingQueueRepository(db);
     const parkedId = await parkEntry(repo, "link-1", changePayload(), at(1));
 
-    expect(await repo.isSuperseded(parkedId)).toBe(false);
+    expect((await repo.listParked(50)).find((e) => e.id === parkedId)?.superseded).toBe(false);
 
     // A later change on the SAME key runs to completion → supersedes the parked write.
     await doneEntry(repo, "link-1", changePayload());
-    expect(await repo.isSuperseded(parkedId)).toBe(true);
     expect((await repo.listParked(50)).find((e) => e.id === parkedId)?.superseded).toBe(true);
   });
 
-  it("isSuperseded: false for a non-parked or absent id", async () => {
+  it("reactivate returns SUPERSEDED (atomic) when a later same-key done entry exists (SA-5.3)", async () => {
     const repo = new OrderingQueueRepository(db);
-    const doneId = await doneEntry(repo, "link-1", changePayload(), "w1");
-    expect(await repo.isSuperseded(doneId)).toBe(false);
-    expect(await repo.isSuperseded("00000000-0000-0000-0000-000000000000")).toBe(false);
+    const parkedId = await parkEntry(repo, "link-1", changePayload(), at(1));
+    // A later same-key change committed `done` — the atomic guard must refuse to re-run
+    // the stale write even though NO pending/processing entry is on the key.
+    await doneEntry(repo, "link-1", changePayload());
+
+    const result = await repo.reactivate(parkedId, at(100));
+    expect(result.kind).toBe("superseded");
+    // Untouched — the stale change is never re-run.
+    expect((await repo.getById(parkedId))?.status).toBe("parked");
   });
 
   it("reactivate flips parked → pending, clears the lease, sets available_at = now (SA-5.2)", async () => {

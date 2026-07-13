@@ -256,20 +256,14 @@ export class FakeOrderingQueue
     return Promise.resolve(parked);
   }
 
-  /** Whether `id` is a `parked` write superseded by a later same-key `done` entry (SA-5.3). */
-  public isSuperseded(id: string): Promise<boolean> {
-    const entry = this.#find(id);
-    if (entry === undefined || entry.status !== "parked") {
-      return Promise.resolve(false);
-    }
-    return Promise.resolve(this.#isSupersededEntry(entry));
-  }
-
   /**
-   * Reactivate a `parked` entry to `pending` (SA-5.2) under the single-active-per-key
-   * guard — mirrors the real repo's atomic guarded `UPDATE`: only when no OTHER
-   * non-terminal (`pending`/`processing`) entry shares the `queue_key`. Mutates
-   * synchronously with no intervening `await`, the JS analogue of the atomic write.
+   * Reactivate a `parked` entry to `pending` (SA-5.2) under the atomic single-active-
+   * per-key + not-superseded guards — mirrors the real repo's guarded `UPDATE` (both
+   * `NOT EXISTS` sub-selects): it applies only when NO other non-terminal
+   * (`pending`/`processing`) entry AND NO later same-key `done` entry share the
+   * `queue_key`. `superseded` is classified before `blocked-key-busy` (both-blocked →
+   * `superseded`, matching the repo). Mutates synchronously with no intervening `await`,
+   * the JS analogue of the atomic write.
    */
   public reactivate(id: string, now: Date): Promise<ReactivateParkedResult> {
     const entry = this.#find(id);
@@ -278,6 +272,9 @@ export class FakeOrderingQueue
     }
     if (entry.status !== "parked") {
       return Promise.resolve({ kind: "not-parked" });
+    }
+    if (this.#isSupersededEntry(entry)) {
+      return Promise.resolve({ kind: "superseded" });
     }
     const keyBusy = this.#entries.some(
       (other) =>
@@ -339,11 +336,10 @@ function toEntry(entry: FakeEntry): OrderingQueueEntry {
   };
 }
 
-/** The fake's analogue of `OrderingQueueRepository.mapParkedRow` — the same safe projection. */
+/** The fake's analogue of `OrderingQueueRepository.mapParkedRow` — the same safe projection (no queue key). */
 function toParkedEntry(entry: FakeEntry, superseded: boolean): ParkedWriteEntry {
   return {
     id: entry.id,
-    queueKey: entry.queueKey,
     context: projectParkedContext(entry.payload),
     lastError: entry.lastError,
     attempts: entry.attempts,

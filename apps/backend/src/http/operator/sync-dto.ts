@@ -158,14 +158,14 @@ export function toParkedConflictDto(conflict: ParkedConflict): ParkedConflictDto
 
 /**
  * A `ParkedWriteEntry` → the SA-5 dead-letter wire shape. Ids/refs / `changeKind` /
- * `lastError` / attempts / timestamps / `superseded` only — **never** a raw payload
- * value (the `observedRecord` is already dropped at the repo projection) or credential
- * material. `Date`s become ISO strings; absent optionals are already `null`.
+ * `lastError` / attempts / timestamps / `superseded` only — **never** a raw payload value
+ * (the `observedRecord` is dropped at the repo projection) nor the opaque queue key (a
+ * live identity-key value for a parked create) nor credential material. `Date`s become
+ * ISO strings; absent optionals are already `null`.
  */
 export function toDeadLetterWriteDto(entry: ParkedWriteEntry): DeadLetterWriteDto {
   return {
     id: entry.id,
-    queueKey: entry.queueKey,
     ruleId: entry.context.ruleId,
     mappingId: entry.context.mappingId,
     sourceAppId: entry.context.sourceAppId,

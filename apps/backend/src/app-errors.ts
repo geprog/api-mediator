@@ -14,6 +14,10 @@ import type { ErrorResponse, ValidationIssue } from "@mediator/contracts";
  * - `403` {@link ForbiddenError} — an authenticated `viewer` attempted a mutation
  *   an `operator` alone may perform (OA-2).
  * - `404` {@link NotFoundError} — a referenced entity does not exist.
+ * - `409` {@link ConflictError} — the target resource is not in a state where the
+ *   action applies (a transient/state conflict, not a malformed request): e.g. a
+ *   parked-write replay blocked because the record's queue is busy or the write was
+ *   already superseded (SA-5).
  *
  * No error surface ever carries credential material: `issues` are
  * `{ path, message }` pairs built from Zod's value-free default messages.
@@ -59,6 +63,20 @@ export class NotFoundError extends HttpError {
   public constructor(message: string) {
     super(404, "Not Found", message);
     this.name = "NotFoundError";
+  }
+}
+
+/**
+ * A 409: the target resource is not in a state where the requested action applies —
+ * a transient/state conflict rather than a malformed request. Used by SA-5 replay when
+ * the parked write's record queue is busy (`blocked-key-busy` — retry once it drains),
+ * the write was already superseded by a later sync (`superseded` — no replay needed), or
+ * the entry is no longer parked (`not-parked`). Never carries credential material.
+ */
+export class ConflictError extends HttpError {
+  public constructor(message: string) {
+    super(409, "Conflict", message);
+    this.name = "ConflictError";
   }
 }
 

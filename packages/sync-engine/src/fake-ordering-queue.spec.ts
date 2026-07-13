@@ -217,7 +217,6 @@ describe("FakeOrderingQueue SA-5 dead-letter operations", () => {
     expect(parked).toHaveLength(1);
     const entry = parked[0];
     expect(entry?.id).toBe(parkedId);
-    expect(entry?.queueKey).toBe("link-1");
     expect(entry?.lastError).toBe("target write failed: 503");
     expect(entry?.attempts).toBe(1);
     expect(entry?.superseded).toBe(false);
@@ -231,9 +230,10 @@ describe("FakeOrderingQueue SA-5 dead-letter operations", () => {
       sourceNativeId: "n1",
       changeKind: "update",
     });
-    // Data boundary: the observedRecord value never reaches the projection.
+    // Data boundary: neither the observedRecord value nor the opaque queue key surfaces.
     expect(JSON.stringify(entry)).not.toContain("SENSITIVE-VALUE-123");
     expect(entry).not.toHaveProperty("payload");
+    expect(entry).not.toHaveProperty("queueKey");
   });
 
   it("listParked is newest-parked first and bounded by limit", async () => {
@@ -248,31 +248,32 @@ describe("FakeOrderingQueue SA-5 dead-letter operations", () => {
     expect(bounded.map((entry) => entry.id)).toStrictEqual([newer]);
   });
 
-  it("isSuperseded: true when a later same-key done entry exists, false otherwise (SA-5.3)", async () => {
+  it("listParked flags a superseded entry once a later same-key done exists (SA-5.3)", async () => {
     const queue = new FakeOrderingQueue();
     const parkedId = await park(queue, "link-1", changePayload(), at(1));
 
     // Not superseded yet — no later same-key change.
-    expect(await queue.isSuperseded(parkedId)).toBe(false);
+    expect((await queue.listParked(50)).find((e) => e.id === parkedId)?.superseded).toBe(false);
 
     // A later change on the same key runs to completion → supersedes the parked write.
     const later = await queue.enqueue("link-1", changePayload({ sourceNativeId: "n1" }));
     await queue.claimNext({ now: at(5), leaseExpiresAt: at(LEASE_MS + 5), owner: "w2" });
     await queue.markDone(later, "w2", at(6));
 
-    expect(await queue.isSuperseded(parkedId)).toBe(true);
-    // listParked now reflects it.
     expect((await queue.listParked(50)).find((e) => e.id === parkedId)?.superseded).toBe(true);
   });
 
-  it("isSuperseded: false for a non-parked or absent id", async () => {
+  it("reactivate returns SUPERSEDED (not reactivated) when a later same-key done entry exists (SA-5.3, atomic)", async () => {
     const queue = new FakeOrderingQueue();
-    const doneId = await queue.enqueue("link-1", changePayload());
-    await queue.claimNext({ now: T0, leaseExpiresAt: at(LEASE_MS), owner: "w1" });
-    await queue.markDone(doneId, "w1", at(1));
+    const parkedId = await park(queue, "link-1", changePayload(), at(1));
+    const later = await queue.enqueue("link-1", changePayload());
+    await queue.claimNext({ now: at(5), leaseExpiresAt: at(LEASE_MS + 5), owner: "w2" });
+    await queue.markDone(later, "w2", at(6));
 
-    expect(await queue.isSuperseded(doneId)).toBe(false); // done, not parked
-    expect(await queue.isSuperseded("no-such-id")).toBe(false); // absent
+    // The later done makes the write superseded — reactivate refuses (no-op), so the
+    // stale change is never re-run. It stays parked.
+    expect((await queue.reactivate(parkedId, at(100))).kind).toBe("superseded");
+    expect(queue.getById(parkedId)?.status).toBe("parked");
   });
 
   it("reactivate flips parked → pending, clears the lease, sets available_at = now (SA-5.2)", async () => {

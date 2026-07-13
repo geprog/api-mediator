@@ -5,7 +5,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { BadRequestError, NotFoundError } from "../../app-errors.js";
+import { ConflictError, NotFoundError } from "../../app-errors.js";
 import type { SyncOperatorService } from "../../modules/sync/operator.js";
 import { getPrincipal, requireOperator, requireViewer } from "../auth/index.js";
 import { parseInput } from "../validation.js";
@@ -54,15 +54,15 @@ export function registerDeadLetterRoutes(app: FastifyInstance, sync: SyncOperato
         case "not-found":
           throw new NotFoundError(`Parked write ${id} not found.`);
         case "not-parked":
-          throw new BadRequestError(
+          throw new ConflictError(
             `Ordering-queue entry ${id} is not a parked write; there is nothing to replay.`,
           );
         case "superseded":
-          throw new BadRequestError(
+          throw new ConflictError(
             `Parked write ${id} was already superseded by a later successful sync — no replay is needed (SA-5.3).`,
           );
         case "blocked-key-busy":
-          throw new BadRequestError(
+          throw new ConflictError(
             `Parked write ${id} cannot be replayed while another change for the same record is still queued; retry once it drains.`,
           );
       }

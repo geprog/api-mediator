@@ -95,14 +95,14 @@ export interface SyncOperatorEngine {
   readonly parkedConflicts: ParkedConflictStore;
   /**
    * SA-4/SA-5 — the ordering-queue seam. SA-4 `enqueue`s a resolution re-run; SA-5 reads
-   * the dead-letter queue (`listParked`), tests a parked write for supersession
-   * (`isSuperseded`), and `reactivate`s one back to `pending` so the running dispatcher
-   * re-claims it and re-runs the full pipeline (never a blind re-issue).
+   * the dead-letter queue (`listParked`) and `reactivate`s a parked write back to
+   * `pending` so the running dispatcher re-claims it and re-runs the full pipeline. The
+   * replay decision (superseded / key-busy) comes from `reactivate`'s **atomic** result,
+   * never a separate read-then-act (which would race a change committing mid-replay).
    */
   readonly orderingQueue: {
     enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string>;
     listParked(limit: number): Promise<ParkedWriteEntry[]>;
-    isSuperseded(id: string): Promise<boolean>;
     reactivate(id: string, now: Date): Promise<ReactivateParkedResult>;
   };
   /** SA-4.2 — read the CURRENT source record so a source-wins re-run propagates the live value. */
@@ -725,12 +725,13 @@ export class SyncOperatorService {
   /**
    * SA-5.2/5.3 — replay a parked write (operator-only; the route gates OA-2).
    *
-   * A **superseded** entry — a later same-key change already synced the record — is a
-   * **no-op** (SA-5.3): replay is only for a record with no later change, so an
-   * already-superseded write is never re-issued. Otherwise the entry is **reactivated**
-   * to `pending` under the **single-active-per-key guard** (the repo rejects a
-   * reactivation beside a live same-key entry as `blocked-key-busy`), so the running
-   * dispatcher re-claims it and re-runs the **standard pipeline** (RL→EP→CF→TX→OC)
+   * The decision comes entirely from `reactivate`'s **atomic** result — the superseded
+   * and single-active-per-key guards are `NOT EXISTS` sub-selects inside the one `UPDATE`,
+   * so a change that commits `done` (superseding this write) or enqueues (busying the key)
+   * mid-replay is caught rather than raced. A **superseded** entry — a later same-key
+   * change already synced the record — is a **no-op** (SA-5.3): an already-superseded
+   * write is never re-issued. Otherwise the entry is **reactivated** to `pending`, so the
+   * running dispatcher re-claims it and re-runs the **standard pipeline** (RL→EP→CF→TX→OC)
    * against current state — CF re-checks drift, EP re-checks echo, OC re-computes the
    * idempotency key — never a blind re-issue of the stale payload (SA-5.2 /
    * `docs/architecture/sync-engine.md` *Write failures*). The reactivation is attributed
@@ -738,11 +739,6 @@ export class SyncOperatorService {
    * pipeline as usual. Nothing outside the queue is written.
    */
   public async replayParkedWrite(id: string, actor: string): Promise<ReplayParkedWriteOutcome> {
-    // SA-5.3 — supersession is decided over the queue's own ordering (the authority):
-    // a later same-key `done` entry means a later change already handled the record.
-    if (await this.#sync.orderingQueue.isSuperseded(id)) {
-      return { kind: "superseded" };
-    }
     const result = await this.#sync.orderingQueue.reactivate(id, this.#clock());
     if (result.kind !== "reactivated") {
       return { kind: result.kind };
