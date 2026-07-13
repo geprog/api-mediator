@@ -128,6 +128,46 @@ export type {
   ResurrectionPreventedOutcome,
 } from "./loop-prevention/types.js";
 
+// ── Conflict Detection — the pipeline's third stage (CF-1..CF-7) ──────────────
+
+export {
+  ConflictDetectionStage,
+  DEFAULT_CONFLICT_EPSILON_MS,
+  type ConflictDetectionStageDeps,
+  type ConflictDetectionStageOptions,
+} from "./conflict-detection/conflict-detection-stage.js";
+export {
+  FakeConflictDetectionMetrics,
+  FakeSingleRecordTargetReader,
+} from "./conflict-detection/fakes.js";
+export type {
+  ConflictDetectionContext,
+  ConflictDetectionInput,
+  ConflictDetectionMetrics,
+  ConflictDetectionOutcome,
+  ConflictField,
+  ConflictNoCallOutcome,
+  ConflictRecord,
+  ConflictWriteOutcome,
+  DeleteParkOutcome,
+  DeleteProceedOutcome,
+  DeleteSkippedPolicyOutcome,
+  DeletionConflictContext,
+  DeletionConflictInput,
+  DeletionConflictOutcome,
+  FieldPlan,
+  FieldResolution,
+  FieldResolutionOutcome,
+  SingleRecordReadBinding,
+  SingleRecordReadRequest,
+  SingleRecordReadResult,
+  SingleRecordTargetReader,
+  TargetWriteShape,
+  WithholdFieldPlan,
+  WithholdReason,
+  WriteFieldPlan,
+} from "./conflict-detection/types.js";
+
 // ── Scheduler + Poller — the change-detection driver (SP-1..SP-5) ─────────────
 
 // SP-2..SP-5: the Poller (one poll cycle up to enqueue) + its deterministic
