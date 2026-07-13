@@ -19,6 +19,10 @@ export function mapRegisteredAppRow(row: RegisteredAppRow): RegisteredApp {
     status: row.status,
     baseUrl: row.baseUrl ?? undefined,
     capabilities: row.capabilities,
+    // A NULL `outbound_limits` (OC-3) becomes an **absent** key (not `undefined`),
+    // so the domain object honors `exactOptionalPropertyTypes` — same discipline
+    // as `baseUrl`. Absent → the executor's configured defaults apply.
+    outboundLimits: row.outboundLimits ?? undefined,
     createdAt: row.createdAt,
   });
 }
@@ -35,6 +39,8 @@ export function toRegisteredAppInsert(app: RegisteredApp): RegisteredAppInsert {
     status: app.status,
     baseUrl: app.baseUrl ?? null,
     capabilities: app.capabilities,
+    // Absent `outboundLimits` → SQL NULL (the column is nullable — OC-3 defaults).
+    outboundLimits: app.outboundLimits ?? null,
     createdAt: app.createdAt,
   };
 }

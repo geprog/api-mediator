@@ -5,6 +5,7 @@ import {
   apiSpecRoleSchema,
   apiSpecStatusSchema,
   approvedMappingStatusSchema,
+  auditLogStatusSchema,
   auditLogTypeSchema,
   conflictPolicySchema,
   credentialTypeSchema,
@@ -30,6 +31,7 @@ import {
   apiSpecRoleEnum,
   apiSpecStatusEnum,
   approvedMappingStatusEnum,
+  auditLogStatusEnum,
   auditLogTypeEnum,
   conflictPolicyEnum,
   credentialTypeEnum,
@@ -84,6 +86,7 @@ describe("pg enum ↔ domain parity", () => {
       approvedMappingStatusSchema.options,
     ],
     ["audit_log_type", auditLogTypeEnum.enumValues, auditLogTypeSchema.options],
+    ["audit_log_status", auditLogStatusEnum.enumValues, auditLogStatusSchema.options],
     ["mapping_decision", mappingDecisionEnum.enumValues, mappingDecisionSchema.options],
     ["sync_rule_status", syncRuleStatusEnum.enumValues, syncRuleStatusSchema.options],
     [

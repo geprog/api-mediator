@@ -1,5 +1,5 @@
 import type { AuditLogEntry } from "@mediator/domain";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAuditLogRow, toAuditLogInsert } from "../mappers/audit-log.js";
@@ -39,6 +39,30 @@ export class AuditLogRepository {
       .from(auditLog)
       .where(eq(auditLog.relatedMappingId, mappingId))
       .orderBy(desc(auditLog.timestamp));
+    return rows.map(mapAuditLogRow);
+  }
+
+  /**
+   * OC-2's **bounded-lookback** idempotency query: the most recent audit rows
+   * carrying `idempotencyKey`, no older than `since` and capped at `limit` — the
+   * concept's "last N per-record events or a configured retention period, **never**
+   * unbounded history". Returns the (bounded) matching rows most-recent-first; the
+   * Outbound Call Executor inspects them for a prior `success` before it decides to
+   * skip a write (a prior `failure` must NOT suppress its retry). The dedup
+   * *policy* lives in the executor; this method only bounds the scan.
+   */
+  public async findRecentByIdempotencyKey(
+    idempotencyKey: string,
+    options: { readonly since: Date; readonly limit: number },
+  ): Promise<AuditLogEntry[]> {
+    const rows = await this.db
+      .select()
+      .from(auditLog)
+      .where(
+        and(eq(auditLog.idempotencyKey, idempotencyKey), gte(auditLog.timestamp, options.since)),
+      )
+      .orderBy(desc(auditLog.timestamp))
+      .limit(options.limit);
     return rows.map(mapAuditLogRow);
   }
 }

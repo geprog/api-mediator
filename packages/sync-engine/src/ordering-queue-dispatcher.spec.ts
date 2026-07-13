@@ -118,6 +118,9 @@ describe("OrderingQueueDispatcher", () => {
     const dispatcher = new OrderingQueueDispatcher(queue, handler, {
       clock: CLOCK,
       maxAttempts: 3,
+      // Zero backoff so `drain` (fixed clock) can re-claim each retry immediately;
+      // the backoff-as-`available_at` behavior itself is covered by its own test.
+      retryBackoff: () => 0,
       onEntrySettled: (settled) => settles.push(settled),
     });
 
@@ -129,6 +132,91 @@ describe("OrderingQueueDispatcher", () => {
       { outcome: "parked", attempts: 3 },
     ]);
     expect(queue.listByStatus("parked")).toHaveLength(1);
+  });
+
+  it("a retry defers the entry by the backoff (available_at not-before), not re-claimable until due", async () => {
+    const queue = new FakeOrderingQueue();
+    const id = await queue.enqueue("K", {});
+
+    let now = new Date("2026-07-13T00:00:00.000Z");
+    const handler: QueueHandler = (ctx) =>
+      ctx.attempts === 1 ? Promise.reject(new Error("transient")) : Promise.resolve();
+    const dispatcher = new OrderingQueueDispatcher(queue, handler, {
+      clock: () => now,
+      maxAttempts: 5,
+      retryBackoff: (attempts) => 1_000 * attempts,
+    });
+
+    const first = await dispatcher.runOnce();
+    expect(first.outcome).toBe("retried");
+    // Deferred 1s out: not claimable yet.
+    expect(queue.getById(id)?.status).toBe("pending");
+    expect(queue.getById(id)?.availableAt?.toISOString()).toBe("2026-07-13T00:00:01.000Z");
+    expect(await dispatcher.runOnce()).toStrictEqual({ outcome: "idle", entry: undefined });
+
+    // Advance past the backoff → re-claimable, and it succeeds.
+    now = new Date("2026-07-13T00:00:01.500Z");
+    const second = await dispatcher.runOnce();
+    expect(second.outcome).toBe("done");
+    expect(queue.getById(id)?.status).toBe("done");
+  });
+
+  it("defers a throttle without counting a failed attempt (classifyFailure → defer)", async () => {
+    const queue = new FakeOrderingQueue();
+    const id = await queue.enqueue("K", {});
+
+    let now = new Date("2026-07-13T00:00:00.000Z");
+    let throttleCalls = 0;
+    const handler: QueueHandler = () => {
+      throttleCalls += 1;
+      // Throttle the first two claims, then succeed.
+      return throttleCalls <= 2 ? Promise.reject(new Error("throttled")) : Promise.resolve();
+    };
+    const dispatcher = new OrderingQueueDispatcher(queue, handler, {
+      clock: () => now,
+      maxAttempts: 1, // a real failure would park immediately …
+      classifyFailure: () => ({ kind: "defer", delayMs: 500 }), // … but a defer never does.
+    });
+
+    const first = await dispatcher.runOnce();
+    expect(first.outcome).toBe("deferred");
+    // Attempt-neutral: the claim bump was undone.
+    expect(queue.getById(id)?.attempts).toBe(0);
+    expect(queue.getById(id)?.status).toBe("pending");
+
+    now = new Date("2026-07-13T00:00:00.500Z");
+    expect((await dispatcher.runOnce()).outcome).toBe("deferred");
+    now = new Date("2026-07-13T00:00:01.000Z");
+    expect((await dispatcher.runOnce()).outcome).toBe("done");
+    // Never parked despite maxAttempts: 1 — a throttled app is not dead-lettered.
+    expect(queue.listByStatus("parked")).toHaveLength(0);
+  });
+
+  it("lease-owner fence: a re-claimed entry rejects the original worker's late settle", async () => {
+    const queue = new FakeOrderingQueue();
+    const id = await queue.enqueue("K", {});
+
+    // Worker A claims (lease 1s), then its lease expires and worker B re-claims.
+    const claimA = await queue.claimNext({
+      now: new Date("2026-07-13T00:00:00.000Z"),
+      leaseExpiresAt: new Date("2026-07-13T00:00:01.000Z"),
+      owner: "A",
+    });
+    expect(claimA?.id).toBe(id);
+    const claimB = await queue.claimNext({
+      now: new Date("2026-07-13T00:00:02.000Z"),
+      leaseExpiresAt: new Date("2026-07-13T00:00:03.000Z"),
+      owner: "B",
+    });
+    expect(claimB?.id).toBe(id);
+
+    // A's late markDone must be rejected (fence): B still owns the processing entry.
+    expect(await queue.markDone(id, "A", new Date("2026-07-13T00:00:02.500Z"))).toBe(false);
+    expect(queue.getById(id)?.status).toBe("processing");
+    expect(queue.getById(id)?.leaseOwner).toBe("B");
+    // B settles normally.
+    expect(await queue.markDone(id, "B", new Date("2026-07-13T00:00:02.600Z"))).toBe(true);
+    expect(queue.getById(id)?.status).toBe("done");
   });
 
   it("interleaves multiple keys but preserves each key's own enqueue order", async () => {

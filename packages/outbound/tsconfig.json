@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "vitest.integration.config.ts"],
+  "references": [
+    { "path": "./tsconfig.build.json" },
+    { "path": "../domain/tsconfig.build.json" },
+    { "path": "../db/tsconfig.build.json" },
+    { "path": "../credentials/tsconfig.build.json" },
+    { "path": "../transform/tsconfig.build.json" },
+    { "path": "../telemetry/tsconfig.build.json" },
+    { "path": "../sync-engine/tsconfig.build.json" }
+  ]
+}

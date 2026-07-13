@@ -203,7 +203,8 @@ suite("Phase-4 ordering_queue OQ-1 integration (requires Postgres)", () => {
     expect(reclaimed?.id).toBe(id);
     expect(reclaimed?.attempts).toBe(2);
 
-    await repo.markDone(id, new Date(T0.getTime() + 1_100));
+    // W2 (the current lease owner) settles it; the lease-owner fence lets it through.
+    expect(await repo.markDone(id, "W2", new Date(T0.getTime() + 1_100))).toBe(true);
 
     // Exactly one entry, now done: the crash produced no duplicate.
     const done = await repo.listByStatus("done");
@@ -249,6 +250,97 @@ suite("Phase-4 ordering_queue OQ-1 integration (requires Postgres)", () => {
     expect(a).toBeDefined();
     expect(b).toBeDefined();
     expect(new Set([a?.queueKey, b?.queueKey])).toStrictEqual(new Set(["K", "L"]));
+  });
+
+  it("retry-delay (OC-4): recordRetry sets available_at; the entry is not claimable until it is due", async () => {
+    const repo = new OrderingQueueRepository(db);
+    const id = await repo.enqueue("K", { n: 1 });
+
+    const claimed = await repo.claimNext({
+      now: T0,
+      leaseExpiresAt: new Date(T0.getTime() + 30_000),
+      owner: "W1",
+    });
+    expect(claimed?.id).toBe(id);
+
+    // Retry with a 5s backoff not-before.
+    const availableAt = new Date(T0.getTime() + 5_000);
+    expect(await repo.recordRetry(id, "transient", "W1", availableAt)).toBe(true);
+    expect((await repo.getById(id))?.status).toBe("pending");
+    expect((await repo.getById(id))?.availableAt?.toISOString()).toBe(availableAt.toISOString());
+
+    // Before the not-before → not claimable (the record's queue waits out the backoff).
+    const early = await repo.claimNext({
+      now: new Date(T0.getTime() + 1_000),
+      leaseExpiresAt: new Date(T0.getTime() + 31_000),
+      owner: "W2",
+    });
+    expect(early).toBeUndefined();
+
+    // After it → claimable again, attempts bumped by the re-claim.
+    const late = await repo.claimNext({
+      now: new Date(T0.getTime() + 6_000),
+      leaseExpiresAt: new Date(T0.getTime() + 36_000),
+      owner: "W2",
+    });
+    expect(late?.id).toBe(id);
+    expect(late?.attempts).toBe(2);
+  });
+
+  it("defer (OC-3): re-queues with a not-before WITHOUT counting a failed attempt", async () => {
+    const repo = new OrderingQueueRepository(db);
+    const id = await repo.enqueue("K", { n: 1 });
+
+    const claimed = await repo.claimNext({
+      now: T0,
+      leaseExpiresAt: new Date(T0.getTime() + 30_000),
+      owner: "W1",
+    });
+    expect(claimed?.attempts).toBe(1);
+
+    expect(await repo.defer(id, "W1", new Date(T0.getTime() + 2_000))).toBe(true);
+    // Attempt-neutral: the claim's bump was undone, so a rate-limited app never parks.
+    expect((await repo.getById(id))?.attempts).toBe(0);
+    expect((await repo.getById(id))?.status).toBe("pending");
+    expect((await repo.getById(id))?.lastError).toBeNull();
+
+    const reclaimed = await repo.claimNext({
+      now: new Date(T0.getTime() + 3_000),
+      leaseExpiresAt: new Date(T0.getTime() + 33_000),
+      owner: "W1",
+    });
+    expect(reclaimed?.id).toBe(id);
+    expect(reclaimed?.attempts).toBe(1);
+  });
+
+  it("lease-owner fence (OQ-1 review fix): a re-claimed entry rejects the original worker's late settle", async () => {
+    const repo = new OrderingQueueRepository(db);
+    const id = await repo.enqueue("K", { n: 1 });
+
+    // W1 claims a short lease and "crashes"; W2 re-claims after it expires.
+    await repo.claimNext({
+      now: T0,
+      leaseExpiresAt: new Date(T0.getTime() + 1_000),
+      owner: "W1",
+    });
+    const reclaimed = await repo.claimNext({
+      now: new Date(T0.getTime() + 1_001),
+      leaseExpiresAt: new Date(T0.getTime() + 31_001),
+      owner: "W2",
+    });
+    expect(reclaimed?.id).toBe(id);
+
+    // W1's late settles are all rejected by the fence — W2 owns the entry now.
+    expect(await repo.markDone(id, "W1", new Date(T0.getTime() + 1_100))).toBe(false);
+    expect(await repo.park(id, "stale", "W1", new Date(T0.getTime() + 1_100))).toBe(false);
+    expect(await repo.recordRetry(id, "stale", "W1", new Date(T0.getTime() + 2_000))).toBe(false);
+    const still = await repo.getById(id);
+    expect(still?.status).toBe("processing");
+    expect(still?.leaseOwner).toBe("W2");
+
+    // W2 settles normally.
+    expect(await repo.markDone(id, "W2", new Date(T0.getTime() + 1_200))).toBe(true);
+    expect((await repo.getById(id))?.status).toBe("done");
   });
 });
 

@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["**/*.spec.ts"],
+  "references": [
+    { "path": "../domain/tsconfig.build.json" },
+    { "path": "../db/tsconfig.build.json" },
+    { "path": "../credentials/tsconfig.build.json" },
+    { "path": "../transform/tsconfig.build.json" },
+    { "path": "../telemetry/tsconfig.build.json" },
+    { "path": "../sync-engine/tsconfig.build.json" }
+  ]
+}

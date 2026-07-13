@@ -24,8 +24,16 @@ export interface QueueHandlerContext {
  */
 export type QueueHandler = (context: QueueHandlerContext) => Promise<void>;
 
-/** How one `runOnce` / worker tick ended. */
-export type TickOutcome = "idle" | "done" | "retried" | "parked";
+/**
+ * How one `runOnce` / worker tick ended.
+ *  - `done` / `retried` / `parked` — the OQ-1 outcomes.
+ *  - `deferred` — the entry was re-queued with a not-before delay WITHOUT counting a
+ *    failed attempt (OC-3 load-discipline `defer`: a ceiling / `Retry-After` wait).
+ *  - `lease-lost` — the handler ran but this worker's lease had expired and the entry
+ *    was re-claimed by another worker, so the lease-owner fence rejected the settle
+ *    (the other worker owns the outcome now — this run's work is discarded).
+ */
+export type TickOutcome = "idle" | "done" | "retried" | "parked" | "deferred" | "lease-lost";
 
 /** The result of one worker tick. `entry` is present unless the queue was idle. */
 export interface TickResult {
@@ -37,12 +45,30 @@ export interface TickResult {
 export interface SettledEntry {
   readonly id: string;
   readonly queueKey: string;
-  readonly outcome: "done" | "retried" | "parked";
+  readonly outcome: "done" | "retried" | "parked" | "deferred";
   /** The entry's post-claim attempt count. */
   readonly attempts: number;
   /** The handler failure, on `retried`/`parked` only. */
   readonly error?: unknown;
 }
+
+/**
+ * How the dispatcher settles a failed handler run, decided by
+ * {@link OrderingQueueDispatcherOptions.classifyFailure}:
+ *  - `retry` — return to `pending` with an exponential-backoff not-before
+ *    ({@link OrderingQueueDispatcherOptions.retryBackoff}); **counts** toward the
+ *    attempt ceiling (OC-4 criterion 1).
+ *  - `park` — dead-letter now (OC-4 criterion 2 — the retry ceiling, or a
+ *    non-retryable failure the caller wants parked immediately, e.g. a transform
+ *    error or credential-refresh failure — OC-4 criterion 6).
+ *  - `defer` — re-queue with a not-before of `delayMs`, **not** counted as a failed
+ *    attempt (OC-3 criterion 5 — a load-discipline / `Retry-After` wait, so a
+ *    rate-limited app is never dead-lettered).
+ */
+export type FailureDisposition =
+  | { readonly kind: "retry" }
+  | { readonly kind: "park" }
+  | { readonly kind: "defer"; readonly delayMs: number };
 
 /** Tuning + injection points for {@link OrderingQueueDispatcher}. */
 export interface OrderingQueueDispatcherOptions {
@@ -58,8 +84,30 @@ export interface OrderingQueueDispatcherOptions {
   /**
    * Attempt ceiling: an entry whose handler has now failed this many times is
    * **parked** (dead-lettered) instead of retried — the OC-4 concept (default 5).
+   * Applies only to the default {@link classifyFailure}; a custom classifier owns
+   * its own park decision.
    */
   readonly maxAttempts?: number;
+  /**
+   * The exponential-backoff delay (ms) for a `retry` disposition, given the entry's
+   * post-claim attempt count. The default doubles from a 1s base, capped at 60s —
+   * OC-4's "exponential backoff **inside** the per-record ordering queue": the
+   * delay is applied as the entry's `available_at` not-before, so the record's
+   * queue waits it out without holding a worker.
+   */
+  readonly retryBackoff?: (attempts: number) => number;
+  /**
+   * Classify a failed handler run into {@link FailureDisposition}. The default
+   * retries (with backoff) until `maxAttempts`, then parks — the OQ-1 behavior. The
+   * Outbound Call Executor injects a classifier that parks non-retryable failures
+   * (transform error / credential-refresh failure) immediately and `defer`s
+   * load-discipline throttles (OC-3 / OC-4).
+   */
+  readonly classifyFailure?: (
+    error: unknown,
+    attempts: number,
+    maxAttempts: number,
+  ) => FailureDisposition;
   /** How long a worker waits after finding no claimable work, in ms (default 200). */
   readonly idlePollIntervalMs?: number;
   /** Base id recorded as `lease_owner`; each loop appends its index (default random). */
@@ -76,6 +124,28 @@ const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_LEASE_DURATION_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_IDLE_POLL_INTERVAL_MS = 200;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
+
+/**
+ * The default exponential backoff: `base · 2^(attempts-1)`, capped — so the first
+ * retry (post-claim `attempts = 1`) waits `base`, the next `2·base`, and so on. The
+ * delay becomes the entry's `available_at` not-before (OC-4 backoff-in-queue).
+ */
+function defaultRetryBackoff(attempts: number): number {
+  const exponent = Math.max(0, attempts - 1);
+  const delay = DEFAULT_RETRY_BASE_DELAY_MS * 2 ** exponent;
+  return Math.min(delay, DEFAULT_MAX_RETRY_DELAY_MS);
+}
+
+/** The OQ-1 default: retry (with backoff) under the ceiling, park at it. */
+function defaultClassifyFailure(
+  _error: unknown,
+  attempts: number,
+  maxAttempts: number,
+): FailureDisposition {
+  return attempts >= maxAttempts ? { kind: "park" } : { kind: "retry" };
+}
 
 /** A non-secret, human-readable description of a handler failure for `last_error`. */
 function describeError(error: unknown): string {
@@ -103,6 +173,12 @@ export class OrderingQueueDispatcher {
   readonly #concurrency: number;
   readonly #leaseDurationMs: number;
   readonly #maxAttempts: number;
+  readonly #retryBackoff: (attempts: number) => number;
+  readonly #classifyFailure: (
+    error: unknown,
+    attempts: number,
+    maxAttempts: number,
+  ) => FailureDisposition;
   readonly #idlePollIntervalMs: number;
   readonly #ownerId: string;
   readonly #clock: () => Date;
@@ -121,6 +197,8 @@ export class OrderingQueueDispatcher {
     this.#concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.#leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     this.#maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.#retryBackoff = options.retryBackoff ?? defaultRetryBackoff;
+    this.#classifyFailure = options.classifyFailure ?? defaultClassifyFailure;
     this.#idlePollIntervalMs = options.idlePollIntervalMs ?? DEFAULT_IDLE_POLL_INTERVAL_MS;
     this.#ownerId = options.ownerId ?? `dispatcher-${Math.random().toString(36).slice(2, 10)}`;
     this.#clock = options.clock ?? ((): Date => new Date());
@@ -148,9 +226,12 @@ export class OrderingQueueDispatcher {
         attempts: entry.attempts,
       });
     } catch (error) {
-      return await this.#settleFailure(entry, error);
+      return await this.#settleFailure(entry, owner, error);
     }
-    await this.#queue.markDone(entry.id, this.#clock());
+    const applied = await this.#queue.markDone(entry.id, owner, this.#clock());
+    if (!applied) {
+      return this.#leaseLost(entry);
+    }
     this.#onEntrySettled({
       id: entry.id,
       queueKey: entry.queueKey,
@@ -214,32 +295,71 @@ export class OrderingQueueDispatcher {
   }
 
   /**
-   * Settle a failed handler: park the entry once it has reached the attempt ceiling
-   * (dead-letter, OQ-1 criterion 5 — its key's next entry then becomes claimable),
-   * otherwise return it to `pending` for a later retry. Exponential backoff (OC-4)
-   * is intentionally out of scope here — a retried entry is immediately re-claimable.
+   * Settle a failed handler per {@link OrderingQueueDispatcherOptions.classifyFailure}:
+   *  - `park` — dead-letter (OC-4 criterion 2 — retry ceiling, or a caller-declared
+   *    non-retryable failure): its key's next entry then becomes claimable.
+   *  - `retry` — return to `pending` with an exponential-backoff `available_at`
+   *    not-before (OC-4 criterion 1 — the backoff is served **inside** the queue, so
+   *    the record's queue waits it out without holding a worker).
+   *  - `defer` — return to `pending` with a `delayMs` not-before **without** counting
+   *    a failed attempt (OC-3 criterion 5 — a load-discipline throttle).
+   *
+   * Each settle is lease-owner fenced; a `false` return means this worker lost its
+   * lease (an expired-lease re-claim by another worker), so the settle is discarded.
    */
-  async #settleFailure(entry: ClaimedQueueEntry, error: unknown): Promise<TickResult> {
-    if (entry.attempts >= this.#maxAttempts) {
-      await this.#queue.park(entry.id, describeError(error), this.#clock());
-      this.#onEntrySettled({
-        id: entry.id,
-        queueKey: entry.queueKey,
-        outcome: "parked",
-        attempts: entry.attempts,
-        error,
-      });
-      return { outcome: "parked", entry };
+  async #settleFailure(
+    entry: ClaimedQueueEntry,
+    owner: string,
+    error: unknown,
+  ): Promise<TickResult> {
+    const disposition = this.#classifyFailure(error, entry.attempts, this.#maxAttempts);
+
+    if (disposition.kind === "park") {
+      const applied = await this.#queue.park(entry.id, describeError(error), owner, this.#clock());
+      return applied ? this.#reportSettled(entry, "parked", error) : this.#leaseLost(entry);
     }
-    await this.#queue.recordRetry(entry.id, describeError(error));
+
+    if (disposition.kind === "defer") {
+      const availableAt = new Date(this.#clock().getTime() + disposition.delayMs);
+      const applied = await this.#queue.defer(entry.id, owner, availableAt);
+      return applied ? this.#reportSettled(entry, "deferred") : this.#leaseLost(entry);
+    }
+
+    const availableAt = new Date(this.#clock().getTime() + this.#retryBackoff(entry.attempts));
+    const applied = await this.#queue.recordRetry(
+      entry.id,
+      describeError(error),
+      owner,
+      availableAt,
+    );
+    return applied ? this.#reportSettled(entry, "retried", error) : this.#leaseLost(entry);
+  }
+
+  /** Fire {@link onEntrySettled} and return the matching {@link TickResult}. */
+  #reportSettled(
+    entry: ClaimedQueueEntry,
+    outcome: "done" | "retried" | "parked" | "deferred",
+    error?: unknown,
+  ): TickResult {
     this.#onEntrySettled({
       id: entry.id,
       queueKey: entry.queueKey,
-      outcome: "retried",
+      outcome,
       attempts: entry.attempts,
-      error,
+      ...(error === undefined ? {} : { error }),
     });
-    return { outcome: "retried", entry };
+    return { outcome, entry };
+  }
+
+  /**
+   * A settle the lease-owner fence rejected: this worker's lease had expired and the
+   * entry was re-claimed by another worker before it could settle. The other worker
+   * owns the outcome; this run's work is discarded (state-convergent sync makes the
+   * discarded write safe to re-run). Surfaced to `onError` for visibility.
+   */
+  #leaseLost(entry: ClaimedQueueEntry): TickResult {
+    this.#onError(new Error(`ordering-queue entry ${entry.id} lease lost before settle`));
+    return { outcome: "lease-lost", entry };
   }
 }
 

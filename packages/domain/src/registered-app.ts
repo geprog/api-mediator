@@ -28,6 +28,34 @@ export const appCapabilitiesSchema = z.object({
 export type AppCapabilities = z.infer<typeof appCapabilitiesSchema>;
 
 /**
+ * Per-app **outbound load-discipline ceilings** — the operational limits the
+ * shared Outbound Call Executor enforces across *all* traffic to this app
+ * (polling, backfill enumeration, sync writes, and Phase-5 adapter fan-out
+ * counted together — `docs/architecture/overview.md` *Outbound load discipline*;
+ * requirement OC-3). These are **operational configuration on the app
+ * registration**, not per-rule review decisions, and were deferred from Phase 1
+ * (Phase-1 README open question 10) to be added here as an additive field.
+ *
+ * Modeled as a single optional object (like `capabilities`): **absent** means the
+ * app declares no ceilings and the executor applies its configured defaults
+ * (README OC-3 resolution: "config-level defaults where omitted"). The three
+ * numbers are the concept's two ceilings made concrete:
+ *
+ * - `maxConcurrentRequests` — the **concurrency ceiling**: the most outbound calls
+ *   the executor may have in flight to this app at once.
+ * - `maxRequestsPerWindow` over `rateWindowMs` — the **request-rate ceiling**: at
+ *   most this many outbound calls may *start* per rolling window of this length.
+ *   A fixed window (count + length) is the deterministic representation choice; the
+ *   concept fixes the ceiling *inputs*, not the limiter algorithm.
+ */
+export const outboundLoadLimitsSchema = z.object({
+  maxConcurrentRequests: z.number().int().positive(),
+  maxRequestsPerWindow: z.number().int().positive(),
+  rateWindowMs: z.number().int().positive(),
+});
+export type OutboundLoadLimits = z.infer<typeof outboundLoadLimitsSchema>;
+
+/**
  * `baseUrl` is optional and its **absence is meaningful**: a consumer-only app
  * (one that registered only a `CONSUMER` spec) has no reachable base URL because
  * the mediator itself hosts its endpoint via the Adapter Engine.
@@ -50,6 +78,10 @@ export const registeredAppSchema = z.object({
   status: registeredAppStatusSchema,
   baseUrl: z.string().min(1).optional(),
   capabilities: appCapabilitiesSchema,
+  // Phase-4 additive field (OC-3): absent → the executor's configured defaults
+  // apply. Absence is meaningful and kept distinct from `undefined` exactly like
+  // `baseUrl` (persistence collapses a NULL column to an absent key).
+  outboundLimits: outboundLoadLimitsSchema.optional(),
   createdAt: z.date(),
 });
 export type RegisteredApp = z.infer<typeof registeredAppSchema>;

@@ -23,6 +23,7 @@ import type {
   ApiSpecStatus,
   AppCapabilities,
   ApprovedMappingStatus,
+  AuditLogStatus,
   AuditLogType,
   ConfirmableRef,
   ConflictPolicy,
@@ -38,6 +39,7 @@ import type {
   MappingProposalStatus,
   MappingVariant,
   OperationAction,
+  OutboundLoadLimits,
   ProposalElementRef,
   ProposalItemAlternative,
   RegisteredAppStatus,
@@ -227,6 +229,23 @@ export const mappingDecisionEnum = pgEnum("mapping_decision", [
 ] as const satisfies readonly MappingDecision[]);
 
 /**
+ * The `status` of a `sync-execution` (or `adapter-request`) `audit_log` row — the
+ * SD-4 per-record execution outcome vocabulary (`docs/architecture/data-model.md`
+ * `SyncEvent / AuditLog` `status`; requirement SD-4 / OC-5). Pinned to the
+ * `@mediator/domain` `AuditLogStatus` union; the `schema.spec.ts` parity test
+ * asserts the pg enum lists exactly the domain schema's options. NULL on a
+ * `mapping-decision` / `credential-access` / `poll-run` row (the column is
+ * nullable — a decision has no execution outcome).
+ */
+export const auditLogStatusEnum = pgEnum("audit_log_status", [
+  "success",
+  "failure",
+  "skipped-loop",
+  "skipped-policy",
+  "conflict",
+] as const satisfies readonly AuditLogStatus[]);
+
+/**
  * The lifecycle of a `mapping_detection_job` (below). This is an **infrastructure**
  * enum — a durability/scheduling concern, not a glossary entity — so it is defined
  * here rather than pinned to a `@mediator/domain` union: `pending` (enqueued, not
@@ -265,6 +284,13 @@ export const registeredApp = pgTable("registered_app", {
   // Nullable: absent for a consumer-only app whose endpoint the mediator hosts.
   baseUrl: text("base_url"),
   capabilities: jsonb("capabilities").$type<AppCapabilities>().notNull(),
+  // Phase-4 additive (OC-3): the per-app outbound concurrency + request-rate
+  // ceilings the shared Outbound Call Executor enforces across all traffic to
+  // this app. Nullable jsonb (like a NULL `base_url`): a NULL column is the
+  // domain **absent** `outboundLimits` key — the executor's configured defaults
+  // apply. Operational config on the registration, deferred from Phase 1
+  // (README open question 10).
+  outboundLimits: jsonb("outbound_limits").$type<OutboundLoadLimits>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -776,6 +802,21 @@ export const auditLog = pgTable(
     relatedItemId: uuid("related_item_id"),
     relatedMappingId: uuid("related_mapping_id"),
     details: text("details"),
+    // ── Phase-4 sync-execution columns (SD-4 / OC-5) ──────────────────────────
+    // A `sync-execution` row's per-record execution context, written once per
+    // resolved outbound call (OC-5 criterion 1). All nullable + loose (no FK),
+    // like the other `related_*` refs, so the audit row survives later deletion
+    // of the rule/link it references. NULL on non-execution row types.
+    // `status` is the execution outcome; `idempotency_key` is what OC-2's
+    // per-record dedup lookback queries by (indexed below); `payload_hash`,
+    // `related_rule_id`, `record_link_id`, `source_native_id` are the remaining
+    // SD-4 per-record fields. HASHES/IDS ONLY — never a live payload value.
+    status: auditLogStatusEnum("status"),
+    relatedRuleId: uuid("related_rule_id"),
+    recordLinkId: uuid("record_link_id"),
+    sourceNativeId: text("source_native_id"),
+    idempotencyKey: text("idempotency_key"),
+    payloadHash: text("payload_hash"),
     // ── Phase-4 credential-access columns (CD-3) ──────────────────────────────
     // The credential a `credential-access` row concerns + the app whose credential
     // it was. Loose (no FK), like the other `related_*` refs, so the audit row
@@ -800,6 +841,13 @@ export const auditLog = pgTable(
     // "the decision history for this proposal" / "for this mapping".
     index("audit_log_related_proposal_id_idx").on(table.relatedProposalId),
     index("audit_log_related_mapping_id_idx").on(table.relatedMappingId),
+    // OC-2's bounded-lookback dedup: "is there a prior successful sync-execution
+    // for this idempotency key within the retention window?" A partial index over
+    // the non-NULL keys keeps it tight — the vast majority of rows (decisions,
+    // credential accesses, skipped executions with no key) are not indexed.
+    index("audit_log_idempotency_key_idx")
+      .on(table.idempotencyKey, table.timestamp)
+      .where(sql`${table.idempotencyKey} IS NOT NULL`),
   ],
 );
 
@@ -1045,6 +1093,14 @@ export const orderingQueue = pgTable(
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     lastError: text("last_error"),
+    // Phase-4 retry-delay (OC-4 / OC-3): a **not-before** gate. NULL means "claim
+    // whenever the per-key order allows"; a set timestamp defers the entry until
+    // then, so a claim skips it while `available_at > now`. Set by the dispatcher
+    // on a failed-write retry (exponential backoff **inside** the per-record
+    // queue — OC-4 criterion 1) and on a load-discipline `defer` (a ceiling /
+    // `Retry-After` wait — OC-3 criterion 5) so the worker is freed to process
+    // other records instead of blocking the whole engine. Cleared on claim.
+    availableAt: timestamp("available_at", { withTimezone: true }),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
     // Stamped on each claim (observability); NULL until first claimed.
     claimedAt: timestamp("claimed_at", { withTimezone: true }),

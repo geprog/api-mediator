@@ -25,6 +25,7 @@ export {
   approvedMapping,
   approvedMappingStatusEnum,
   auditLog,
+  auditLogStatusEnum,
   auditLogTypeEnum,
   conflictPolicyEnum,
   credential,
