@@ -25,9 +25,12 @@ import type {
   ApprovedMappingStatus,
   AuditLogStatus,
   AuditLogType,
+  BackfillMode,
+  BackfillStatus,
   ConfirmableRef,
   ConflictPolicy,
   CredentialType,
+  DeletePropagation,
   GeneratedBy,
   GraphEdgeMetadata,
   GraphEdgeType,
@@ -52,6 +55,7 @@ import type {
   SyncFieldStateSide,
   SyncFieldStateStatus,
   SyncRuleStatus,
+  TargetDriftCheck,
   TombstoneReason,
   TransformConfig,
   TransformKind,
@@ -308,6 +312,30 @@ export const syncFieldStateStatusEnum = pgEnum("sync_field_state_status", [
   "active",
   "archived",
 ] as const satisfies readonly SyncFieldStateStatus[]);
+
+// ── Phase-4 SyncRule execution/policy enums (SD-1, pinned to @mediator/domain) ──
+
+export const deletePropagationEnum = pgEnum("delete_propagation", [
+  "ignore",
+  "propagate",
+] as const satisfies readonly DeletePropagation[]);
+
+export const targetDriftCheckEnum = pgEnum("target_drift_check", [
+  "none",
+  "read-before-write",
+] as const satisfies readonly TargetDriftCheck[]);
+
+export const backfillModeEnum = pgEnum("backfill_mode", [
+  "link-only",
+  "push",
+] as const satisfies readonly BackfillMode[]);
+
+export const backfillStatusEnum = pgEnum("backfill_status", [
+  "pending",
+  "running",
+  "completed",
+  "skipped",
+] as const satisfies readonly BackfillStatus[]);
 
 // ── Tables ───────────────────────────────────────────────────────────────────
 
@@ -926,6 +954,30 @@ export const syncRule = pgTable(
       .references(() => approvedMapping.id, { onDelete: "cascade" }),
     resourcePairRef: text("resource_pair_ref").notNull(),
     status: syncRuleStatusEnum("status").notNull(),
+    // ── Phase-4 SD-1 execution/policy columns ─────────────────────────────────
+    // Every column is **nullable with NO DB default** — the SD-1 `.optional()`
+    // discipline (`docs/domain/downstream-artifacts.ts`): a `.default()` here would
+    // make the mapper reconstruct a *present* value on a Phase-3 minimal-row rule
+    // (only the four columns above), whereas a disabled rule must carry **absent**
+    // execution state. The concept's defaults (`deletePropagation = ignore`,
+    // `targetDriftCheck = none`, `backfillStatus = pending`) are applied by the
+    // enablement/instantiation layer (BE-*), not the column. The `sync-rule` mapper
+    // collapses each NULL back to an absent domain key. Backward-compatible with the
+    // Phase-3 AI-1 insert, which sets none of them (they land NULL).
+    pollIntervalOverride: integer("poll_interval_override"),
+    pollOperationRef: text("poll_operation_ref"),
+    deletePropagation: deletePropagationEnum("delete_propagation"),
+    targetDriftCheck: targetDriftCheckEnum("target_drift_check"),
+    backfillMode: backfillModeEnum("backfill_mode"),
+    backfillStatus: backfillStatusEnum("backfill_status"),
+    // Live polling state, seeded at the transition to live polling (BE) and advanced
+    // atomically by the Poller (SP-5). `last_run_at` advances with the cursor;
+    // `cursor` is delta-only; `last_snapshot_ref` points at this rule's
+    // `poll_snapshot` row (full-fetch only).
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }),
+    cursor: text("cursor"),
+    lastSnapshotRef: uuid("last_snapshot_ref"),
   },
   (table) => [
     index("sync_rule_approved_mapping_id_idx").on(table.approvedMappingId),
@@ -934,6 +986,54 @@ export const syncRule = pgTable(
       table.approvedMappingId,
       table.resourcePairRef,
     ),
+    // The Scheduler's "which rules might be due to poll" scan: enabled rules only.
+    // Partial so the (eventually many) disabled rows are not indexed.
+    index("sync_rule_enabled_idx")
+      .on(table.status)
+      .where(sql`${table.status} = 'enabled'`),
+  ],
+);
+
+/**
+ * `poll_snapshot` — the per-record content-hash snapshot a full-fetch `SyncRule`
+ * diffs against (`docs/architecture/data-model.md` `SyncRule.lastSnapshotRef`;
+ * `docs/architecture/sync-engine.md` *Polling pull pipeline*, SP-2/SP-4/SP-5). One
+ * row per rule (the `sync_rule_id` UNIQUE index), holding the whole `native id →
+ * content hash` map as a single `jsonb` blob.
+ *
+ * **Why one jsonb blob per rule, not a row-per-native-id table.** The Poller loads
+ * the *entire* prior snapshot once per poll, diffs the complete fetch against it in
+ * memory, and rewrites the whole map — it never queries an individual native id
+ * from SQL, so per-row queryability buys the algorithm nothing. A blob makes the
+ * SP-5 "replace the snapshot" a single `UPDATE`, which is what lets the snapshot
+ * replacement and the `sync_rule` cursor/`last_run_at` advance commit in **one
+ * transaction** — the atomic advance SP-5 requires. `record_count`/`captured_at`
+ * stay first-class columns for cheap observability without deserializing the blob.
+ *
+ * `sync_rule_id` FKs `sync_rule` `ON DELETE CASCADE`: the snapshot is wholly owned
+ * by its rule. `sync_rule.last_snapshot_ref` points back at this row's `id` (set
+ * when the snapshot is first seeded), so a rule with a NULL `last_snapshot_ref` has
+ * no snapshot yet (a delta rule, or a full-fetch rule before its first complete
+ * fetch — whose first poll initializes it, see *What enablement seeds*).
+ */
+export const pollSnapshot = pgTable(
+  "poll_snapshot",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    syncRuleId: uuid("sync_rule_id")
+      .notNull()
+      .references(() => syncRule.id, { onDelete: "cascade" }),
+    // The native id → content-hash map from the last complete fetch.
+    entries: jsonb("entries").$type<Record<string, string>>().notNull(),
+    // Denormalized `Object.keys(entries).length` for observability (no blob parse).
+    recordCount: integer("record_count").notNull(),
+    // When the complete fetch this snapshot was captured from finished.
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // One snapshot per rule → the replace-in-place UPDATE key and the load lookup.
+    uniqueIndex("poll_snapshot_sync_rule_uq").on(table.syncRuleId),
   ],
 );
 

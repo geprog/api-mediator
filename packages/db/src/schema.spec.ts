@@ -7,8 +7,11 @@ import {
   approvedMappingStatusSchema,
   auditLogStatusSchema,
   auditLogTypeSchema,
+  backfillModeSchema,
+  backfillStatusSchema,
   conflictPolicySchema,
   credentialTypeSchema,
+  deletePropagationSchema,
   graphEdgeTypeSchema,
   mappingDecisionSchema,
   mappingPhaseSchema,
@@ -23,6 +26,7 @@ import {
   syncFieldStateSideSchema,
   syncFieldStateStatusSchema,
   syncRuleStatusSchema,
+  targetDriftCheckSchema,
   tombstoneReasonSchema,
   transformKindSchema,
 } from "@mediator/domain";
@@ -38,8 +42,11 @@ import {
   approvedMappingStatusEnum,
   auditLogStatusEnum,
   auditLogTypeEnum,
+  backfillModeEnum,
+  backfillStatusEnum,
   conflictPolicyEnum,
   credentialTypeEnum,
+  deletePropagationEnum,
   graphEdgeTypeEnum,
   mappingDecisionEnum,
   mappingPhaseEnum,
@@ -55,6 +62,7 @@ import {
   syncFieldStateSideEnum,
   syncFieldStateStatusEnum,
   syncRuleStatusEnum,
+  targetDriftCheckEnum,
   transformKindEnum,
 } from "./schema.js";
 
@@ -128,6 +136,10 @@ describe("pg enum ↔ domain parity", () => {
       syncFieldStateStatusEnum.enumValues,
       syncFieldStateStatusSchema.options,
     ],
+    ["delete_propagation", deletePropagationEnum.enumValues, deletePropagationSchema.options],
+    ["target_drift_check", targetDriftCheckEnum.enumValues, targetDriftCheckSchema.options],
+    ["backfill_mode", backfillModeEnum.enumValues, backfillModeSchema.options],
+    ["backfill_status", backfillStatusEnum.enumValues, backfillStatusSchema.options],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {
