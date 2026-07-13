@@ -1,28 +1,43 @@
+import { randomUUID } from "node:crypto";
+
+import type { RecordLink } from "@mediator/domain";
 import {
   closeDb,
   createDb,
   orderingQueue,
   OrderingQueueRepository,
+  recordLink,
+  RecordLinkRepository,
   resolveDatabaseUrl,
   runMigrations,
   type Database,
 } from "@mediator/db";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { HandoffGate } from "./ordering/handoff-gate.js";
 import { OrderingQueueDispatcher, type QueueHandler } from "./ordering-queue-dispatcher.js";
 
 /**
- * Live-database integration test for the `ordering_queue` OQ-1 claim discipline. The
- * `FOR UPDATE SKIP LOCKED` + per-key-lease semantics CANNOT be faked, so the guarantees
- * the `FakeOrderingQueue` unit tests assert against are re-proven here against REAL
- * Postgres + the `0011` migration:
+ * Live-database integration test for the `ordering_queue` OQ-1 claim discipline **and**
+ * the OQ-4 continuation handoff over it. The `FOR UPDATE SKIP LOCKED` + per-key-lease
+ * semantics CANNOT be faked, so the guarantees the `FakeOrderingQueue` unit tests assert
+ * against are re-proven here against REAL Postgres + the `0011` (+ `0013` record_link)
+ * migrations:
  *
  *  - **at most one active worker per key** while **different keys run in parallel**
  *    (OQ-1 criteria 1, 4) — driven by concurrent dispatcher workers;
  *  - **durable crash recovery** — an entry left `processing` by a dead worker (expired
  *    lease) is re-claimed and completes **exactly once** (OQ-1 criterion 3);
  *  - **enqueue order preserved per key under contention** (OQ-1 criterion 2);
- *  - the raw `SKIP LOCKED` claim never hands two workers the same key.
+ *  - the raw `SKIP LOCKED` claim never hands two workers the same key;
+ *  - **`OrderingQueueRepository.hasUndrainedEntries`** answers over the same
+ *    `status IN ('pending','processing')` predicate the claim uses (OQ-4 drain read);
+ *  - the **`HandoffGate` composed over the real claim** holds a link-keyed entry until
+ *    its establishing pre-link queue drains, WITHOUT regressing OQ-1's discipline.
+ *
+ * Both concerns live in one file on purpose: the integration suite shares one Postgres,
+ * and a `beforeEach` that truncates `ordering_queue` would cross-contaminate a second
+ * spec file running in parallel — one file keeps the tests serial.
  *
  * Requires the compose `postgres` service + a resolvable `DATABASE_URL`; excluded from
  * `pnpm verify`, run via `pnpm --filter @mediator/sync-engine test:integration`.
@@ -65,10 +80,12 @@ suite("Phase-4 ordering_queue OQ-1 integration (requires Postgres)", () => {
 
   beforeEach(async () => {
     await db.delete(orderingQueue);
+    await db.delete(recordLink);
   });
 
   afterAll(async () => {
     await db.delete(orderingQueue);
+    await db.delete(recordLink);
     await closeDb(db);
   });
 
@@ -342,7 +359,138 @@ suite("Phase-4 ordering_queue OQ-1 integration (requires Postgres)", () => {
     expect(await repo.markDone(id, "W2", new Date(T0.getTime() + 1_200))).toBe(true);
     expect((await repo.getById(id))?.status).toBe("done");
   });
+
+  // ── OQ-4 continuation handoff over the real claim ────────────────────────────
+
+  it("hasUndrainedEntries (OQ-4 drain read): true while pending/processing, false once terminal or absent", async () => {
+    const repo = new OrderingQueueRepository(db);
+
+    // Empty argument → false (nothing to wait for); an absent key → drained.
+    expect(await repo.hasUndrainedEntries([])).toBe(false);
+    expect(await repo.hasUndrainedEntries(["V"])).toBe(false);
+
+    const id = await repo.enqueue("V", { n: 1 });
+    expect(await repo.hasUndrainedEntries(["V"])).toBe(true); // pending
+    expect(await repo.hasUndrainedEntries(["absent", "V"])).toBe(true); // any-of
+
+    const claimed = await repo.claimNext({
+      now: T0,
+      leaseExpiresAt: new Date(T0.getTime() + 30_000),
+      owner: "W1",
+    });
+    expect(claimed?.id).toBe(id);
+    expect(await repo.hasUndrainedEntries(["V"])).toBe(true); // processing
+
+    expect(await repo.markDone(id, "W1", new Date(T0.getTime() + 1_000))).toBe(true);
+    expect(await repo.hasUndrainedEntries(["V"])).toBe(false); // done → drained
+
+    // A parked (terminal) entry never holds the establishing queue open.
+    const parkId = await repo.enqueue("V", { n: 2 });
+    await repo.claimNext({
+      now: T0,
+      leaseExpiresAt: new Date(T0.getTime() + 30_000),
+      owner: "W1",
+    });
+    expect(await repo.park(parkId, "dead", "W1", new Date(T0.getTime() + 2_000))).toBe(true);
+    expect(await repo.hasUndrainedEntries(["V"])).toBe(false);
+  });
+
+  it("continuation handoff: a link-keyed entry runs only after its establishing queue drains", async () => {
+    const repo = new OrderingQueueRepository(db);
+    const links = new RecordLinkRepository(db);
+
+    const link = makeLink({ establishingQueueKey: { kind: "identity-value", value: "V" } });
+    await links.insert(link);
+
+    // Link-keyed entry enqueued FIRST (lower enqueue_seq → the gate must actively hold
+    // it), with an establishing pre-link entry still queued under the identity value.
+    await repo.enqueue(link.id, { which: "link" });
+    await repo.enqueue("V", { which: "establishing" });
+
+    const order: string[] = [];
+    const handler: QueueHandler = async (ctx) => {
+      order.push(String(ctx.payload.which));
+      // Hold the window so a (wrongly) parallel link start would be observable.
+      await sleep(40);
+    };
+
+    const gate = new HandoffGate(repo, repo, links, { recheckDelayMs: 20 });
+    const dispatcher = new OrderingQueueDispatcher(gate, handler, {
+      concurrency: 1,
+      leaseDurationMs: 60_000,
+      idlePollIntervalMs: 5,
+    });
+
+    dispatcher.start();
+    await waitUntil(() => order.length === 2, 20_000);
+    await dispatcher.stop();
+
+    // The link-keyed entry began strictly AFTER the establishing queue drained.
+    expect(order).toStrictEqual(["establishing", "link"]);
+    expect(await repo.listByStatus("done")).toHaveLength(2);
+    expect(await repo.listByStatus("pending")).toHaveLength(0);
+    expect(await repo.listByStatus("processing")).toHaveLength(0);
+    // The gated wait was attempt-neutral: the link entry took exactly one attempt.
+    const doneLink = (await repo.listByStatus("done")).find((e) => e.queueKey === link.id);
+    expect(doneLink?.attempts).toBe(1);
+  });
+
+  it("continuation handoff: a both-native-id-queues manual link waits for BOTH native-id queues", async () => {
+    const repo = new OrderingQueueRepository(db);
+    const links = new RecordLinkRepository(db);
+
+    const link = makeLink({
+      establishedBy: "manual",
+      establishingQueueKey: { kind: "both-native-id-queues" },
+      appANativeId: "na",
+      appBNativeId: "nb",
+    });
+    await links.insert(link);
+
+    await repo.enqueue(link.id, { which: "link" });
+    await repo.enqueue("na", { which: "na" });
+    await repo.enqueue("nb", { which: "nb" });
+
+    const order: string[] = [];
+    const handler: QueueHandler = async (ctx) => {
+      order.push(String(ctx.payload.which));
+      await sleep(20);
+    };
+
+    const gate = new HandoffGate(repo, repo, links, { recheckDelayMs: 15 });
+    const dispatcher = new OrderingQueueDispatcher(gate, handler, {
+      concurrency: 1,
+      leaseDurationMs: 60_000,
+      idlePollIntervalMs: 5,
+    });
+
+    dispatcher.start();
+    await waitUntil(() => order.length === 3, 20_000);
+    await dispatcher.stop();
+
+    // The link entry is last — it opened only after BOTH native-id queues drained.
+    expect(order[2]).toBe("link");
+    expect(order.slice(0, 2).sort()).toStrictEqual(["na", "nb"]);
+    expect(await repo.listByStatus("done")).toHaveLength(3);
+  });
 });
+
+function makeLink(overrides: Partial<RecordLink> = {}): RecordLink {
+  return {
+    id: randomUUID(),
+    appAId: randomUUID(),
+    appANativeId: "na",
+    appBId: randomUUID(),
+    appBNativeId: "nb",
+    resourcePairRef: "pair::customers",
+    establishedBy: "identity-match",
+    status: "active",
+    establishingQueueKey: { kind: "identity-value", value: "a@x.com" },
+    createdAt: T0,
+    tombstonedAt: null,
+    ...overrides,
+  };
+}
 
 function orderedCount(orderPerKey: Map<string, number[]>): number {
   let count = 0;

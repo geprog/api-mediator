@@ -1,6 +1,7 @@
 import type {
   ClaimedQueueEntry,
   ClaimParams,
+  OrderingQueueDrainQuery,
   OrderingQueueEnqueueOps,
   OrderingQueueEntry,
   OrderingQueueStatus,
@@ -50,10 +51,27 @@ interface FakeEntry {
  * This is an in-memory implementation, not "test-only glue": it is the reference the
  * downstream OQ-2/OQ-3/OQ-4 and pipeline slices reuse to unit-test against the queue.
  */
-export class FakeOrderingQueue implements OrderingQueueEnqueueOps, OrderingQueueWorkerOps {
+export class FakeOrderingQueue
+  implements OrderingQueueEnqueueOps, OrderingQueueWorkerOps, OrderingQueueDrainQuery
+{
   readonly #entries: FakeEntry[] = [];
   #seq = 0;
   #ids = 0;
+
+  /**
+   * The OQ-4 handoff read (`OrderingQueueDrainQuery`): is any of `queueKeys` still
+   * non-terminal? Mirrors the real repo's existence query over the **exact same**
+   * `pending`/`processing` predicate the claim uses, so a link-keyed entry's gate and
+   * the claim agree on "drained".
+   */
+  public hasUndrainedEntries(queueKeys: readonly string[]): Promise<boolean> {
+    const keys = new Set(queueKeys);
+    const undrained = this.#entries.some(
+      (entry) =>
+        keys.has(entry.queueKey) && (entry.status === "pending" || entry.status === "processing"),
+    );
+    return Promise.resolve(undrained);
+  }
 
   public enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string> {
     this.#seq += 1;

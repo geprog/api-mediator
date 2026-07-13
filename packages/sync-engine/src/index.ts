@@ -29,6 +29,28 @@ export {
 // the reference the OQ-2/OQ-3/OQ-4 + pipeline slices unit-test against.
 export { FakeOrderingQueue } from "./fake-ordering-queue.js";
 
+// ── Ordering-queue keying + continuation handoff (OQ-2 / OQ-3 / OQ-4) ─────────
+
+// OQ-2 / OQ-3: what the opaque queue_key IS for a change (link id → identity value →
+// native id), resolved by the cheap pre-enqueue lookup SP calls before enqueue.
+export {
+  QueueKeyResolver,
+  type ActiveRecordLinkLookup,
+  type QueueKeyBasis,
+  type QueueKeyChange,
+  type QueueKeyContext,
+  type ResolvedQueueKey,
+} from "./ordering/queue-key-resolver.js";
+
+// OQ-4: the continuation handoff — a decorator over the OQ-1 worker ops that holds a
+// link-keyed entry until its establishing pre-link queue drains (one record, one queue).
+export {
+  establishingQueueKeysOf,
+  HandoffGate,
+  type EstablishingQueueKeyLookup,
+  type HandoffGateOptions,
+} from "./ordering/handoff-gate.js";
+
 // ── Identity Resolution — the pipeline's first stage (RL-1..RL-5) ─────────────
 
 export {

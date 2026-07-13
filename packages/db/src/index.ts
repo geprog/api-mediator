@@ -151,6 +151,7 @@ export {
   type DetectionJobWorkerOps,
   type DownstreamArtifactOps,
   type MappingArtifacts,
+  type OrderingQueueDrainQuery,
   type OrderingQueueEnqueueOps,
   type OrderingQueueEntry,
   type OrderingQueueWorkerOps,
