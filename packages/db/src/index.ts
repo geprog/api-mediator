@@ -170,4 +170,5 @@ export {
   type RecordLinkStore,
   type SyncFieldStateStore,
   type SyncRuleAdvance,
+  type SyncRuleEnableTransition,
 } from "./repositories/index.js";

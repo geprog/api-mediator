@@ -105,3 +105,42 @@ export {
   type SyncPipelineHandlerDeps,
   type SyncPipelineHandlerOptions,
 } from "./sync-pipeline-handler.js";
+
+// The Phase-4 initial-backfill runner — link-only (BE-4) + push (BE-5), enumerating
+// the source via collectionReadRef and reusing RL/seeder/EP/OC (docs/architecture/
+// sync-engine.md Initial backfill; docs/requirements/phase-4-backfill-enablement.md).
+export {
+  BackfillRunner,
+  FakeBackfillMetrics,
+  type BackfillCounts,
+  type BackfillFieldStateReader,
+  type BackfillIdentityResolution,
+  type BackfillLoopPrevention,
+  type BackfillMetrics,
+  type BackfillOutbound,
+  type BackfillRecordNote,
+  type BackfillRunInput,
+  type BackfillRunResult,
+  type BackfillRunnerDeps,
+  type BackfillRunnerOptions,
+  type BackfillSeeder,
+  type LinkOnlyBackfillContext,
+  type PushBackfillContext,
+  type SideField,
+} from "./backfill-runner.js";
+
+// The Phase-4 enable orchestration — the enable action: gate → at-most-one-push →
+// status transitions → backfill → deliberately-early go-live seeding (BE-3/BE-5.3/BE-6).
+export {
+  RuleEnabler,
+  FakeSyncRuleEnableStore,
+  type BackfillRunnerPort,
+  type CounterpartBackfillModeLookup,
+  type EnableBackfillOutcome,
+  type EnableRuleInput,
+  type EnableRuleResult,
+  type PollSeedDescriptor,
+  type RuleEnablerDeps,
+  type RuleEnablerOptions,
+  type SyncRuleEnableStore,
+} from "./enable-rule.js";
