@@ -4,6 +4,7 @@ import type {
   WithCredentialResult,
 } from "@mediator/credentials";
 import type { FieldMapping, RecordLink, SyncFieldState } from "@mediator/domain";
+import { stripUndefined } from "@mediator/domain";
 import {
   buildChangePayload,
   ConflictDetectionStage,
@@ -691,6 +692,37 @@ describe("SyncPipelineHandler — Conflict Detection write path (flow 3.4–3.5)
     expect(h.protocol.requests[0]?.body).toEqual({ name: "New" });
     // Source-wins still records a conflict (nothing silently lost), then the write succeeds.
     expect(statusesOf(h)).toEqual(["conflict", "success"]);
+  });
+});
+
+// ── Create-only rule: an observed update is skipped-policy, never dead-lettered ─
+
+describe("SyncPipelineHandler — create-only rule (no approved update operation)", () => {
+  it("an observed update records skipped-policy and settles the queue entry DONE (never dead-lettered)", async () => {
+    const h = setup();
+    await insertActiveLink(h.links);
+    // A create-only rule: the resolved context carries no `updateOperation`.
+    h.loader = () => stripUndefined({ ...baseContext(), updateOperation: undefined });
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "Old" }),
+    ]);
+    const queue = new FakeOrderingQueue();
+    await queue.enqueue(LINK_ID, buildChangePayload(updateChange({ email: "e@x", name: "New" })));
+
+    const dispatcher = new OrderingQueueDispatcher(queue, h.handler.handle, {
+      classifyFailure: classifyOutboundFailure,
+      clock: () => T0,
+      maxAttempts: 5,
+    });
+    const result = await dispatcher.runOnce();
+
+    // Recorded, visible, and DONE — not parked, so a later edit can still sync.
+    expect(result.outcome).toBe("done");
+    expect(queue.listByStatus("parked")).toHaveLength(0);
+    expect(h.protocol.requests).toHaveLength(0); // no OC call
+    expect(statusesOf(h)).toEqual(["skipped-policy"]);
+    expect(h.events.all()[0]?.details).toContain("create-only rule");
   });
 });
 

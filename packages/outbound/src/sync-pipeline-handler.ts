@@ -340,7 +340,10 @@ export class SyncPipelineHandler {
       case "no-link-delete":
         // A delete of a record the mediator never linked — nothing to route or
         // tombstone. No stage owns this event, so the handler records it. Done.
-        await this.#recordNoLinkDelete(change);
+        await this.#recordSkippedPolicy(
+          change,
+          "delete of a record with no active RecordLink — nothing to route or tombstone",
+        );
         return;
       case "severed-tombstone":
       case "straight-create":
@@ -444,6 +447,24 @@ export class SyncPipelineHandler {
     context: SyncPipelineContext,
     link: RecordLink,
   ): Promise<void> {
+    // A **create-only** rule (no approved `action = update` operation) records an
+    // observed update as `skipped-policy` — visible, never silent — the same opt-in
+    // shape as create / delete propagation (`docs/architecture/sync-engine.md` *Change
+    // types*; `docs/architecture/data-model.md`). This is the ONLY gate for a
+    // create-only rule: unlike create (gated by RL's `hasApprovedCreateOperation`) and
+    // delete (guaranteed an op by enablement), the update path has no upstream gate, and
+    // this also covers the identity-match downgrade (a create RL resolved against a
+    // pre-existing target → an effective update on a create-only rule). It must NOT
+    // dead-letter — a park would re-park on every subsequent edit forever.
+    if (context.updateOperation === undefined) {
+      await this.#recordSkippedPolicy(
+        change,
+        "no approved action=update OperationMapping — observed update on a create-only rule not propagated",
+        link.id,
+      );
+      return;
+    }
+
     const now = this.#clock();
     const sourceSide = sideOf(change, context.resolution.appAId);
     const targetSide = opposite(sourceSide);
@@ -618,7 +639,9 @@ export class SyncPipelineHandler {
         observedAt: now,
         observedChangeTimestamp: sourceChangeTs,
         lastWrittenByMappingId: existing?.lastWrittenByMappingId,
-        status: "active" as const,
+        // Preserve an existing row's status — never resurrect an `archived` source row
+        // to `active`; a fresh (absent) row defaults to `active`.
+        status: existing?.status ?? "active",
       });
     });
     if (rows.length > 0) {
@@ -772,7 +795,11 @@ export class SyncPipelineHandler {
   }
 
   /** Record the one `SyncEvent` no stage owns — a delete of a record with no active link. */
-  async #recordNoLinkDelete(change: DetectedChange): Promise<void> {
+  async #recordSkippedPolicy(
+    change: DetectedChange,
+    details: string,
+    recordLinkId?: string,
+  ): Promise<void> {
     const trace = this.#readTraceContext();
     const entry: AuditLogEntry = stripUndefined({
       id: this.#newId(),
@@ -783,7 +810,8 @@ export class SyncPipelineHandler {
       relatedMappingId: change.mappingId,
       sourceNativeId: change.sourceNativeId,
       originAppId: change.sourceAppId,
-      details: "delete of a record with no active RecordLink — nothing to route or tombstone",
+      recordLinkId,
+      details,
       traceId: trace?.traceId,
       spanId: trace?.spanId,
       timestamp: this.#clock(),
