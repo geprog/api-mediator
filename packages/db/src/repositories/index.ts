@@ -24,6 +24,12 @@ export { ApprovedMappingRepository } from "./approved-mapping.js";
 export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-artifacts.js";
 export { AuditLogRepository } from "./audit-log.js";
 export {
+  RecordLinkRepository,
+  type RecordLinkSideRef,
+  type RecordLinkStore,
+} from "./record-link.js";
+export { SyncFieldStateRepository, type SyncFieldStateStore } from "./sync-field-state.js";
+export {
   DownstreamArtifactRepository,
   type DownstreamArtifactOps,
 } from "./downstream-artifacts.js";

@@ -417,6 +417,12 @@ importers:
       '@mediator/db':
         specifier: workspace:*
         version: link:../db
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@mediator/transform':
+        specifier: workspace:*
+        version: link:../transform
     devDependencies:
       '@types/node':
         specifier: 24.13.3

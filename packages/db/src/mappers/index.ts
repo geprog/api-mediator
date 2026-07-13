@@ -81,6 +81,18 @@ export {
   type SyncRuleRow,
 } from "./sync-rule.js";
 export {
+  mapRecordLinkRow,
+  toRecordLinkInsert,
+  type RecordLinkInsert,
+  type RecordLinkRow,
+} from "./record-link.js";
+export {
+  mapSyncFieldStateRow,
+  toSyncFieldStateInsert,
+  type SyncFieldStateInsert,
+  type SyncFieldStateRow,
+} from "./sync-field-state.js";
+export {
   mapAdapterEndpointRow,
   toAdapterEndpointInsert,
   type AdapterEndpointInsert,

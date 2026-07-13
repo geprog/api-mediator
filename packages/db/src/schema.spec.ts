@@ -16,9 +16,14 @@ import {
   mappingProposalStatusSchema,
   mappingVariantSchema,
   operationActionSchema,
+  recordLinkEstablishedBySchema,
+  recordLinkStatusSchema,
   registeredAppStatusSchema,
   reviewStateSchema,
+  syncFieldStateSideSchema,
+  syncFieldStateStatusSchema,
   syncRuleStatusSchema,
+  tombstoneReasonSchema,
   transformKindSchema,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
@@ -42,8 +47,13 @@ import {
   mappingProposalStatusEnum,
   mappingVariantEnum,
   operationActionEnum,
+  recordLinkEstablishedByEnum,
+  recordLinkStatusEnum,
+  recordLinkTombstoneReasonEnum,
   registeredAppStatusEnum,
   reviewStateEnum,
+  syncFieldStateSideEnum,
+  syncFieldStateStatusEnum,
   syncRuleStatusEnum,
   transformKindEnum,
 } from "./schema.js";
@@ -101,6 +111,23 @@ describe("pg enum ↔ domain parity", () => {
       adapterBindingStatusSchema.options,
     ],
     ["graph_edge_type", graphEdgeTypeEnum.enumValues, graphEdgeTypeSchema.options],
+    [
+      "record_link_established_by",
+      recordLinkEstablishedByEnum.enumValues,
+      recordLinkEstablishedBySchema.options,
+    ],
+    ["record_link_status", recordLinkStatusEnum.enumValues, recordLinkStatusSchema.options],
+    [
+      "record_link_tombstone_reason",
+      recordLinkTombstoneReasonEnum.enumValues,
+      tombstoneReasonSchema.options,
+    ],
+    ["sync_field_state_side", syncFieldStateSideEnum.enumValues, syncFieldStateSideSchema.options],
+    [
+      "sync_field_state_status",
+      syncFieldStateStatusEnum.enumValues,
+      syncFieldStateStatusSchema.options,
+    ],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {

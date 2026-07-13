@@ -16,7 +16,9 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@mediator/db": "workspace:*"
+    "@mediator/db": "workspace:*",
+    "@mediator/domain": "workspace:*",
+    "@mediator/transform": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
