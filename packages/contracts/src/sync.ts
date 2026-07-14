@@ -447,3 +447,43 @@ export const replayParkedWriteResponseSchema = z.object({
   outcome: z.literal("reactivated"),
 });
 export type ReplayParkedWriteResponse = z.infer<typeof replayParkedWriteResponseSchema>;
+
+// ── Deterministic poll trigger (SP-5 hook — TEST/DEV-ONLY) ────────────────────
+
+/**
+ * The outcome of one deterministic poll cycle (SP-5), mirroring the sync-engine
+ * `PollRunOutcome` union at the wire boundary:
+ *  - **`completed`** — the run detected + durably enqueued changes and advanced the
+ *    cursor/snapshot/`lastRunAt`. It carries the `mode` (delta/full-fetch) and
+ *    `enqueuedCount` (0 on a no-change poll) — a **count only**, never the enqueued
+ *    payloads/queue keys, which can hold live identity-key values
+ *    (`docs/architecture/security.md`).
+ *  - **`aborted`** — a page/delta read failed (SP-4): no enqueue, no advance. `reason`
+ *    is the non-secret failure summary (same class as an audit-log `lastError`).
+ *  - **`skipped`** — the rule is not pollable right now (an unconfirmed ref backstop);
+ *    `reason` is the machine-readable not-pollable reason.
+ *
+ * This carries **no** live field value and **no** credential material.
+ */
+export const pollRunOutcomeDtoSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("completed"),
+    mode: z.enum(["delta", "full-fetch"]),
+    enqueuedCount: z.number().int().nonnegative(),
+  }),
+  z.object({ kind: z.literal("aborted"), reason: z.string() }),
+  z.object({ kind: z.literal("skipped"), reason: z.string() }),
+]);
+export type PollRunOutcomeDto = z.infer<typeof pollRunOutcomeDtoSchema>;
+
+/**
+ * `POST /api/sync-rules/:id/poll` response (SP-5 poll-trigger hook — registered ONLY
+ * when the test-only `sync.testPollTrigger` flag is set). A `completed`/`aborted`
+ * outcome is 200; a `skipped` (ineligible) outcome is 4xx with this body; a missing
+ * rule is a 404 via the error envelope.
+ */
+export const triggerPollResponseSchema = z.object({
+  ruleId: z.string(),
+  outcome: pollRunOutcomeDtoSchema,
+});
+export type TriggerPollResponse = z.infer<typeof triggerPollResponseSchema>;

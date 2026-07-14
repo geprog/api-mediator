@@ -5,13 +5,18 @@ import type {
   EnablementDegradationDto,
   EnablementRequirementDto,
   ParkedConflictDto,
+  PollRunOutcomeDto,
   RecordLinkDto,
   SyncEventDto,
   SyncRuleStatusDto,
 } from "@mediator/contracts";
 import type { ParkedWriteEntry } from "@mediator/db";
 import type { AuditLogEntry, ParkedConflict, RecordLink } from "@mediator/domain";
-import type { EnablementDegradation, EnablementRequirement } from "@mediator/sync-engine";
+import type {
+  EnablementDegradation,
+  EnablementRequirement,
+  PollRunOutcome,
+} from "@mediator/sync-engine";
 
 import type {
   AmbiguousMatchView,
@@ -179,6 +184,22 @@ export function toDeadLetterWriteDto(entry: ParkedWriteEntry): DeadLetterWriteDt
     parkedAt: entry.parkedAt !== null ? entry.parkedAt.toISOString() : null,
     enqueuedAt: entry.enqueuedAt.toISOString(),
   };
+}
+
+/**
+ * A `PollRunOutcome` (engine) → the SP-5 poll-trigger wire shape. `completed` projects
+ * `mode` + the enqueued **count** (never the enqueued payloads/queue keys); `aborted`/
+ * `skipped` project their non-secret reason. No live value, no credential material.
+ */
+export function toPollRunOutcomeDto(outcome: PollRunOutcome): PollRunOutcomeDto {
+  switch (outcome.kind) {
+    case "completed":
+      return { kind: "completed", mode: outcome.mode, enqueuedCount: outcome.enqueued.length };
+    case "aborted":
+      return { kind: "aborted", reason: outcome.reason };
+    case "skipped":
+      return { kind: "skipped", reason: outcome.reason };
+  }
 }
 
 /** An `AmbiguousMatchView` → the SA-3.3 queue wire shape. Ids only. */

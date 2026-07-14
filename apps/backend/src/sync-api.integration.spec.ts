@@ -322,6 +322,7 @@ function testConfig(url: string): AppConfig {
     credentials: { masterKey: Buffer.alloc(32, 7) },
     registration: { defaultPollInterval: 60_000 },
     auth: { accounts: [...TEST_OPERATOR_ACCOUNTS] },
+    sync: { testPollTrigger: false },
   };
 }
 

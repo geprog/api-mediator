@@ -34,6 +34,7 @@ import {
   type EnablementInput,
   type EnablementRequirement,
   type ManualLinkParams,
+  type PollRunOutcome,
   type SingleRecordReadResult,
 } from "@mediator/sync-engine";
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
@@ -82,6 +83,13 @@ export interface SyncOperatorEngine {
     options?: { readonly backfillSkipped?: boolean },
   ): Promise<EnableRuleGateResult>;
   disableRule(ruleId: string): Promise<void>;
+  /**
+   * SP-5 — the deterministic poll-trigger hook: run exactly one poll cycle for a rule
+   * (detect → enqueue → advance). Exposed here so the TEST/DEV-ONLY poll-trigger route
+   * can drive a sync round without the Scheduler's wall clock. `SyncBackground` satisfies
+   * this structurally.
+   */
+  pollOnce(ruleId: string): Promise<PollRunOutcome>;
   readonly identityResolution: {
     linkManually(params: ManualLinkParams): Promise<RecordLink>;
     unlink(linkId: string): Promise<void>;
@@ -435,6 +443,24 @@ export class SyncOperatorService {
       }),
     );
     return this.#reload(ruleId);
+  }
+
+  /**
+   * SP-5 — the deterministic poll-trigger hook, exposed for the **TEST/DEV-ONLY**
+   * poll-trigger endpoint (its route is registered only when `sync.testPollTrigger` is
+   * set). Runs exactly one poll cycle for the rule (detect → enqueue → advance) and
+   * returns its {@link PollRunOutcome}; the running ordering-queue worker then processes
+   * the enqueued changes, so a single trigger drives a full deterministic sync step. A
+   * missing rule is a 404 (never re-implements polling — it delegates to the engine's
+   * seam). Not attributed as an operator action: this is a test seam, not concept
+   * behavior, and the poll run records its own `SyncEvent`s through the pipeline as usual.
+   */
+  public async triggerPoll(ruleId: string): Promise<PollRunOutcome> {
+    const rule = await this.#syncRules.getById(ruleId);
+    if (rule === undefined) {
+      throw new NotFoundError(`Sync rule ${ruleId} not found.`);
+    }
+    return this.#sync.pollOnce(ruleId);
   }
 
   // ── SA-3: manual link / unlink + ambiguous queue ───────────────────────────

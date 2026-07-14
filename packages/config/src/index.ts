@@ -127,6 +127,25 @@ export interface AuthConfig {
   readonly accounts: readonly OperatorAccount[];
 }
 
+/**
+ * Sync Engine configuration.
+ *
+ * `testPollTrigger` gates a **test/dev-only** HTTP affordance: when true the
+ * operator API registers `POST /api/sync-rules/:id/poll`, which forces exactly one
+ * deterministic poll cycle for a rule (detect → enqueue → advance). The SU-6
+ * capstone e2e drives the running backend over HTTP and cannot cleanly assert
+ * "no echo / no duplicate write" against the Scheduler's wall-clock interval, so it
+ * triggers a poll on demand instead (the SP-5 poll-trigger hook — a test seam, not
+ * concept behavior; see `docs/requirements/phase-4-scheduler-poller.md`).
+ *
+ * It is **not** an operator feature and MUST stay off (the default) in production
+ * and dev: with the flag false/unset the route is not registered at all, so a
+ * request 404s. Only the e2e's backend environment sets it true.
+ */
+export interface SyncConfig {
+  readonly testPollTrigger: boolean;
+}
+
 export interface AppConfig {
   readonly http: HttpConfig;
   readonly database: DatabaseConfig;
@@ -135,6 +154,7 @@ export interface AppConfig {
   readonly credentials: CredentialsConfig;
   readonly registration: RegistrationConfig;
   readonly auth: AuthConfig;
+  readonly sync: SyncConfig;
 }
 
 /** Thrown by {@link loadConfig} when the environment fails validation. */
@@ -339,6 +359,12 @@ const envSchema = z
     // (never a plaintext password). Structure is validated by the superRefine
     // below so a misconfigured value fails fast at startup.
     OPERATOR_ACCOUNTS: z.string({ error: OPERATOR_ACCOUNTS_MESSAGE }),
+
+    // Sync Engine. SYNC_TEST_POLL_TRIGGER gates the TEST/DEV-ONLY deterministic
+    // poll-trigger endpoint (POST /api/sync-rules/:id/poll — the SP-5 hook the SU-6
+    // e2e drives). Default false — it MUST stay off in production and dev, where the
+    // route is then not registered at all (a request 404s); only the e2e sets it true.
+    SYNC_TEST_POLL_TRIGGER: booleanFromEnv.default(false),
   })
   .superRefine((env, ctx) => {
     // When OPERATOR_ACCOUNTS itself failed type validation (missing), the field
@@ -412,6 +438,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
     credentials: toCredentialsConfig(raw),
     registration: { defaultPollInterval: raw.MEDIATOR_DEFAULT_POLL_INTERVAL_MS },
     auth: toAuthConfig(raw),
+    sync: { testPollTrigger: raw.SYNC_TEST_POLL_TRIGGER },
   };
 }
 
@@ -423,6 +450,7 @@ function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.credentials);
   Object.freeze(config.registration);
   Object.freeze(config.auth);
+  Object.freeze(config.sync);
   Object.freeze(config.auth.accounts);
   for (const account of config.auth.accounts) {
     Object.freeze(account);

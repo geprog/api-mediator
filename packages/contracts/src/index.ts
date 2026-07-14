@@ -99,6 +99,7 @@ export {
   fieldConflictPolicyDtoSchema,
   parkedConflictDtoSchema,
   parkedConflictListResponseSchema,
+  pollRunOutcomeDtoSchema,
   pollerLagDtoSchema,
   recordLinkDtoSchema,
   replayParkedWriteResponseSchema,
@@ -111,6 +112,7 @@ export {
   syncRuleResourcePairDtoSchema,
   syncRuleResourceSideDtoSchema,
   syncRuleStatusDtoSchema,
+  triggerPollResponseSchema,
   unlinkRecordResponseSchema,
   type AmbiguousMatchDto,
   type AmbiguousMatchListResponse,
@@ -128,6 +130,7 @@ export {
   type FieldConflictPolicyDto,
   type ParkedConflictDto,
   type ParkedConflictListResponse,
+  type PollRunOutcomeDto,
   type PollerLagDto,
   type RecordLinkDto,
   type ReplayParkedWriteResponse,
@@ -140,6 +143,7 @@ export {
   type SyncRuleResourcePairDto,
   type SyncRuleResourceSideDto,
   type SyncRuleStatusDto,
+  type TriggerPollResponse,
   type UnlinkRecordResponse,
 } from "./sync.js";
 
