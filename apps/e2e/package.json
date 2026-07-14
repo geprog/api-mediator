@@ -9,6 +9,7 @@
   },
   "devDependencies": {
     "@mediator/contracts": "workspace:*",
+    "@mediator/credentials": "workspace:*",
     "@mediator/db": "workspace:*",
     "@mediator/domain": "workspace:*",
     "@playwright/test": "1.61.1",

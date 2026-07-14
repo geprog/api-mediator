@@ -62,8 +62,12 @@ export const OPERATOR_ACCOUNTS_ENV: string =
   "operator:operator:scrypt$16384$8$1$64$w2bnVOl/1VWnBYFUjy/K7A==$lLv52mSP/+MG2mV3vG5ES77GmXaUt9di9UO7ll5GOEGMI8goQvbZpATut+xQH/ejoFD7ON6HKI/HcZXO+YIJMA==," +
   "viewer:viewer:scrypt$16384$8$1$64$rxlWdhOmYgMWJOo400l5UA==$8RnU5a8lW/XwF3qXcn7oNYHuxdxzhEWXjmVGbuweFupc4jHIHdocfl4uj0YnxpX/+qccycTHZ2HTewwHqZjvIA==";
 
-/** The dev-sample Credential Store master key (32 bytes base64) — not a real secret. */
-const CREDENTIAL_MASTER_KEY = "nuaKgT2sF/l6wkVY8+Qb8bMGHE0T+wee0CxRJCAzNCE=";
+/**
+ * The dev-sample Credential Store master key (32 bytes base64) — not a real secret.
+ * Exported so the SU-6 landscape seed can encrypt the scenario tokens under the **same**
+ * key the backend boots with (they must match, or `withCredential` cannot decrypt).
+ */
+export const CREDENTIAL_MASTER_KEY = "nuaKgT2sF/l6wkVY8+Qb8bMGHE0T+wee0CxRJCAzNCE=";
 
 /**
  * The full backend environment for the Playwright `webServer`. Every variable
@@ -80,6 +84,11 @@ export function backendEnv(): Record<string, string> {
     OPERATOR_ACCOUNTS: OPERATOR_ACCOUNTS_ENV,
     // Telemetry export disabled so the run has no dependency on the Grafana container.
     OTEL_EXPORTER_OTLP_ENDPOINT: "",
+    // TEST/DEV-ONLY: register the deterministic poll-trigger endpoint
+    // (`POST /api/sync-rules/:id/poll`) the SU-6 capstone landscape journey drives one
+    // poll cycle at a time through. Off in production/dev; the route 404s without it.
+    // Registering it is inert for the non-landscape journeys (they never call it).
+    SYNC_TEST_POLL_TRIGGER: "true",
     // LLM config: valid but unused (the journey replays a seeded proposal).
     MAPPING_LLM_PROVIDER: "ollama",
     OLLAMA_BASE_URL: "http://localhost:11434",

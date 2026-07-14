@@ -126,6 +126,9 @@ importers:
       '@mediator/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@mediator/credentials':
+        specifier: workspace:*
+        version: link:../../packages/credentials
       '@mediator/db':
         specifier: workspace:*
         version: link:../../packages/db

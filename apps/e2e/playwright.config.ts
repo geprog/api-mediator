@@ -44,6 +44,18 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      // The default project runs every journey EXCEPT the landscape-gated SU-6 capstone,
+      // which needs the running `scenarios/` landscape (Gitea + Vikunja) and so lives in
+      // its own project below — keeping a plain `test:e2e` green with only compose Postgres.
+      testIgnore: /\.landscape\.spec\.ts$/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // The SU-6 capstone: the real sync round against the running scenario-1 landscape.
+      // Skips itself (never fails) when Docker/the landscape is unavailable. Run it with the
+      // landscape up: `playwright test --project=scenario-1-sync`.
+      name: "scenario-1-sync",
+      testMatch: /\.landscape\.spec\.ts$/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],
