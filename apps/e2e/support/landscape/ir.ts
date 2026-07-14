@@ -97,12 +97,11 @@ export const GITEA_ISSUES_GROUP: IrResourceGroup = {
     // The param-free collection read the source poll + target identity lookup use.
     op("giteaSearchIssues", "get", "/repos/issues/search", [], ISSUE_SCHEMA),
     // Never executed (only satisfies the echo rule's gate; its {owner}/{repo} are constants).
-    op(
-      "giteaEditIssue",
-      "patch",
-      "/repos/{owner}/{repo}/issues/{index}",
-      [pathParam("owner"), pathParam("repo"), pathParam("index")],
-    ),
+    op("giteaEditIssue", "patch", "/repos/{owner}/{repo}/issues/{index}", [
+      pathParam("owner"),
+      pathParam("repo"),
+      pathParam("index"),
+    ]),
     op(
       "giteaGetIssue",
       "get",
@@ -126,12 +125,11 @@ export const GITEA_COMMENTS_GROUP: IrResourceGroup = {
       [pathParam("owner"), pathParam("repo")],
       COMMENT_SCHEMA,
     ),
-    op(
-      "giteaUpdateComment",
-      "patch",
-      "/repos/{owner}/{repo}/issues/comments/{id}",
-      [pathParam("owner"), pathParam("repo"), pathParam("id")],
-    ),
+    op("giteaUpdateComment", "patch", "/repos/{owner}/{repo}/issues/comments/{id}", [
+      pathParam("owner"),
+      pathParam("repo"),
+      pathParam("id"),
+    ]),
   ],
   schemas: [COMMENT_SCHEMA],
   crossResourceRefs: [],
@@ -163,12 +161,10 @@ export const VIKUNJA_COMMENTS_GROUP: IrResourceGroup = {
       [pathParam("taskID")],
       TASK_COMMENT_SCHEMA,
     ),
-    op(
-      "vikunjaUpdateComment",
-      "post",
-      "/tasks/{taskID}/comments/{commentID}",
-      [pathParam("taskID"), pathParam("commentID")],
-    ),
+    op("vikunjaUpdateComment", "post", "/tasks/{taskID}/comments/{commentID}", [
+      pathParam("taskID"),
+      pathParam("commentID"),
+    ]),
   ],
   schemas: [TASK_COMMENT_SCHEMA],
   crossResourceRefs: [],

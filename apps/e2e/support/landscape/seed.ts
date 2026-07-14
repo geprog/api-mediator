@@ -178,8 +178,20 @@ function canonicalPairRef(
 function issuesFields(mappingId: string, direction: "g2v" | "v2g"): FieldMapping[] {
   const bodyField: FieldMapping =
     direction === "g2v"
-      ? { id: randomUUID(), mappingId, sourcePath: "body", targetPath: "description", transform: "rename" }
-      : { id: randomUUID(), mappingId, sourcePath: "description", targetPath: "body", transform: "rename" };
+      ? {
+          id: randomUUID(),
+          mappingId,
+          sourcePath: "body",
+          targetPath: "description",
+          transform: "rename",
+        }
+      : {
+          id: randomUUID(),
+          mappingId,
+          sourcePath: "description",
+          targetPath: "body",
+          transform: "rename",
+        };
   return [
     {
       id: randomUUID(),
@@ -320,7 +332,13 @@ export async function seedSyncScaffold(tokens: LandscapeTokens): Promise<SyncSca
       mappingOf(mappingV2GId, vikunjaTasksSpecId, giteaIssuesSpecId, vikunjaAppId, giteaAppId),
     );
     await mappings.insert(
-      mappingOf(mappingCommentsId, giteaCommentsSpecId, vikunjaCommentsSpecId, giteaAppId, vikunjaAppId),
+      mappingOf(
+        mappingCommentsId,
+        giteaCommentsSpecId,
+        vikunjaCommentsSpecId,
+        giteaAppId,
+        vikunjaAppId,
+      ),
     );
     await mappings.setCounterpart(mappingG2VId, mappingV2GId);
     await mappings.setCounterpart(mappingV2GId, mappingG2VId);
@@ -353,7 +371,13 @@ export async function seedSyncScaffold(tokens: LandscapeTokens): Promise<SyncSca
     // The identity-less comments mapping: a body↔comment rename, NO identity FieldMapping.
     await artifacts.replaceChildren(mappingCommentsId, {
       fieldMappings: [
-        { id: randomUUID(), mappingId: mappingCommentsId, sourcePath: "body", targetPath: "comment", transform: "rename" },
+        {
+          id: randomUUID(),
+          mappingId: mappingCommentsId,
+          sourcePath: "body",
+          targetPath: "comment",
+          transform: "rename",
+        },
       ],
       operationMappings: [
         issuesUpdateOp(
