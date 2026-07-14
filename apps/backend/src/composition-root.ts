@@ -181,6 +181,10 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.
     ...(deps.sync !== undefined ? { sync: new SyncOperatorService({ db, sync: deps.sync }) } : {}),
+    // TEST/DEV-ONLY: gate the deterministic poll-trigger route on the config flag
+    // (default false — off in production/dev; only the SU-6 e2e sets it). `api.ts`
+    // additionally requires the sync runtime, so the route is absent unless both hold.
+    syncTestPollTrigger: config.sync.testPollTrigger,
   };
 }
 

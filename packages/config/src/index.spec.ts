@@ -76,6 +76,31 @@ describe("loadConfig", () => {
     expect(Object.isFrozen(config.credentials)).toBe(true);
     expect(Object.isFrozen(config.auth)).toBe(true);
     expect(Object.isFrozen(config.auth.accounts)).toBe(true);
+    expect(Object.isFrozen(config.sync)).toBe(true);
+  });
+
+  describe("SYNC_TEST_POLL_TRIGGER", () => {
+    it("defaults to false when unset (the test-only poll trigger stays off)", () => {
+      const env = baseEnv();
+      delete env.SYNC_TEST_POLL_TRIGGER;
+
+      expect(loadConfig(env).sync.testPollTrigger).toBe(false);
+    });
+
+    it("parses the literal true/false from the env var", () => {
+      expect(
+        loadConfig({ ...baseEnv(), SYNC_TEST_POLL_TRIGGER: "true" }).sync.testPollTrigger,
+      ).toBe(true);
+      expect(
+        loadConfig({ ...baseEnv(), SYNC_TEST_POLL_TRIGGER: "false" }).sync.testPollTrigger,
+      ).toBe(false);
+    });
+
+    it("rejects a non-boolean value", () => {
+      expect(() => loadConfig({ ...baseEnv(), SYNC_TEST_POLL_TRIGGER: "yes" })).toThrow(
+        ConfigValidationError,
+      );
+    });
   });
 
   describe("OPERATOR_ACCOUNTS", () => {

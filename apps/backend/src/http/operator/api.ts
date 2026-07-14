@@ -6,6 +6,7 @@ import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
 import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
 import { registerParkedConflictRoutes } from "./parked-conflicts.routes.js";
+import { registerPollTriggerRoutes } from "./poll-trigger.routes.js";
 import { registerRecordLinkRoutes } from "./record-links.routes.js";
 import { registerResourceBindingRoutes } from "./resource-bindings.routes.js";
 import { registerSessionRoute } from "./session.routes.js";
@@ -40,6 +41,14 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
     registerRecordLinkRoutes(app, deps.sync);
     registerParkedConflictRoutes(app, deps.sync);
     registerDeadLetterRoutes(app, deps.sync);
+    // The deterministic poll-trigger endpoint (SP-5 hook for the SU-6 e2e) is a
+    // TEST/DEV-ONLY affordance, NOT an operator feature. It is mounted ONLY when the
+    // `sync.testPollTrigger` flag is set (in addition to the sync runtime being
+    // present); production/dev leave the flag off, so the route is not registered at
+    // all and a request 404s. See @mediator/config `SyncConfig.testPollTrigger`.
+    if (deps.syncTestPollTrigger === true) {
+      registerPollTriggerRoutes(app, deps.sync);
+    }
   }
 }
 

@@ -36,6 +36,15 @@ export interface OperatorApiDeps {
   // composition root always provides it; the in-memory unit harness — which has no
   // sync runtime — legitimately omits it, and its routes are simply not registered).
   readonly sync?: SyncOperatorService;
+  /**
+   * TEST/DEV-ONLY: register the deterministic poll-trigger endpoint
+   * (`POST /api/sync-rules/:id/poll`, the SP-5 hook the SU-6 e2e drives). Gated by the
+   * `sync.testPollTrigger` config flag (env `SYNC_TEST_POLL_TRIGGER`, default false) —
+   * it MUST stay off in production/dev. The route is registered only when this is `true`
+   * **and** the sync runtime ({@link OperatorApiDeps.sync}) is present; otherwise the
+   * route is absent and a request 404s. Absent/`false` here means not registered.
+   */
+  readonly syncTestPollTrigger?: boolean;
 }
 
 /**
