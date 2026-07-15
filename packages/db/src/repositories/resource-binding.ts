@@ -3,12 +3,14 @@ import { and, eq, inArray } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import {
+  applyScopePathBindingPatch,
   mapResourceBinding,
   toResourceBindingInsert,
   toResourceBindingRefInserts,
   toResourceBindingRefUpdate,
   type ResourceBindingRefPatch,
   type ResourceBindingRefRow,
+  type ScopePathBindingPatch,
 } from "../mappers/resource-binding.js";
 import { RESOURCE_BINDING_REF_KINDS, resourceBinding, resourceBindingRef } from "../schema.js";
 
@@ -105,6 +107,40 @@ export class ResourceBindingRepository {
             and(eq(resourceBindingRef.resourceBindingId, id), eq(resourceBindingRef.refKind, kind)),
           );
       }
+    }
+    return this.getById(id);
+  }
+
+  /**
+   * Confirm/correct one **scope path-parameter** binding by `parameterName`
+   * (SS-3). `scope_path_bindings` is a `jsonb` collection on the parent row, so
+   * this reads the collection, rewrites **only** the matching entry's literal
+   * `value` + confirmation via {@link applyScopePathBindingPatch}, and writes the
+   * collection back — leaving every sibling scope entry and all operational
+   * `resource_binding_ref` rows untouched (SS-3.2). When no entry matches (the
+   * `parameterName` is not a derived scope entry of the resource) it writes
+   * nothing and returns the binding unchanged; the service rejects that case up
+   * front (SS-3.4), so the read-modify-write only runs for a real entry.
+   *
+   * Returns the updated binding, or `undefined` if no binding with `id` exists.
+   */
+  public async updateScopePathBinding(
+    id: string,
+    patch: ScopePathBindingPatch,
+  ): Promise<ResourceBinding | undefined> {
+    const [row] = await this.db.select().from(resourceBinding).where(eq(resourceBinding.id, id));
+    if (row === undefined) {
+      return undefined;
+    }
+    const { rows: nextScopeBindings, matched } = applyScopePathBindingPatch(
+      row.scopePathBindings,
+      patch,
+    );
+    if (matched) {
+      await this.db
+        .update(resourceBinding)
+        .set({ scopePathBindings: nextScopeBindings })
+        .where(eq(resourceBinding.id, id));
     }
     return this.getById(id);
   }

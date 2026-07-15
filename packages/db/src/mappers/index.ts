@@ -6,6 +6,7 @@ export {
 } from "./registered-app.js";
 export { mapApiSpecRow, toApiSpecInsert, type ApiSpecInsert, type ApiSpecRow } from "./api-spec.js";
 export {
+  applyScopePathBindingPatch,
   mapResourceBinding,
   toResourceBindingInsert,
   toResourceBindingRefInserts,
@@ -16,6 +17,7 @@ export {
   type ResourceBindingRefPatch,
   type ResourceBindingRefRow,
   type ResourceBindingRow,
+  type ScopePathBindingPatch,
 } from "./resource-binding.js";
 export {
   mapCredentialMetadataRow,

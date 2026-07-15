@@ -1,7 +1,9 @@
 import type { ResourceBinding } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
+import type { ScopePathBindingRow } from "../schema.js";
 import {
+  applyScopePathBindingPatch,
   mapResourceBinding,
   toResourceBindingInsert,
   toResourceBindingRefInserts,
@@ -220,5 +222,51 @@ describe("toResourceBindingRefUpdate", () => {
 
     const empty = toResourceBindingRefUpdate({});
     expect(empty).toStrictEqual({});
+  });
+});
+
+describe("applyScopePathBindingPatch", () => {
+  const scopeConfirmedAt = new Date("2026-07-15T09:30:00.000Z");
+
+  function unconfirmed(parameterName: string): ScopePathBindingRow {
+    return { kind: "constant", parameterName, value: "", confirmedBy: null, confirmedAt: null };
+  }
+
+  it("rewrites only the matching entry (value + confirmation), leaving siblings identical (SS-3.2)", () => {
+    const { rows, matched } = applyScopePathBindingPatch(
+      [unconfirmed("owner"), unconfirmed("repo")],
+      {
+        parameterName: "owner",
+        value: "alice",
+        confirmedBy: "op@example.test",
+        confirmedAt: scopeConfirmedAt,
+      },
+    );
+
+    expect(matched).toBe(true);
+    // Date confirmedAt is serialized to an ISO string for the jsonb row.
+    expect(rows).toStrictEqual([
+      {
+        kind: "constant",
+        parameterName: "owner",
+        value: "alice",
+        confirmedBy: "op@example.test",
+        confirmedAt: scopeConfirmedAt.toISOString(),
+      },
+      { kind: "constant", parameterName: "repo", value: "", confirmedBy: null, confirmedAt: null },
+    ]);
+  });
+
+  it("reports matched=false and returns the collection unchanged when the parameter is absent (SS-3.4)", () => {
+    const seed = [unconfirmed("owner"), unconfirmed("repo")];
+    const { rows, matched } = applyScopePathBindingPatch(seed, {
+      parameterName: "tenant",
+      value: "acme",
+      confirmedBy: "op@example.test",
+      confirmedAt: scopeConfirmedAt,
+    });
+
+    expect(matched).toBe(false);
+    expect(rows).toStrictEqual(seed);
   });
 });

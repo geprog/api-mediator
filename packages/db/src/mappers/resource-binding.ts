@@ -40,6 +40,22 @@ export interface ConfirmableRefPatch {
 export type ResourceBindingRefPatch = Partial<Record<ResourceBindingRefKind, ConfirmableRefPatch>>;
 
 /**
+ * Confirm/correct **one** `constant` scope path-parameter binding for
+ * {@link ResourceBindingRepository.updateScopePathBinding}. Addressed by
+ * `parameterName` (scope bindings are keyed by name, not the six ref kinds — a
+ * distinct patch shape from {@link ResourceBindingRefPatch}): it sets the entry's
+ * literal `value` and stamps its confirmation, rewriting only that entry of the
+ * `jsonb` collection and leaving every sibling scope entry and all operational
+ * refs untouched (SS-3.2). `value` is a free literal (not an IR pointer, SS-3.4).
+ */
+export interface ScopePathBindingPatch {
+  readonly parameterName: string;
+  readonly value: string;
+  readonly confirmedBy: string | null;
+  readonly confirmedAt: Date | null;
+}
+
+/**
  * Parent row + its child ref rows → domain `ResourceBinding`. A ref with no
  * child row is an **absent** key ({@link stripUndefined}), distinct from a
  * present-unconfirmed ref (a row with NULL `confirmed_*`). `confirmed_at` comes
@@ -101,6 +117,35 @@ function fromScopePathBindingRow(row: ScopePathBindingRow): ScopePathBinding {
     ...row,
     confirmedAt: row.confirmedAt === null ? null : new Date(row.confirmedAt),
   };
+}
+
+/**
+ * Apply a {@link ScopePathBindingPatch} to a scope-binding `jsonb` collection:
+ * rewrite **only** the entry whose `parameterName` matches (setting its literal
+ * `value` and confirmation, `confirmedAt` as ISO-8601), leaving every sibling
+ * entry byte-identical (SS-3.2). Returns the new collection and whether an entry
+ * matched, so a caller can reject a `parameterName` that is not a derived scope
+ * entry of the resource (SS-3.4) rather than silently no-op. Only the `constant`
+ * kind carries a `value`; when Layers 2/3 add value-less kinds this narrows.
+ */
+export function applyScopePathBindingPatch(
+  rows: readonly ScopePathBindingRow[],
+  patch: ScopePathBindingPatch,
+): { readonly rows: ScopePathBindingRow[]; readonly matched: boolean } {
+  let matched = false;
+  const next = rows.map((row): ScopePathBindingRow => {
+    if (row.parameterName !== patch.parameterName) {
+      return row;
+    }
+    matched = true;
+    return {
+      ...row,
+      value: patch.value,
+      confirmedBy: patch.confirmedBy,
+      confirmedAt: patch.confirmedAt === null ? null : patch.confirmedAt.toISOString(),
+    };
+  });
+  return { rows: next, matched };
 }
 
 /**

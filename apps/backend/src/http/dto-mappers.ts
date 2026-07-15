@@ -49,10 +49,14 @@ export function toApiSpecMetadataDto(spec: ApiSpec): ApiSpecMetadataDto {
 }
 
 /**
- * `ResourceBinding` → wire DTO (RB-2/RB-3): every ref kind is listed with its
- * value, confirmation state, and `applicable` flag (computed from the owning
+ * `ResourceBinding` → wire DTO (RB-2/RB-3, SS-3): every ref kind is listed with
+ * its value, confirmation state, and `applicable` flag (computed from the owning
  * app's `capabilities`), so a caller can tell not-applicable / unconfirmed /
- * confirmed apart in one pass.
+ * confirmed apart in one pass; and every scope path-parameter binding is listed
+ * with its `parameterName`, fill-source `kind`, literal `value`, and
+ * confirmed/unconfirmed state (SS-3 criterion 6). The scope `value` is operator
+ * config (shown as entered), never credential/live payload. Built explicitly
+ * (never spread from the domain entity), so nothing beyond these fields leaks.
  */
 export function toResourceBindingDto(
   binding: ResourceBinding,
@@ -69,11 +73,19 @@ export function toResourceBindingDto(
       confirmedAt: confirmedAt !== null ? confirmedAt.toISOString() : null,
     };
   });
+  const scopeBindings = (binding.scopePathBindings ?? []).map((entry) => ({
+    parameterName: entry.parameterName,
+    kind: entry.kind,
+    value: entry.value,
+    confirmedBy: entry.confirmedBy,
+    confirmedAt: entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null,
+  }));
   return {
     id: binding.id,
     apiSpecId: binding.apiSpecId,
     resourceRef: binding.resourceRef,
     refs,
+    scopeBindings,
   };
 }
 

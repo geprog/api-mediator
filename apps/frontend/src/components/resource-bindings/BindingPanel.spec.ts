@@ -108,6 +108,7 @@ function bindingsFixture(overrides: { collectionConfirmed?: boolean }): Resource
             confirmedAt: null,
           },
         ],
+        scopeBindings: [],
       },
     ],
   };

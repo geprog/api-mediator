@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { RESOURCE_BINDING_REF_KINDS } from "@mediator/contracts";
 import type { CredentialMaterial } from "@mediator/credentials";
-import type { CredentialMetadata, ResourceBindingRefPatch } from "@mediator/db";
+import type {
+  CredentialMetadata,
+  ResourceBindingRefPatch,
+  ScopePathBindingPatch,
+} from "@mediator/db";
 import type {
   ApiSpec,
   DomainEventEnvelope,
@@ -149,6 +153,35 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
         };
       }
     }
+    this.store.bindings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+
+  public updateScopePathBinding(
+    id: string,
+    patch: ScopePathBindingPatch,
+  ): Promise<ResourceBinding | undefined> {
+    const existing = this.store.bindings.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    // Mirror ResourceBindingRepository.updateScopePathBinding exactly: rewrite
+    // only the entry whose parameterName matches (per-parameter — SS-3.2),
+    // leaving every sibling scope entry AND all operational refs untouched; when
+    // no entry matches, write nothing and return the binding unchanged.
+    const scope = existing.scopePathBindings ?? [];
+    if (!scope.some((entry) => entry.parameterName === patch.parameterName)) {
+      return Promise.resolve(existing);
+    }
+    const nextScope = scope.map((entry) =>
+      entry.parameterName === patch.parameterName
+        ? {
+            ...entry,
+            value: patch.value,
+            confirmedBy: patch.confirmedBy,
+            confirmedAt: patch.confirmedAt,
+          }
+        : entry,
+    );
+    const updated: ResourceBinding = { ...existing, scopePathBindings: nextScope };
     this.store.bindings.set(id, updated);
     return Promise.resolve(updated);
   }

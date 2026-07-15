@@ -1,6 +1,11 @@
 import type { CredentialMaterial } from "@mediator/credentials";
 import { CredentialStore, DbCredentialPersistence } from "@mediator/credentials";
-import type { CredentialMetadata, Database, ResourceBindingRefPatch } from "@mediator/db";
+import type {
+  CredentialMetadata,
+  Database,
+  ResourceBindingRefPatch,
+  ScopePathBindingPatch,
+} from "@mediator/db";
 import {
   ApiSpecRepository,
   RegisteredAppRepository,
@@ -70,6 +75,10 @@ export interface BindingTxRepo {
   createMany(bindings: ResourceBinding[]): Promise<ResourceBinding[]>;
   getById(id: string): Promise<ResourceBinding | undefined>;
   update(id: string, patch: ResourceBindingRefPatch): Promise<ResourceBinding | undefined>;
+  updateScopePathBinding(
+    id: string,
+    patch: ScopePathBindingPatch,
+  ): Promise<ResourceBinding | undefined>;
 }
 
 /** The write-only credential entry point, bound to the current transaction. */
