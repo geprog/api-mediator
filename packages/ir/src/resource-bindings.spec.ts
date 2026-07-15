@@ -255,6 +255,139 @@ describe("deriveResourceBindings — pagination-vs-delta cursor precedence", () 
   });
 });
 
+describe("deriveResourceBindings — scopePathBindings (SS-2)", () => {
+  it("Gitea `issues`: unconfirmed scope entries for owner + repo, NONE for record-id {index} (SS-2 crit 3)", () => {
+    const binding = bindingFor(
+      deriveResourceBindings(giteaIr, capabilities(), "spec-gitea"),
+      "issues",
+    );
+    const scope = binding.scopePathBindings ?? [];
+    expect([...scope.map((entry) => entry.parameterName)].sort()).toStrictEqual(["owner", "repo"]);
+    // {index} is the issue's record id (most-specific path param on the by-id and
+    // merged action ops), never a scope parameter.
+    expect(scope.some((entry) => entry.parameterName === "index")).toBe(false);
+    for (const entry of scope) {
+      expect(entry.kind).toBe("constant");
+      expect(entry.confirmedBy).toBeNull();
+      expect(entry.confirmedAt).toBeNull();
+      // owner/repo carry no single-value hint in the spec → empty candidate.
+      expect(entry.value).toBe("");
+    }
+  });
+
+  it("Vikunja `tasks`: only the create's container {id} is scope; id-only/param-free ops contribute none (SS-2 crit 4)", () => {
+    const binding = bindingFor(
+      deriveResourceBindings(vikunjaIr, capabilities(), "spec-vikunja"),
+      "tasks",
+    );
+    const scope = binding.scopePathBindings ?? [];
+    // `GET /tasks` (param-free) + `/tasks/{id}` (record-id) yield nothing; the
+    // create `PUT /projects/{id}/tasks` alone contributes {id} as a scope param —
+    // per-operation asymmetric scoping within one resource.
+    expect(scope.map((entry) => entry.parameterName)).toStrictEqual(["id"]);
+    const [entry] = scope;
+    expect(entry?.kind).toBe("constant");
+    expect(entry?.confirmedBy).toBeNull();
+    expect(entry?.confirmedAt).toBeNull();
+  });
+
+  it("leaves EVERY derived scope entry unconfirmed across both real specs (SS-2 crit 5: used nowhere)", () => {
+    for (const [ir, specId] of [
+      [giteaIr, "spec-gitea"],
+      [vikunjaIr, "spec-vikunja"],
+    ] as const) {
+      for (const binding of deriveResourceBindings(ir, capabilities(), specId)) {
+        for (const entry of binding.scopePathBindings ?? []) {
+          expect(entry.confirmedBy).toBeNull();
+          expect(entry.confirmedAt).toBeNull();
+        }
+      }
+    }
+  });
+
+  it("emits an EMPTY scope collection for a resource with no non-record-id path parameter (SS-1 crit 1)", async () => {
+    // `/widgets` has query params only — no path parameters, so no scope set.
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["page"], fields: [] }));
+    const binding = bindingFor(
+      deriveResourceBindings(ir, capabilities(), "spec-widgets"),
+      "widgets",
+    );
+    expect(binding.scopePathBindings).toStrictEqual([]);
+  });
+
+  it("prefills a heuristic candidate from a single-value enum / default / example, still unconfirmed (SS-2 crit 2)", () => {
+    const ir: Ir = [
+      {
+        resourceRef: "things",
+        name: "things",
+        operations: [
+          {
+            operationId: "createThing",
+            method: "put",
+            path: "/tenants/{tenant}/things",
+            parameters: [
+              {
+                name: "tenant",
+                location: "path",
+                required: true,
+                type: "string",
+                enumValues: ["acme"],
+              },
+            ],
+          },
+          {
+            operationId: "listRegionThings",
+            method: "get",
+            path: "/regions/{region}/things",
+            parameters: [
+              { name: "region", location: "path", required: true, type: "string", default: "eu" },
+            ],
+          },
+          {
+            operationId: "listZoneThings",
+            method: "get",
+            path: "/zones/{zone}/things",
+            parameters: [
+              { name: "zone", location: "path", required: true, type: "string", example: "z1" },
+            ],
+          },
+          {
+            operationId: "listBucketThings",
+            method: "get",
+            path: "/buckets/{bucket}/things",
+            // A MULTI-value enum is ambiguous → no candidate (empty value).
+            parameters: [
+              {
+                name: "bucket",
+                location: "path",
+                required: true,
+                type: "string",
+                enumValues: ["a", "b"],
+              },
+            ],
+          },
+        ],
+        schemas: [],
+        crossResourceRefs: [],
+      },
+    ];
+    const binding = bindingFor(deriveResourceBindings(ir, capabilities(), "spec-things"), "things");
+    const byName = new Map(
+      (binding.scopePathBindings ?? []).map((entry) => [entry.parameterName, entry] as const),
+    );
+    // Layer-1 entries are all `kind: "constant"`, so `value` is present.
+    expect(byName.get("tenant")?.value).toBe("acme"); // single-value enum
+    expect(byName.get("region")?.value).toBe("eu"); // schema default
+    expect(byName.get("zone")?.value).toBe("z1"); // example
+    expect(byName.get("bucket")?.value).toBe(""); // multi-value enum → no candidate
+    // A prefilled candidate is still only a candidate — never confirmed.
+    for (const entry of byName.values()) {
+      expect(entry.confirmedBy).toBeNull();
+      expect(entry.confirmedAt).toBeNull();
+    }
+  });
+});
+
 describe("deriveResourceBindings — deltaDeletionRef (RB-1 crit 6)", () => {
   it("derives deltaDeletionRef from a deletion-marker field iff supportsDeltaQuery", async () => {
     const ir = await buildIr(widgetsSpec({ collectionParams: ["page"], fields: ["deletedAt"] }));

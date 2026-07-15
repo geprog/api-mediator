@@ -53,6 +53,7 @@ import type {
   RecordLinkStatus,
   RegisteredAppStatus,
   ResourceBinding,
+  ScopePathBinding,
   ReviewState,
   ShortlistResult,
   SyncFieldStateSide,
@@ -133,6 +134,20 @@ export const resourceBindingRefKindEnum = pgEnum(
   "resource_binding_ref_kind",
   RESOURCE_BINDING_REF_KINDS,
 );
+
+/**
+ * The `jsonb`-persisted form of a `ScopePathBinding` (`scope_path_bindings`
+ * column). `jsonb` has no `Date`, so a `constant`'s `confirmedAt` is stored as an
+ * ISO-8601 **string** (or `null`); the resource-binding mapper converts it back
+ * to a `Date` on read. Distributive so each kind's own keys are preserved as the
+ * union grows (Layers 2/3); pinned to the domain `ScopePathBinding` so a domain
+ * rename breaks the build here.
+ */
+export type ScopePathBindingRow = ScopePathBinding extends infer Binding
+  ? Binding extends unknown
+    ? { [K in keyof Binding]: [Binding[K]] extends [Date | null] ? string | null : Binding[K] }
+    : never
+  : never;
 
 // ── Phase-2 mapping enums (pinned to @mediator/domain unions) ─────────────────
 
@@ -400,7 +415,15 @@ export const apiSpec = pgTable(
   (table) => [index("api_spec_app_id_idx").on(table.appId)],
 );
 
-/** `ResourceBinding` — one resource's operational bindings for an `ApiSpec`. */
+/**
+ * `ResourceBinding` — one resource's operational bindings for an `ApiSpec`.
+ *
+ * The confirmable refs are normalized into `resource_binding_ref` (below);
+ * `scope_path_bindings` is instead a `jsonb` collection on the parent, because it
+ * is an open-ended per-parameter set of a discriminated union (SS-1/SS-2), not
+ * the fixed six ref kinds — the same `jsonb` treatment as the refs' `value`.
+ * `NOT NULL DEFAULT '[]'` so existing rows migrate to an empty collection.
+ */
 export const resourceBinding = pgTable(
   "resource_binding",
   {
@@ -409,6 +432,10 @@ export const resourceBinding = pgTable(
       .notNull()
       .references(() => apiSpec.id),
     resourceRef: text("resource_ref").notNull(),
+    scopePathBindings: jsonb("scope_path_bindings")
+      .$type<ScopePathBindingRow[]>()
+      .notNull()
+      .default([]),
   },
   (table) => [index("resource_binding_api_spec_id_idx").on(table.apiSpecId)],
 );

@@ -102,6 +102,9 @@ describe("Phase-1 repositories integration (requires Postgres)", () => {
       confirmedBy: null,
       confirmedAt: null,
     },
+    // The mapper always returns the (NOT NULL) scope-binding collection; a
+    // resource with no scope parameters round-trips as an empty one.
+    scopePathBindings: [],
   };
 
   const pullsBinding: ResourceBinding = {
@@ -109,6 +112,7 @@ describe("Phase-1 repositories integration (requires Postgres)", () => {
     apiSpecId: specId,
     resourceRef: "pulls",
     nativeIdRef: { value: { kind: "field", path: "id" }, confirmedBy: null, confirmedAt: null },
+    scopePathBindings: [],
   };
 
   const cred: Credential = {

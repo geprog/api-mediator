@@ -84,13 +84,26 @@ export type IrSchemaSummary = z.infer<typeof irSchemaSummarySchema>;
 
 // ── Operations ───────────────────────────────────────────────────────────────
 
-/** One request input of an operation (path/query/header/cookie parameter). */
+/**
+ * One request input of an operation (path/query/header/cookie parameter).
+ *
+ * `enumValues` / `default` / `example` are the parameter's single-value **hints**
+ * captured from its schema, when present. They let the resource-binding
+ * derivation pre-fill a *heuristic candidate* for a scope path-parameter constant
+ * (`ResourceBinding.scopePathBindings`, SS-2 criterion 2) — e.g. a `{tenant}`
+ * path parameter whose schema pins `enum: ["acme"]` or `default: "acme"`. They
+ * are additive metadata (absent when the spec declares none) and, like the rest
+ * of the IR, carry no live payload values.
+ */
 export const irParameterSchema = z.object({
   name: z.string(),
   location: irParameterLocationSchema,
   required: z.boolean(),
   type: z.string().optional(),
   description: z.string().optional(),
+  enumValues: z.array(z.string()).optional(),
+  default: z.string().optional(),
+  example: z.string().optional(),
 });
 export type IrParameter = z.infer<typeof irParameterSchema>;
 

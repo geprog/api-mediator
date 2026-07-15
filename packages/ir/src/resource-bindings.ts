@@ -5,10 +5,12 @@ import type {
   ConfirmableRef,
   IrField,
   IrOperation,
+  IrParameter,
   Ir,
   IrRefTarget,
   IrResourceGroup,
   ResourceBinding,
+  ScopePathBinding,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 
@@ -144,7 +146,137 @@ function deriveBinding(
     changeTimestampRef,
     deltaCursorRef,
     deltaDeletionRef,
+    scopePathBindings: deriveScopePathBindings(group),
   });
+}
+
+// ── scopePathBindings derivation (SS-2) ──────────────────────────────────────
+
+/**
+ * Derive the resource's **scope** path-parameter set (SS-2): enumerate the path
+ * parameters across the resource's operations, subtract each operation's
+ * record-id parameter, and emit one **unconfirmed** `constant` entry per
+ * remaining distinct scope-parameter name (SS-2 criterion 1). A param-free
+ * resource yields an empty collection (SS-1 criterion 1).
+ *
+ * ## Record-id vs. scope classification (per operation, action-aware)
+ *
+ * A *scope* parameter locates a record's **container**, so it sits **before** the
+ * resource in the path hierarchy; the *record-id* parameter identifies a record
+ * *of* the resource and sits at/after it. We split each operation's path at its
+ * **resource segment** — the last path segment equal to the group's
+ * `resourceRef` noun (the same noun the decomposer groups by) — and take the path
+ * parameters appearing **before** it as scope parameters:
+ *
+ * - a **collection read/list** (`GET /repos/{owner}/{repo}/issues`) ends at the
+ *   resource segment → every path parameter is before it → all are scope, and it
+ *   has no record-id parameter;
+ * - a **by-id read/update/delete** (`… /issues/{index}`) has its record-id
+ *   (`{index}`) *after* the resource segment → only `{owner}`/`{repo}` are scope;
+ * - a **create** (`PUT /projects/{id}/tasks`) ends at the resource segment
+ *   (`tasks`) with its container `{id}` before it → `{id}` is a **scope**
+ *   parameter, not a record id (SS-2 criterion 4);
+ * - a **sub-resource action** merged into the group (`… /issues/{index}/lock`)
+ *   still has `{index}` at/after the resource segment → it is treated as the
+ *   record id and excluded, so `{index}` is never mis-derived as scope
+ *   (SS-2 criterion 3).
+ *
+ * Because the set is the union of per-operation scope parameters, one resource
+ * can scope asymmetrically across its operations (Vikunja `tasks` gets `id`
+ * from its create op alone — SS-2 criterion 4). When the group's `resourceRef`
+ * is not a path segment (a `tags`/prefix fallback group), we fall back to
+ * treating the most-specific trailing path parameter as the record id.
+ *
+ * Each entry starts unconfirmed (`confirmedBy`/`confirmedAt` null) with an empty
+ * `value`, or a **heuristic candidate** pre-filled from a single-value
+ * `enum`/`default`/`example` hint — still unconfirmed, so used nowhere (SS-2
+ * criteria 2, 5).
+ */
+function deriveScopePathBindings(group: IrResourceGroup): ScopePathBinding[] {
+  return collectScopeParameterNames(group).map((parameterName) => ({
+    kind: "constant",
+    parameterName,
+    value: heuristicConstantCandidate(group, parameterName),
+    confirmedBy: null,
+    confirmedAt: null,
+  }));
+}
+
+/** Distinct scope-parameter names across a group's operations, first-seen order. */
+function collectScopeParameterNames(group: IrResourceGroup): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const operation of group.operations) {
+    for (const name of scopeParameterNamesOf(group.resourceRef, operation)) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        ordered.push(name);
+      }
+    }
+  }
+  return ordered;
+}
+
+/** One operation's scope path-parameter names (see {@link deriveScopePathBindings}). */
+function scopeParameterNamesOf(resourceRef: string, operation: IrOperation): string[] {
+  const segments = pathSegments(operation.path);
+  const resourceIndex = segments.lastIndexOf(resourceRef);
+  // Path parameters strictly before the resource segment are scope. With no
+  // resource segment (a fallback group), subtract only the most-specific
+  // trailing record-id parameter (a by-id op) — otherwise take all.
+  const upperBound =
+    resourceIndex >= 0
+      ? resourceIndex
+      : lastSegmentIsParameter(operation.path)
+        ? segments.length - 1
+        : segments.length;
+
+  const pathParameterNames = new Set(
+    operation.parameters
+      .filter((parameter) => parameter.location === "path")
+      .map((parameter) => parameter.name),
+  );
+
+  const names: string[] = [];
+  for (let i = 0; i < upperBound; i++) {
+    const segment = segments[i];
+    if (segment === undefined || !isParameterSegment(segment)) continue;
+    const name = parameterNameOfSegment(segment);
+    // Only real path parameters of the operation qualify (defensive: a `{…}`
+    // segment always resolves to a declared path parameter in the IR).
+    if (pathParameterNames.has(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * A pre-fill **candidate** for a scope constant, or `""` when the IR carries no
+ * single-value hint. Priority: a single-value `enum` pins the value most
+ * strongly, then a schema `default`, then an `example`; a multi-value `enum` is
+ * not a candidate. Always returned **unconfirmed** by the caller.
+ */
+function heuristicConstantCandidate(group: IrResourceGroup, parameterName: string): string {
+  for (const operation of group.operations) {
+    const parameter = operation.parameters.find(
+      (candidate) => candidate.location === "path" && candidate.name === parameterName,
+    );
+    if (parameter === undefined) continue;
+    const hint = singleValueHint(parameter);
+    if (hint !== undefined) return hint;
+  }
+  return "";
+}
+
+/** A path parameter's single-value hint, if any (see {@link heuristicConstantCandidate}). */
+function singleValueHint(parameter: IrParameter): string | undefined {
+  const enumValues = parameter.enumValues;
+  if (enumValues !== undefined && enumValues.length === 1) {
+    const [only] = enumValues;
+    if (only !== undefined && only.length > 0) return only;
+  }
+  if (parameter.default !== undefined && parameter.default.length > 0) return parameter.default;
+  if (parameter.example !== undefined && parameter.example.length > 0) return parameter.example;
+  return undefined;
 }
 
 /**
@@ -231,7 +363,17 @@ function unconfirmed(value: IrRefTarget): ConfirmableRef {
 function lastSegmentIsParameter(path: string): boolean {
   const segments = pathSegments(path);
   const last = segments[segments.length - 1];
-  return last !== undefined && last.startsWith("{");
+  return last !== undefined && isParameterSegment(last);
+}
+
+/** Whether a path segment is a `{parameter}` placeholder. */
+function isParameterSegment(segment: string): boolean {
+  return segment.startsWith("{") && segment.endsWith("}");
+}
+
+/** The parameter name of a `{name}` path segment (its braces stripped). */
+function parameterNameOfSegment(segment: string): string {
+  return segment.slice(1, -1);
 }
 
 function pathParameterCount(path: string): number {

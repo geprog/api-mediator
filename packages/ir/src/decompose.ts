@@ -329,20 +329,42 @@ function addParameter(target: Map<string, IrParameter>, node: unknown, context: 
   const parameterLocation = PARAMETER_LOCATIONS.find((candidate) => candidate === location);
   if (!parameterLocation) return;
 
+  const schema = getRecord(resolved.schema, "schema");
   const parameter: IrParameter = stripUndefined({
     name,
     location: parameterLocation,
     required: getBoolean(resolved.schema, "required") ?? parameterLocation === "path",
-    type: parameterType(resolved.schema),
+    type: schema ? scalarType(schema["type"]) : undefined,
     description: getString(resolved.schema, "description"),
+    enumValues: parameterEnumValues(schema),
+    default: schema ? scalarString(schema["default"]) : undefined,
+    // OpenAPI allows `example` on the parameter object or on its schema.
+    example:
+      scalarString(resolved.schema["example"]) ??
+      (schema ? scalarString(schema["example"]) : undefined),
   });
   target.set(`${parameterLocation} ${name}`, parameter);
 }
 
-function parameterType(parameter: JsonObject): string | undefined {
-  const schema = getRecord(parameter, "schema");
+/** A parameter schema's `enum` as scalar strings, or `undefined` if none/empty. */
+function parameterEnumValues(schema: JsonObject | undefined): string[] | undefined {
   if (!schema) return undefined;
-  return scalarType(schema["type"]);
+  const values = getArray(schema, "enum");
+  if (!values) return undefined;
+  const scalars: string[] = [];
+  for (const value of values) {
+    const scalar = scalarString(value);
+    if (scalar !== undefined) scalars.push(scalar);
+  }
+  return scalars.length > 0 ? scalars : undefined;
+}
+
+/** A JSON scalar (string/number/boolean) rendered as a string, else `undefined`. */
+function scalarString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  return undefined;
 }
 
 // ── Bodies → IrSchema ────────────────────────────────────────────────────────
