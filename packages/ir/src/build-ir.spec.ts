@@ -261,6 +261,63 @@ describe("buildIr — noun grouping, action merge & fallback (SI-1 crit 2, 6)", 
   });
 });
 
+describe("buildIr — parameter single-value hints (feeds SS-2 scope-constant candidates)", () => {
+  it("captures a path parameter's enum / default / example onto the IR parameter", async () => {
+    const spec = {
+      openapi: "3.0.0",
+      info: { title: "tenants", version: "1" },
+      paths: {
+        "/tenants/{tenant}/things": {
+          get: {
+            operationId: "listThings",
+            parameters: [
+              {
+                name: "tenant",
+                in: "path",
+                required: true,
+                schema: { type: "string", enum: ["acme"], default: "acme" },
+                example: "acme",
+              },
+            ],
+            responses: { "200": { description: "ok" } },
+          },
+        },
+      },
+    };
+    const ir = await buildIr(spec);
+    const things = groupByRef(ir, "things");
+    const operation = things.operations.find((op) => op.operationId === "listThings");
+    const tenant = operation?.parameters.find((parameter) => parameter.name === "tenant");
+    expect(tenant?.enumValues).toStrictEqual(["acme"]);
+    expect(tenant?.default).toBe("acme");
+    expect(tenant?.example).toBe("acme");
+  });
+
+  it("omits the hints when a parameter declares none (they stay absent, not present-undefined)", async () => {
+    const spec = {
+      openapi: "3.0.0",
+      info: { title: "tenants", version: "1" },
+      paths: {
+        "/tenants/{tenant}/things": {
+          get: {
+            operationId: "listThings",
+            parameters: [
+              { name: "tenant", in: "path", required: true, schema: { type: "string" } },
+            ],
+            responses: { "200": { description: "ok" } },
+          },
+        },
+      },
+    };
+    const ir = await buildIr(spec);
+    const operation = groupByRef(ir, "things").operations[0];
+    const tenant = operation?.parameters.find((parameter) => parameter.name === "tenant");
+    expect(tenant && "enumValues" in tenant).toBe(false);
+    expect(tenant && "default" in tenant).toBe(false);
+    expect(tenant && "example" in tenant).toBe(false);
+  });
+});
+
 describe("buildIr — domain schema conformance", () => {
   it("produces an IR that validates against the domain Ir Zod schema", () => {
     expect(() => irSchema.parse(vikunjaIr)).not.toThrow();

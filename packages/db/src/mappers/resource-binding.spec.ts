@@ -12,8 +12,14 @@ import {
 
 const confirmedAt = new Date("2026-07-10T12:00:00.000Z");
 
-function parentRow(): ResourceBindingRow {
-  return { id: "rb-1", apiSpecId: "spec-1", resourceRef: "issues" };
+function parentRow(overrides: Partial<ResourceBindingRow> = {}): ResourceBindingRow {
+  return {
+    id: "rb-1",
+    apiSpecId: "spec-1",
+    resourceRef: "issues",
+    scopePathBindings: [],
+    ...overrides,
+  };
 }
 
 function refRow(
@@ -65,9 +71,50 @@ describe("mapResourceBinding", () => {
     expect(binding.nativeIdRef?.confirmedAt).toStrictEqual(confirmedAt);
   });
 
-  it("maps a binding with no ref rows to a bindings-less binding", () => {
+  it("maps a binding with no ref rows to a refs-less binding (empty scope bindings)", () => {
     const binding = mapResourceBinding({ ...parentRow(), resourceRef: "webhooks" }, []);
-    expect(binding).toStrictEqual({ id: "rb-1", apiSpecId: "spec-1", resourceRef: "webhooks" });
+    expect(binding).toStrictEqual({
+      id: "rb-1",
+      apiSpecId: "spec-1",
+      resourceRef: "webhooks",
+      scopePathBindings: [],
+    });
+  });
+
+  it("round-trips scope_path_bindings, ISO confirmedAt back to a real Date", () => {
+    const binding = mapResourceBinding(
+      parentRow({
+        scopePathBindings: [
+          {
+            kind: "constant",
+            parameterName: "owner",
+            value: "",
+            confirmedBy: null,
+            confirmedAt: null,
+          },
+          {
+            kind: "constant",
+            parameterName: "repo",
+            value: "phoenix",
+            confirmedBy: "operator@example.test",
+            confirmedAt: confirmedAt.toISOString(),
+          },
+        ],
+      }),
+      [],
+    );
+
+    expect(binding.scopePathBindings).toStrictEqual([
+      { kind: "constant", parameterName: "owner", value: "", confirmedBy: null, confirmedAt: null },
+      {
+        kind: "constant",
+        parameterName: "repo",
+        value: "phoenix",
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      },
+    ]);
+    expect(binding.scopePathBindings?.[1]?.confirmedAt).toBeInstanceOf(Date);
   });
 });
 
@@ -89,6 +136,7 @@ describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
       id: "rb-1",
       apiSpecId: "spec-1",
       resourceRef: "issues",
+      scopePathBindings: [],
     });
 
     const refInserts = toResourceBindingRefInserts(binding);
@@ -107,6 +155,39 @@ describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
       confirmedBy: "operator@example.test",
       confirmedAt,
     });
+  });
+
+  it("serializes scope bindings into the parent insert, Date confirmedAt as an ISO string", () => {
+    const insert = toResourceBindingInsert({
+      ...binding,
+      scopePathBindings: [
+        {
+          kind: "constant",
+          parameterName: "owner",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+        {
+          kind: "constant",
+          parameterName: "repo",
+          value: "phoenix",
+          confirmedBy: "operator@example.test",
+          confirmedAt,
+        },
+      ],
+    });
+
+    expect(insert.scopePathBindings).toStrictEqual([
+      { kind: "constant", parameterName: "owner", value: "", confirmedBy: null, confirmedAt: null },
+      {
+        kind: "constant",
+        parameterName: "repo",
+        value: "phoenix",
+        confirmedBy: "operator@example.test",
+        confirmedAt: confirmedAt.toISOString(),
+      },
+    ]);
   });
 });
 

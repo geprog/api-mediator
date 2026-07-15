@@ -69,10 +69,98 @@ export const confirmableRefSchema = z.object({
 });
 export type ConfirmableRef = z.infer<typeof confirmableRefSchema>;
 
+// ── scopePathBindings (scope path-parameter bindings) ─────────────────────────
+
+/**
+ * One **scope path-parameter binding** (`docs/glossary.md`,
+ * `docs/architecture/data-model.md` `ResourceBinding.scopePathBindings`): how one
+ * of a resource's **non-record-id path parameters** — a *scope* parameter that
+ * locates a record's **container** (Gitea/Forgejo `{owner}`/`{repo}`, a Vikunja
+ * project `{id}`, a `{tenant}`) — is filled when the Sync Engine calls a scoped
+ * operation.
+ *
+ * A discriminated union over its **fill source** (`kind`), each variant
+ * confirmed per parameter with the same `confirmedBy`/`confirmedAt` discipline as
+ * a {@link ConfirmableRef}. Layer 1 (SS-1/SS-2) implements only `kind:
+ * "constant"`; `record-derived` (the record carries its scope, shared
+ * value-space — Layer 2) and `scope-link` (arbitrary value-spaces, resolved
+ * through a `ScopeLink` — Layer 3) are added later as **further members of this
+ * same union**, so the collection shape and the confirm-per-parameter discipline
+ * never change.
+ *
+ * ## `constant`
+ *
+ * `{ kind: "constant", parameterName, value, confirmedBy, confirmedAt }` — an
+ * operator-supplied literal (the single-scope case, one repo ↔ one board:
+ * `owner = alice` / `repo = phoenix`). Unlike a {@link ConfirmableRef}, whose
+ * `value` is an IR *pointer* validated against the IR (RB-2), a constant's
+ * `value` is **free operator-authored content** (SS-1 criterion 3): only its
+ * `parameterName` is validated against the resource's IR, never its `value`.
+ * `value` may be an empty string while the entry is unconfirmed (a derived
+ * candidate awaiting supply — SS-2 criterion 2); a **confirmed** constant must
+ * carry a non-empty value (data-model.md: the operator-authored literal).
+ */
+export const scopeConstantBindingSchema = z.object({
+  kind: z.literal("constant"),
+  parameterName: z.string(),
+  value: z.string(),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: z.date().nullable(),
+});
+export type ScopeConstantBinding = z.infer<typeof scopeConstantBindingSchema>;
+
+/**
+ * The `scopePathBindings` entry union. Modeled as a `z.discriminatedUnion` over
+ * `kind` so `record-derived` / `scope-link` slot in as additional members
+ * without reshaping. The confirmed-pair invariant — `confirmedBy`/`confirmedAt`
+ * are **both null while unconfirmed and both set together on confirmation** (SS-1
+ * criterion 4, mirroring {@link confirmableRefSchema}) — is enforced here for
+ * every kind, since all kinds carry the same confirmation pair.
+ */
+export const scopePathBindingSchema = z
+  .discriminatedUnion("kind", [scopeConstantBindingSchema])
+  .superRefine((binding, ctx) => {
+    const byIsNull = binding.confirmedBy === null;
+    const atIsNull = binding.confirmedAt === null;
+    if (byIsNull !== atIsNull) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "confirmedBy and confirmedAt must both be null (unconfirmed) or both be set (confirmed)",
+        path: [byIsNull ? "confirmedBy" : "confirmedAt"],
+      });
+      return;
+    }
+    // A confirmed `constant` names an operator-authored literal; it cannot be
+    // confirmed empty (data-model.md `ResourceBinding` scopePathBindings). An
+    // unconfirmed entry may be empty (a derived candidate awaiting supply). When
+    // Layers 2/3 add value-less kinds, `binding.value` stops type-checking here
+    // and this must narrow to `binding.kind === "constant"` — enforced by the
+    // compiler, so the invariant cannot silently over-apply.
+    const confirmed = !byIsNull && !atIsNull;
+    if (confirmed && binding.value.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: "a confirmed constant scope binding must carry a non-empty value",
+        path: ["value"],
+      });
+    }
+  });
+export type ScopePathBinding = z.infer<typeof scopePathBindingSchema>;
+
 /**
  * One resource's operational bindings. Each ref is independently optional and
  * independently confirmable — confirming one never implies another (RB-2
  * criterion 3).
+ *
+ * `scopePathBindings` is a collection of per-parameter {@link ScopePathBinding}
+ * entries, one per distinct **scope** (non-record-id) path parameter of the
+ * resource's operations (SS-1 criterion 1) — keyed by `parameterName`, so at most
+ * one entry per parameter name. Unlike the optional refs above (absent = "not
+ * derivable / not meaningful"), a param-free resource carries an **empty**
+ * collection, not an absent one. It is left `.optional()` only so partially
+ * constructed bindings elsewhere need not restate it; every producer (the
+ * ingestion derivation and the DB mapper) always emits the array.
  */
 export const resourceBindingSchema = z.object({
   id: z.string(),
@@ -84,5 +172,6 @@ export const resourceBindingSchema = z.object({
   deltaCursorRef: confirmableRefSchema.optional(),
   deltaDeletionRef: confirmableRefSchema.optional(),
   changeTimestampRef: confirmableRefSchema.optional(),
+  scopePathBindings: z.array(scopePathBindingSchema).optional(),
 });
 export type ResourceBinding = z.infer<typeof resourceBindingSchema>;

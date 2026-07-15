@@ -1,0 +1,1 @@
+ALTER TABLE "resource_binding" ADD COLUMN "scope_path_bindings" jsonb DEFAULT '[]'::jsonb NOT NULL;

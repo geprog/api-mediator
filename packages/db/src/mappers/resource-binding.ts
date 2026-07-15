@@ -2,12 +2,14 @@ import {
   type ConfirmableRef,
   type IrRefTarget,
   type ResourceBinding,
+  type ScopePathBinding,
   stripUndefined,
 } from "@mediator/domain";
 
 import {
   RESOURCE_BINDING_REF_KINDS,
   type ResourceBindingRefKind,
+  type ScopePathBindingRow,
   resourceBinding,
   resourceBindingRef,
 } from "../schema.js";
@@ -65,15 +67,39 @@ export function mapResourceBinding(
     deltaCursorRef: refs.deltaCursorRef,
     deltaDeletionRef: refs.deltaDeletionRef,
     changeTimestampRef: refs.changeTimestampRef,
+    // Always present (the column is NOT NULL, empty for a param-free resource).
+    scopePathBindings: bindingRow.scopePathBindings.map(fromScopePathBindingRow),
   });
 }
 
-/** Domain → parent (`resource_binding`) insert. */
+/** Domain → parent (`resource_binding`) insert, including the scope bindings. */
 export function toResourceBindingInsert(binding: ResourceBinding): ResourceBindingInsert {
   return {
     id: binding.id,
     apiSpecId: binding.apiSpecId,
     resourceRef: binding.resourceRef,
+    scopePathBindings: (binding.scopePathBindings ?? []).map(toScopePathBindingRow),
+  };
+}
+
+/**
+ * Domain `ScopePathBinding` → its `jsonb` row form. `confirmedAt` is the only
+ * field `jsonb` cannot hold (a `Date`), so it becomes an ISO-8601 string (or
+ * `null`); every other field (present and future kinds alike) is already
+ * JSON-safe and carried through by the spread — so no per-kind branch is needed.
+ */
+function toScopePathBindingRow(binding: ScopePathBinding): ScopePathBindingRow {
+  return {
+    ...binding,
+    confirmedAt: binding.confirmedAt === null ? null : binding.confirmedAt.toISOString(),
+  };
+}
+
+/** A `jsonb` row → domain `ScopePathBinding`: the ISO `confirmedAt` back to a `Date`. */
+function fromScopePathBindingRow(row: ScopePathBindingRow): ScopePathBinding {
+  return {
+    ...row,
+    confirmedAt: row.confirmedAt === null ? null : new Date(row.confirmedAt),
   };
 }
 
