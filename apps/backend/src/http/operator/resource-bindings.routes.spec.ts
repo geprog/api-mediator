@@ -1,14 +1,23 @@
 import type {
   RegisterAppResponse,
   ResourceBindingDto,
+  ResourceBindingScopeDto,
   ResourceBindingsResponse,
   UpdateResourceBindingResponse,
 } from "@mediator/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { injectAs, TEST_OPERATOR, TEST_OPERATOR_ALICE } from "../../testing/auth.testkit.js";
+import {
+  injectAs,
+  TEST_OPERATOR,
+  TEST_OPERATOR_ALICE,
+  TEST_VIEWER,
+} from "../../testing/auth.testkit.js";
 import { buildTestServer, type TestServer } from "../../testing/fake-persistence.testkit.js";
-import { providerSpecDocument } from "../../testing/sample-specs.testkit.js";
+import {
+  providerSpecDocument,
+  scopedProviderSpecDocument,
+} from "../../testing/sample-specs.testkit.js";
 
 const CAPS_WITH_TIMESTAMPS = {
   supportsPolling: true,
@@ -205,6 +214,188 @@ describe("PATCH /api/resource-bindings/:id (RB-2)", () => {
       method: "PATCH",
       url: "/api/resource-bindings/not-a-uuid",
       payload: { refKind: "nativeIdRef" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+});
+
+/**
+ * Registers the Gitea-shaped **scoped** provider (its `issues` resource is reached
+ * through `/repos/{owner}/{repo}/issues…`), so the derived `issues` binding
+ * carries unconfirmed `owner`/`repo` scope constants — the SS-3 supply/confirm
+ * surface.
+ */
+async function registerScopedAndGetBindings(server: TestServer): Promise<{
+  specId: string;
+  bindings: ResourceBindingDto[];
+}> {
+  const registration = await injectAs(server.app, TEST_OPERATOR, {
+    method: "POST",
+    url: "/api/apps",
+    payload: {
+      name: "Gitea",
+      baseUrl: "https://gitea.example",
+      capabilities: CAPS_WITH_TIMESTAMPS,
+      specs: [{ role: "PROVIDER", document: scopedProviderSpecDocument() }],
+    },
+  });
+  const specId = registration.json<RegisterAppResponse>().specs[0]?.id ?? "";
+  const bindingsResponse = await injectAs(server.app, TEST_OPERATOR, {
+    method: "GET",
+    url: `/api/specs/${specId}/resource-bindings`,
+  });
+  return { specId, bindings: bindingsResponse.json<ResourceBindingsResponse>().bindings };
+}
+
+function issuesBinding(bindings: ResourceBindingDto[]): ResourceBindingDto {
+  const issues = bindings.find((binding) => binding.resourceRef === "issues");
+  if (issues === undefined) throw new Error("issues binding not found");
+  return issues;
+}
+
+function scopeEntry(binding: ResourceBindingDto, parameterName: string): ResourceBindingScopeDto {
+  const entry = binding.scopeBindings.find((s) => s.parameterName === parameterName);
+  if (entry === undefined) throw new Error(`scope entry '${parameterName}' not found`);
+  return entry;
+}
+
+describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  it("GET reports each scope entry's parameter, kind, value, and confirmed state (SS-3.6)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+    const issues = issuesBinding(bindings);
+
+    // Two derived scope constants (owner, repo); the record id {index} is none.
+    expect(issues.scopeBindings.map((s) => s.parameterName).sort()).toStrictEqual([
+      "owner",
+      "repo",
+    ]);
+    expect(issues.scopeBindings.some((s) => s.parameterName === "index")).toBe(false);
+
+    const owner = scopeEntry(issues, "owner");
+    expect(owner.kind).toBe("constant");
+    expect(owner.value).toBe(""); // no single-value hint → empty, awaiting supply
+    expect(owner.confirmedBy).toBeNull();
+    expect(owner.confirmedAt).toBeNull();
+  });
+
+  it("confirms a scope constant: sets value + stamps confirmedBy/confirmedAt in one action (SS-3.1)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", value: "alice" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    expect(owner.value).toBe("alice");
+    expect(owner.confirmedBy).toBe("operator");
+    expect(owner.confirmedAt).not.toBeNull();
+  });
+
+  it("is per-parameter: confirming owner leaves repo unconfirmed and operational refs untouched (SS-3.2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", value: "alice" },
+    });
+
+    const updated = response.json<UpdateResourceBindingResponse>();
+    expect(scopeEntry(updated, "owner").confirmedBy).toBe("operator");
+    // The sibling scope entry is untouched.
+    const repo = scopeEntry(updated, "repo");
+    expect(repo.value).toBe("");
+    expect(repo.confirmedBy).toBeNull();
+    expect(repo.confirmedAt).toBeNull();
+    // No operational ref was touched by a scope confirm.
+    expect(updated.refs.find((ref) => ref.kind === "nativeIdRef")?.confirmedBy).toBeNull();
+    expect(updated.refs.find((ref) => ref.kind === "collectionReadRef")?.confirmedBy).toBeNull();
+  });
+
+  it("rejects confirming a scope constant with an empty value (SS-3.3)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", value: "" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a parameterName not in the resource's derived scope set, but accepts a free-literal value (SS-3.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    // 'tenant' is not a scope parameter of this resource → rejected.
+    const rejected = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "tenant", value: "acme" },
+    });
+    expect(rejected.statusCode).toBe(400);
+
+    // A value that is NOT an IR element is accepted — a scope value is a free
+    // literal, never IR-validated (contrast an operational ref's IR pointer).
+    const accepted = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", value: "not-an-ir-field-42" },
+    });
+    expect(accepted.statusCode).toBe(200);
+    expect(scopeEntry(accepted.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
+      "not-an-ir-field-42",
+    );
+  });
+
+  it("forbids a viewer from confirming a scope constant (OA-2, SS-3.5)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_VIEWER, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", value: "alice" },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("attributes confirmedBy to the authenticated operator identity (OA-3, SS-3.5)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    // A second operator acts: confirmedBy must follow the authenticated identity.
+    const response = await injectAs(server.app, TEST_OPERATOR_ALICE, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "repo", value: "phoenix" },
+    });
+
+    const repo = scopeEntry(response.json<UpdateResourceBindingResponse>(), "repo");
+    expect(repo.confirmedBy).toBe("alice");
+    expect(repo.value).toBe("phoenix");
+  });
+
+  it("rejects a payload carrying both a refKind and a parameterName (mutually exclusive patches)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { refKind: "nativeIdRef", parameterName: "owner", value: "alice" },
     });
     expect(response.statusCode).toBe(400);
   });

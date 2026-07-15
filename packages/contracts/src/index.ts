@@ -65,14 +65,20 @@ export {
 export {
   resourceBindingDtoSchema,
   resourceBindingRefDtoSchema,
+  resourceBindingScopeDtoSchema,
   resourceBindingsResponseSchema,
+  updateResourceBindingRefRequestSchema,
   updateResourceBindingRequestSchema,
   updateResourceBindingResponseSchema,
+  updateScopeBindingRequestSchema,
   type ResourceBindingDto,
   type ResourceBindingRefDto,
+  type ResourceBindingScopeDto,
   type ResourceBindingsResponse,
+  type UpdateResourceBindingRefRequest,
   type UpdateResourceBindingRequest,
   type UpdateResourceBindingResponse,
+  type UpdateScopeBindingRequest,
 } from "./resource-bindings.js";
 
 export {
