@@ -22,6 +22,7 @@ import {
   type RuleArtifactRepos,
   type RuleArtifacts,
 } from "./resolution.js";
+import { computeRequiredScopeBindings } from "./scope-requirements.js";
 
 /**
  * **The enable-input resolver** — it turns persisted `SyncRule`/`ApprovedMapping`/
@@ -88,6 +89,9 @@ export async function resolveEnableRuleInput(
     sourceCapabilities: artifacts.sourceApp.capabilities,
     targetCapabilities: artifacts.targetApp.capabilities,
     backfillSkipped: options.backfillSkipped,
+    requiredScopeBindings: computeRequiredScopeBindings(artifacts, {
+      backfillSkipped: options.backfillSkipped,
+    }),
   };
 
   const backfill = await buildBackfillRunInput(artifacts, repos);

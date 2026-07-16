@@ -5,6 +5,7 @@ import type {
   IrRefTarget,
   OperationMapping,
   ResourceBinding,
+  ScopePathBinding,
   SyncRule,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
@@ -142,6 +143,7 @@ function validInput(overrides: Partial<EnablementInput> = {}): EnablementInput {
     sourceCapabilities: capabilities(),
     targetCapabilities: capabilities(),
     backfillSkipped: false,
+    requiredScopeBindings: [],
     ...overrides,
   };
 }
@@ -604,5 +606,166 @@ describe("BE-1.5 / BE-2.5 — stillNeeds lists all missing items", () => {
       issue: "missing",
     });
     expect(decision.stillNeeds).toHaveLength(4);
+  });
+});
+
+// ── SS-5 — required scope path-parameter bindings (constant) ────────────────────
+
+describe("SS-5 — scope path-parameter bindings", () => {
+  function confirmedConstant(parameterName: string, value: string): ScopePathBinding {
+    return { kind: "constant", parameterName, value, confirmedBy: "op-alice", confirmedAt: T0 };
+  }
+  function unconfirmedConstant(parameterName: string): ScopePathBinding {
+    return { kind: "constant", parameterName, value: "", confirmedBy: null, confirmedAt: null };
+  }
+
+  it("backward-compatible: empty requiredScopeBindings adds no scope blocker (non-scoped rule)", () => {
+    const decision = evaluateEnablement(validInput({ requiredScopeBindings: [] }));
+    expectEnable(decision);
+  });
+
+  it("a required scope binding confirmed on the right side → not blocked (SS-5.1)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        sourceBinding: fullFetchSourceBinding({
+          scopePathBindings: [confirmedConstant("owner", "alice")],
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("an unconfirmed required scope binding → blocked with the structured scope-binding requirement (SS-5.4)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        sourceBinding: fullFetchSourceBinding({
+          scopePathBindings: [unconfirmedConstant("owner")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "users",
+    });
+  });
+
+  it("an ABSENT scope entry (no binding at all) → blocked (SS-5.4)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "repo", side: "target", resourceRef: "users" }],
+        // targetBinding has no scopePathBindings at all.
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "repo",
+      side: "target",
+      resourceRef: "users",
+    });
+  });
+
+  it("a confirmed-but-EMPTY-value constant does not satisfy the requirement (SS-1 confirmed = non-empty)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        sourceBinding: fullFetchSourceBinding({
+          // Both stamps set but value empty — a malformed row the schema forbids; the gate
+          // still refuses to treat it as confirmed (mirrors the SS-4 resolver guard).
+          scopePathBindings: [
+            {
+              kind: "constant",
+              parameterName: "owner",
+              value: "",
+              confirmedBy: "op",
+              confirmedAt: T0,
+            },
+          ],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "users",
+    });
+  });
+
+  it("checks a source requirement on the SOURCE binding, a target requirement on the TARGET binding (SS-5.5)", () => {
+    // The same parameter name is confirmed only on the SOURCE side, but the requirement is
+    // a TARGET one — so it must remain unsatisfied (sidedness is not cross-checked).
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "owner", side: "target", resourceRef: "users" }],
+        sourceBinding: fullFetchSourceBinding({
+          scopePathBindings: [confirmedConstant("owner", "alice")],
+        }),
+        targetBinding: targetBinding({
+          // target side has a DIFFERENT scope confirmed, not `owner`.
+          scopePathBindings: [confirmedConstant("repo", "phoenix")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "owner",
+      side: "target",
+      resourceRef: "users",
+    });
+  });
+
+  it("a mix of confirmed/unconfirmed scope bindings lists ONLY the unconfirmed ones", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [
+          { parameterName: "owner", side: "source", resourceRef: "users" },
+          { parameterName: "repo", side: "source", resourceRef: "users" },
+          { parameterName: "project", side: "target", resourceRef: "users" },
+        ],
+        sourceBinding: fullFetchSourceBinding({
+          scopePathBindings: [confirmedConstant("owner", "alice"), unconfirmedConstant("repo")],
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [confirmedConstant("project", "42")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toEqual([
+      { kind: "scope-binding", parameterName: "repo", side: "source", resourceRef: "users" },
+    ]);
+  });
+
+  it("composes with an existing BE-2 ref blocker (both appear in stillNeeds)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        sourceBinding: fullFetchSourceBinding({
+          nativeIdRef: unconfirmed(fieldTarget("id")), // BE-2.1 blocker on the source
+          scopePathBindings: [unconfirmedConstant("owner")], // SS-5.4 blocker on the source
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "binding-ref",
+      ref: "nativeIdRef",
+      side: "source",
+      usedFor: "native-id",
+    });
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "users",
+    });
   });
 });

@@ -128,6 +128,14 @@ export function describeRequirement(
           "No identity-lookup path — match-first is unavailable; enable only with backfill skipped.",
         bindingLink: null,
       };
+    case "scope-binding":
+      // SS-5.4 — a hard blocker; the full supply/confirm panel is SS-6. Deep-links to the
+      // side's app where the Phase-1 binding panel (RB-3) supplies the scope constant.
+      return {
+        key: `scope-binding:${requirement.side}:${requirement.parameterName}`,
+        label: `Supply and confirm the ${requirement.side} scope path-parameter '${requirement.parameterName}' (a constant) on ${requirement.resourceRef}.`,
+        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+      };
   }
 }
 

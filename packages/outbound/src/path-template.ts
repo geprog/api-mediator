@@ -1,4 +1,4 @@
-import type { ScopePathBinding } from "@mediator/domain";
+import type { IrOperation, ScopePathBinding } from "@mediator/domain";
 
 /**
  * **Scope path-parameter substitution + the backstop** (SS-4) — the shared, transport-
@@ -61,6 +61,39 @@ export function fillScopePathParameters(
     path = path.split(`{${name}}`).join(encodeURIComponent(value));
   }
   return path;
+}
+
+/**
+ * The **scope** (non-record-id) path parameters of an operation — the read-side
+ * complement of {@link fillScopePathParameters}: its distinct path-template parameter
+ * names **minus** the record-id parameter (`recordIdParamName` when the operation has
+ * one in its path), in first-appearance order.
+ *
+ * It is the shared classifier the SS-5 enablement gate (`docs/requirements/
+ * scoped-resource-sync.md` SS-5) uses to compute the scope bindings a scoped rule
+ * requires, deliberately routed through the **same** {@link pathParameterNames} +
+ * record-id skip that {@link fillScopePathParameters} substitutes over — so the gate's
+ * required set exactly matches what the resolver fills (never a param the resolver
+ * cannot fill, never a `{…}` the resolver leaves for the backstop). The caller keys the
+ * record-id determination to the operation's role exactly as SS-4 does (a write's
+ * `OperationMapping.targetIdParamRef`-if-path, a single-record read's own id parameter,
+ * `undefined` for a collection/poll read — every path param is then scope); an operation
+ * whose only path parameter is the record id contributes none (SS-5.3).
+ */
+export function scopeParamNamesOf(
+  operation: IrOperation,
+  recordIdParamName: string | undefined,
+): readonly string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of pathParameterNames(operation.path)) {
+    if (name === recordIdParamName || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
 }
 
 /**

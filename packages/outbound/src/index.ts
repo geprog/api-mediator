@@ -73,12 +73,15 @@ export { DbSyncEventStore, FakeSyncEventStore, type SyncEventStore } from "./syn
 // fabricates a binding from an unconfirmed ref (docs/architecture/data-model.md
 // ResourceBinding: "an unconfirmed ref is used nowhere").
 export {
+  findMappedTargetOperation,
   RepoRestSourceBindingResolver,
   RepoSingleRecordReadResolver,
   resolveSingleRecordRead,
   resolveSingleRecordReadBinding,
+  resolveSourcePollOperation,
   resolveSourceReadBinding,
   resolveWriteOperationBinding,
+  writeRecordIdPathParam,
   type ApiSpecReader,
   type ApprovedMappingReader,
   type BindingResolverOptions,
@@ -96,7 +99,11 @@ export {
 // Scope path-parameter substitution (SS-4) + the backstop: fill a scoped operation's
 // non-record-id path params from confirmed `constant` bindings; detect an unfilled `{…}`
 // before it reaches the wire.
-export { fillScopePathParameters, findUnfilledPathParam } from "./path-template.js";
+export {
+  fillScopePathParameters,
+  findUnfilledPathParam,
+  scopeParamNamesOf,
+} from "./path-template.js";
 
 // The REST single-record target reader — Conflict Detection's SingleRecordTargetReader
 // seam (CF-5/CF-6), obeying OC-3 load discipline and returning the target's stored

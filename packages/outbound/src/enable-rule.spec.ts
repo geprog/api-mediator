@@ -142,6 +142,7 @@ function validInput(overrides: Partial<EnablementInput> = {}): EnablementInput {
     sourceCapabilities: capabilities(),
     targetCapabilities: capabilities(),
     backfillSkipped: false,
+    requiredScopeBindings: [],
     ...overrides,
   };
 }

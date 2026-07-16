@@ -248,5 +248,7 @@ export type {
   MatchFirstUnavailableDegradation,
   PollOperationRequirement,
   PropagatableOperationRequirement,
+  ScopeBindingRequirement,
+  ScopeBindingUnconfirmedRequirement,
   TargetOperationRequirement,
 } from "./enablement/types.js";
