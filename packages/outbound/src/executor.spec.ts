@@ -264,6 +264,93 @@ describe("OC-1 REST Protocol Client", () => {
   });
 });
 
+// ── SS-4.5: the write executor backstop (an unfilled SCOPE `{…}` is never sent) ──
+
+describe("SS-4.5 write executor backstop — unfilled scope path parameter", () => {
+  /** A create whose scope `{id}` was never filled (a binding that slipped past the resolver). */
+  function scopedCreateUnfilled(): OutboundCall {
+    return {
+      ...common({
+        operation: { method: "PUT", pathTemplate: "/projects/{id}/tasks", parameterLocations: {} },
+      }),
+      action: "create",
+      payload: { title: "x" },
+      priorReconciledState: { kind: "none" },
+    };
+  }
+
+  /** An update whose record-id `{index}` fills but whose scope `{owner}`/`{repo}` did not. */
+  function scopedUpdateUnfilledScope(): OutboundCall {
+    const operationMapping: OperationMapping = {
+      id: "op-u",
+      mappingId: "map-1",
+      sourceOperationRef: "src.get",
+      targetOperationRef: "tgt.update",
+      action: "update",
+      targetIdParamRef: "idParam",
+    };
+    return {
+      ...common({
+        operation: {
+          method: "PATCH",
+          pathTemplate: "/repos/{owner}/{repo}/issues/{index}",
+          parameterLocations: { idParam: { name: "index", in: "path" } },
+        },
+        operationMapping,
+      }),
+      action: "update",
+      payload: { title: "x" },
+      priorReconciledState: { kind: "none" },
+      targetNativeId: "7",
+    };
+  }
+
+  it("a create with an unfilled scope {id} is a permanent failure and is NEVER sent", async () => {
+    const protocol = new FakeProtocolClient(OK_CREATE);
+    const store = new FakeSyncEventStore();
+    const executor = makeExecutor(protocol, new FakeCredentialAccess("invoked"), store);
+
+    const result = await executor.execute(scopedCreateUnfilled());
+
+    expect(result.outcome).toBe("failure");
+    if (result.outcome === "failure") {
+      expect(result.disposition).toBe("permanent");
+      expect(result.reason).toContain("{id}");
+    }
+    // The literal `{id}` never went on the wire — no fabricated wrong-URL write.
+    expect(protocol.requests).toHaveLength(0);
+  });
+
+  it("guards the SCOPE param only: the record-id {index} is filled first, then {owner} trips it", async () => {
+    const protocol = new FakeProtocolClient(() => ({ status: 200, headers: {}, body: {} }));
+    const store = new FakeSyncEventStore();
+    const executor = makeExecutor(protocol, new FakeCredentialAccess("invoked"), store);
+
+    const result = await executor.execute(scopedUpdateUnfilledScope());
+
+    expect(result.outcome).toBe("failure");
+    if (result.outcome === "failure") {
+      expect(result.disposition).toBe("permanent");
+      // The still-templated record id ({index}) is filled BEFORE the check, so the guard
+      // names the scope param ({owner}), never false-tripping on the record id.
+      expect(result.reason).toContain("{owner}");
+      expect(result.reason).not.toContain("{index}");
+    }
+    expect(protocol.requests).toHaveLength(0);
+  });
+
+  it("does NOT false-trip a normal update whose ONLY template is the record id (it is filled and sent)", async () => {
+    const protocol = new FakeProtocolClient(() => ({ status: 200, headers: {}, body: {} }));
+    const store = new FakeSyncEventStore();
+    const executor = makeExecutor(protocol, new FakeCredentialAccess("invoked"), store);
+
+    const result = await executor.execute(updateCall());
+
+    expect(result.outcome).toBe("success");
+    expect(protocol.requests[0]?.url).toBe("https://api.test/customers/tgt-77");
+  });
+});
+
 // ── OC-2: idempotency dedup within a bounded lookback ───────────────────────────
 
 describe("OC-2 dedup within a bounded lookback", () => {

@@ -88,7 +88,11 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
       );
     }
 
-    const operations = resolveTargetOperations(artifacts.operationMappings, artifacts.targetGroup);
+    const operations = resolveTargetOperations(
+      artifacts.operationMappings,
+      artifacts.targetGroup,
+      artifacts.targetBinding,
+    );
     const targetReadBinding = resolveSingleRecordReadBinding(
       artifacts.targetGroup,
       artifacts.targetBinding,

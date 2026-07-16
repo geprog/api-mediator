@@ -22,6 +22,7 @@ import {
   type PriorReconciledState,
 } from "./idempotency.js";
 import { AppLoadGovernor } from "./load-governor.js";
+import { findUnfilledPathParam } from "./path-template.js";
 import type {
   OutboundRequest,
   OutboundResponse,
@@ -492,6 +493,19 @@ export class OutboundCallExecutor {
       } else {
         headers[location.name] = value;
       }
+    }
+
+    // SS-4.5 backstop: the record-id parameter is now filled (create has none in its
+    // path), so a still-templated `{…}` is a genuinely-unfilled SCOPE parameter. Refuse
+    // to send a literal `{owner}` — never a silent wrong-URL write — as a permanent config
+    // failure. `resolveWriteOperationBinding` normally fills scope (or unresolves the
+    // whole op) upstream; this is defense-in-depth and never false-trips the record id.
+    const unfilledScope = findUnfilledPathParam(path);
+    if (unfilledScope !== undefined) {
+      return {
+        ok: false,
+        reason: `unfilled scope path parameter ${unfilledScope} on the target operation`,
+      };
     }
 
     const url = joinUrl(call.baseUrl, path) + (query.length > 0 ? `?${query.join("&")}` : "");

@@ -16,6 +16,7 @@ import type {
 import { stripUndefined } from "@mediator/domain";
 import type { JsonValue } from "@mediator/transform";
 
+import { fillScopePathParameters } from "./path-template.js";
 import type { HttpMethod, ParameterLocation, RestOperationBinding } from "./protocol-client.js";
 import type {
   RestDeltaConvention,
@@ -449,6 +450,20 @@ export function resolveSourceReadBinding(
   if (method === undefined) {
     return undefined;
   }
+
+  // SS-4.1 — a collection/source read has NO record-id path parameter (the record id is
+  // a response field), so EVERY path parameter is a scope parameter: fill each from the
+  // SOURCE resource's confirmed `constant` bindings. An unconfirmed scope param → the
+  // whole binding unresolves (SS-4.4), never a fabricated URL; the composed path then
+  // carries no `{…}`.
+  const path = fillScopePathParameters(
+    operation.path,
+    input.sourceBinding.scopePathBindings ?? [],
+    undefined,
+  );
+  if (path === undefined) {
+    return undefined;
+  }
   const recordsPath = deriveRecordsPath(operation, nativeIdPath);
 
   let pagination: RestPaginationConvention;
@@ -475,7 +490,7 @@ export function resolveSourceReadBinding(
     baseUrl: input.baseUrl,
     limits: input.limits,
     method,
-    path: operation.path,
+    path,
     nativeIdPath,
     recordsPath,
     pagination,
@@ -496,10 +511,22 @@ export function resolveSourceReadBinding(
  * `cookie` parameters are omitted (a `ParameterLocation` models only path/query/header,
  * which the executor fills); an id parameter that resolves to a cookie is therefore
  * absent from the map and the executor reports the config error rather than mis-placing it.
+ *
+ * SS-4.2 — the returned `pathTemplate` has every **scope** (non-record-id) path parameter
+ * substituted from the TARGET resource's confirmed `constant` bindings, while the
+ * **record-id** parameter (named by `OperationMapping.targetIdParamRef`, present on
+ * update/delete, absent on create) stays **templated** for the executor's per-record
+ * id-fill from the `RecordLink`. The record-id-vs-scope split is keyed to the operation's
+ * **role**, not to a bare name: on a create there is no `targetIdParamRef`, so ALL its
+ * path parameters are scope (Vikunja `PUT /projects/{id}/tasks` fills `{id}` from the
+ * project scope constant), whereas the same-named `{id}` on the `POST /tasks/{id}` update
+ * is the record id and is never filled from a scope. An unconfirmed scope parameter →
+ * `undefined` (the whole binding unresolves; SS-4.4), never a fabricated URL.
  */
 export function resolveWriteOperationBinding(
   operationMapping: OperationMapping,
   targetGroup: IrResourceGroup,
+  targetBinding: ResourceBinding,
 ): RestOperationBinding | undefined {
   const parsed = parseOperationRef(operationMapping.targetOperationRef);
   if (parsed === undefined || parsed.resourceRef !== targetGroup.resourceRef) {
@@ -514,6 +541,15 @@ export function resolveWriteOperationBinding(
     return undefined;
   }
 
+  const pathTemplate = fillScopePathParameters(
+    operation.path,
+    targetBinding.scopePathBindings ?? [],
+    writeRecordIdPathParam(operationMapping, operation),
+  );
+  if (pathTemplate === undefined) {
+    return undefined; // SS-4.4 — an unconfirmed scope constant never fabricates a URL.
+  }
+
   const parameterLocations: Record<string, ParameterLocation> = {};
   for (const parameter of operation.parameters) {
     const location = toParameterLocation(parameter);
@@ -526,10 +562,44 @@ export function resolveWriteOperationBinding(
 
   return stripUndefined({
     method,
-    pathTemplate: operation.path,
+    pathTemplate,
     parameterLocations,
     idempotencyKeyHeader: findIdempotencyKeyHeader(operation),
   });
+}
+
+/**
+ * The name of this write operation's **record-id path parameter** — the one whose `{…}`
+ * must stay templated for the executor's `RecordLink` fill — or `undefined` when the
+ * operation has no record-id path parameter to leave templated (an `action = create`
+ * carries no `targetIdParamRef`, so all its path params are scope; and an id parameter
+ * located in the query/header is not in the path template at all). Keyed to the
+ * operation's role via `OperationMapping.targetIdParamRef`, never to a bare name.
+ */
+function writeRecordIdPathParam(
+  operationMapping: OperationMapping,
+  operation: IrOperation,
+): string | undefined {
+  const parameterName = paramRefName(operationMapping.targetIdParamRef);
+  if (parameterName === undefined) {
+    return undefined;
+  }
+  const parameter = operation.parameters.find(
+    (candidate) => candidate.name === parameterName && candidate.location === "path",
+  );
+  return parameter?.name;
+}
+
+/** The bare parameter name of a serialized `resourceRef/operationId#name` ref, else `undefined`. */
+function paramRefName(ref: string | undefined): string | undefined {
+  if (ref === undefined) {
+    return undefined;
+  }
+  const hash = ref.lastIndexOf("#");
+  if (hash === -1 || hash >= ref.length - 1) {
+    return undefined;
+  }
+  return ref.slice(hash + 1);
 }
 
 function toParameterLocation(parameter: IrParameter): ParameterLocation | undefined {
@@ -623,13 +693,23 @@ export interface ResolvedSingleRecordRead {
  * Resolve a {@link SingleRecordReadBinding} against the target IR + app into the wire
  * shape a read issues, or `undefined` when the operation / id parameter cannot be
  * resolved (never a fabricated call). Pure — the repo-backed
- * {@link RepoSingleRecordReadResolver} loads the IR + app and calls this.
+ * {@link RepoSingleRecordReadResolver} loads the IR + app + `ResourceBinding` and calls this.
+ *
+ * SS-4.3 — the returned `pathTemplate` has every **scope** (non-record-id) path parameter
+ * substituted from the resource's confirmed `constant` bindings (`targetBinding`), while
+ * the **record-id** parameter (`binding.idParamRef` — the by-id read's own id parameter,
+ * the most-specific/last path param) stays **templated** for the reader's per-record
+ * id-fill from the `RecordLink`. An unconfirmed scope parameter → `undefined` (SS-4.4),
+ * never a fabricated URL; the {@link RestSingleRecordTargetReader} backstop then never
+ * sees a literal `{owner}`.
  */
 export function resolveSingleRecordRead(input: {
   readonly binding: SingleRecordReadBinding;
   readonly targetGroup: IrResourceGroup;
   readonly baseUrl: string;
   readonly limits?: OutboundLoadLimits;
+  /** The resource's `ResourceBinding` — its confirmed `constant` scope bindings fill the non-id path params. */
+  readonly targetBinding?: ResourceBinding;
 }): ResolvedSingleRecordRead | undefined {
   const operation = findOperationById(input.targetGroup, input.binding.readOperationId);
   if (operation === undefined) {
@@ -647,10 +727,20 @@ export function resolveSingleRecordRead(input: {
   if (idLocation === undefined) {
     return undefined; // an id in a cookie is not fillable.
   }
+  const pathTemplate = fillScopePathParameters(
+    operation.path,
+    input.targetBinding?.scopePathBindings ?? [],
+    // The record-id parameter stays templated only when it is IN the path (a query/header
+    // id leaves ALL path params as scope); the reader fills the id location downstream.
+    idLocation.in === "path" ? input.binding.idParamRef : undefined,
+  );
+  if (pathTemplate === undefined) {
+    return undefined; // SS-4.4 — an unconfirmed scope constant never fabricates a URL.
+  }
   return stripUndefined({
     baseUrl: input.baseUrl,
     method,
-    pathTemplate: operation.path,
+    pathTemplate,
     idLocation,
     limits: input.limits,
   });
@@ -840,14 +930,25 @@ export interface SingleRecordReadResolver {
   ): Promise<ResolvedSingleRecordRead | undefined>;
 }
 
-/** The real {@link SingleRecordReadResolver}, loading the target app's active PROVIDER spec. */
+/**
+ * The real {@link SingleRecordReadResolver}, loading the target app's active PROVIDER spec
+ * **and** the containing resource's `ResourceBinding` — the latter's confirmed `constant`
+ * scope bindings fill the read's non-record-id path parameters (SS-4.3), keyed to whichever
+ * app `resolve` is pointed at (the target for a CF read; the source for an SA-4.2 re-read).
+ */
 export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
   readonly #apiSpecs: ApiSpecReader;
   readonly #registeredApps: RegisteredAppReader;
+  readonly #resourceBindings: ResourceBindingReader;
 
-  public constructor(apiSpecs: ApiSpecReader, registeredApps: RegisteredAppReader) {
+  public constructor(
+    apiSpecs: ApiSpecReader,
+    registeredApps: RegisteredAppReader,
+    resourceBindings: ResourceBindingReader,
+  ) {
     this.#apiSpecs = apiSpecs;
     this.#registeredApps = registeredApps;
+    this.#resourceBindings = resourceBindings;
   }
 
   public async resolve(
@@ -867,12 +968,15 @@ export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
         if (findOperationById(group, binding.readOperationId) === undefined) {
           continue;
         }
+        const bindings = await this.#resourceBindings.listByApiSpecId(spec.id);
+        const resourceBinding = findBinding(bindings, group.resourceRef);
         const resolved = resolveSingleRecordRead(
           stripUndefined({
             binding,
             targetGroup: group,
             baseUrl: app.baseUrl,
             limits: app.outboundLimits,
+            targetBinding: resourceBinding,
           }),
         );
         if (resolved !== undefined) {

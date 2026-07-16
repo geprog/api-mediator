@@ -12,6 +12,7 @@ import type {
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
+  ScopePathBinding,
   SyncRule,
 } from "@mediator/domain";
 import type {
@@ -27,6 +28,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   RepoRestSourceBindingResolver,
+  RepoSingleRecordReadResolver,
   resolveSingleRecordRead,
   resolveSingleRecordReadBinding,
   resolveSourceReadBinding,
@@ -44,6 +46,7 @@ import {
 } from "./binding-resolvers.js";
 import type { CredentialAccess, CredentialApplier } from "./executor.js";
 import { AppLoadGovernor } from "./load-governor.js";
+import { fillScopePathParameters, findUnfilledPathParam } from "./path-template.js";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protocol-client.js";
 import { RestSingleRecordTargetReader } from "./rest-single-record-reader.js";
 
@@ -124,6 +127,30 @@ function field(name: string, type: string): IrField {
 function pathValue(record: JsonRecord, path: string): JsonValue {
   const read = readPath(record, path);
   return read.present ? read.value : null;
+}
+
+/** A `constant` scope path-parameter binding (SS-1 shape), confirmed by default. */
+function scopeConstant(parameterName: string, value: string, confirmed = true): ScopePathBinding {
+  return {
+    kind: "constant",
+    parameterName,
+    value,
+    confirmedBy: confirmed ? "operator" : null,
+    confirmedAt: confirmed ? CONFIRMED_AT : null,
+  };
+}
+
+/** A minimal `ResourceBinding` carrying only `scopePathBindings` (SS-4 fill input). */
+function scopedBinding(
+  resourceRef: string,
+  scopePathBindings: ScopePathBinding[] = [],
+): ResourceBinding {
+  return {
+    id: `rb-${resourceRef}`,
+    apiSpecId: `spec-${resourceRef}`,
+    resourceRef,
+    scopePathBindings,
+  };
 }
 
 // ── 1. Full-fetch source-read binding from the scenario Vikunja spec ────────────
@@ -547,11 +574,14 @@ function operationMapping(overrides: Partial<OperationMapping>): OperationMappin
 
 describe("resolveWriteOperationBinding — create / update / delete", () => {
   const group = targetGroup();
+  // The scenario-5 `issues` fixture has no scope path parameters, so an empty scope binding.
+  const noScope = scopedBinding("issues");
 
   it("resolves a create operation (no targetIdParamRef)", () => {
     const binding = resolveWriteOperationBinding(
       operationMapping({ action: "create", targetOperationRef: "issues/createIssue" }),
       group,
+      noScope,
     );
     expect(binding?.method).toBe("POST");
     expect(binding?.pathTemplate).toBe("/issues");
@@ -566,6 +596,7 @@ describe("resolveWriteOperationBinding — create / update / delete", () => {
         targetIdParamRef: idRef,
       }),
       group,
+      noScope,
     );
     expect(binding?.method).toBe("PATCH");
     expect(binding?.pathTemplate).toBe("/issues/{issueId}");
@@ -582,6 +613,7 @@ describe("resolveWriteOperationBinding — create / update / delete", () => {
         targetIdParamRef: idRef,
       }),
       group,
+      noScope,
     );
     expect(binding?.method).toBe("DELETE");
     expect(binding?.parameterLocations[idRef]).toEqual({ name: "issueId", in: "path" });
@@ -596,6 +628,7 @@ describe("resolveWriteOperationBinding — create / update / delete", () => {
         targetIdParamRef: idRef,
       }),
       group,
+      noScope,
     );
     expect(binding?.parameterLocations[idRef]).toEqual({ name: "id", in: "query" });
     expect(binding?.idempotencyKeyHeader).toBe("Idempotency-Key");
@@ -606,6 +639,7 @@ describe("resolveWriteOperationBinding — create / update / delete", () => {
       resolveWriteOperationBinding(
         operationMapping({ action: "update", targetOperationRef: "issues/ghostOp" }),
         group,
+        noScope,
       ),
     ).toBeUndefined();
   });
@@ -627,6 +661,7 @@ describe("resolveWriteOperationBinding — create / update / delete", () => {
         targetIdParamRef: idRef,
       }),
       tasks,
+      scopedBinding("tasks"),
     );
     expect(binding?.method).toBe("POST");
     expect(binding?.pathTemplate).toBe("/tasks/{id}");
@@ -875,6 +910,329 @@ describe("RepoRestSourceBindingResolver — loads state and composes the binding
   it("returns undefined for an unknown rule (never fabricated)", async () => {
     const repos = new FakeRepos(new Map(), new Map(), new Map(), new Map(), new Map());
     expect(await new RepoRestSourceBindingResolver(repos).resolve("missing")).toBeUndefined();
+  });
+});
+
+// ── 8. SS-4: scope-constant substitution + the backstop ─────────────────────────
+
+/**
+ * A hand-built Gitea `issues` IR group mirroring the real trimmed scenario-1 spec:
+ * a repo-scoped collection read `GET /repos/{owner}/{repo}/issues`, a create
+ * `POST /repos/{owner}/{repo}/issues`, and update/delete/by-id-read on
+ * `/repos/{owner}/{repo}/issues/{index}` — `{owner}`/`{repo}` are scope, `{index}` is the
+ * record id.
+ */
+function giteaIssuesGroup(): IrResourceGroup {
+  const repoScope = [param("owner", "path"), param("repo", "path")];
+  return {
+    resourceRef: "issues",
+    name: "issues",
+    operations: [
+      {
+        operationId: "issueListIssues",
+        method: "get",
+        path: "/repos/{owner}/{repo}/issues",
+        parameters: [...repoScope, param("page", "query"), param("limit", "query")],
+        responseSchema: {
+          name: "Issue",
+          fields: [field("number", "integer"), field("title", "string")],
+        },
+      },
+      {
+        operationId: "issueCreateIssue",
+        method: "post",
+        path: "/repos/{owner}/{repo}/issues",
+        parameters: repoScope,
+        requestSchema: { name: "CreateIssue", fields: [field("title", "string")] },
+      },
+      {
+        operationId: "issueEditIssue",
+        method: "patch",
+        path: "/repos/{owner}/{repo}/issues/{index}",
+        parameters: [...repoScope, param("index", "path")],
+      },
+      {
+        operationId: "issueDelete",
+        method: "delete",
+        path: "/repos/{owner}/{repo}/issues/{index}",
+        parameters: [...repoScope, param("index", "path")],
+      },
+      {
+        operationId: "issueGetIssue",
+        method: "get",
+        path: "/repos/{owner}/{repo}/issues/{index}",
+        parameters: [...repoScope, param("index", "path")],
+        responseSchema: {
+          name: "Issue",
+          fields: [field("number", "integer"), field("title", "string")],
+        },
+      },
+    ],
+    schemas: [],
+    crossResourceRefs: [],
+  };
+}
+
+/** The Gitea `issues` `ResourceBinding`: confirmed native id + collection read + the given scope constants. */
+function giteaIssuesBinding(scope: ScopePathBinding[]): ResourceBinding {
+  return {
+    id: "rb-gitea-issues",
+    apiSpecId: "spec-gitea",
+    resourceRef: "issues",
+    nativeIdRef: confirm(unconfirmedField("number")),
+    collectionReadRef: confirm(unconfirmedOperation("issueListIssues")),
+    scopePathBindings: scope,
+  };
+}
+
+const GITEA_SCOPE = [scopeConstant("owner", "alice"), scopeConstant("repo", "phoenix")];
+
+describe("fillScopePathParameters / findUnfilledPathParam (SS-4 unit)", () => {
+  it("fills every scope param, leaving the named record-id templated", () => {
+    expect(
+      fillScopePathParameters("/repos/{owner}/{repo}/issues/{index}", GITEA_SCOPE, "index"),
+    ).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+
+  it("fills ALL path params when there is no record-id param (collection read)", () => {
+    expect(fillScopePathParameters("/repos/{owner}/{repo}/issues", GITEA_SCOPE, undefined)).toBe(
+      "/repos/alice/phoenix/issues",
+    );
+  });
+
+  it("returns undefined when a scope param has no confirmed constant (never fabricates)", () => {
+    expect(
+      fillScopePathParameters(
+        "/repos/{owner}/{repo}/issues",
+        [scopeConstant("owner", "alice")],
+        undefined,
+      ),
+    ).toBeUndefined();
+    // Present-but-unconfirmed is also unresolved.
+    expect(
+      fillScopePathParameters(
+        "/repos/{owner}/{repo}/issues",
+        [scopeConstant("owner", "alice"), scopeConstant("repo", "phoenix", false)],
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("url-encodes a substituted scope value", () => {
+    expect(
+      fillScopePathParameters("/t/{tenant}/x", [scopeConstant("tenant", "a b/c")], undefined),
+    ).toBe("/t/a%20b%2Fc/x");
+  });
+
+  it("detects the first still-templated param (backstop)", () => {
+    expect(findUnfilledPathParam("/repos/alice/phoenix/issues/{index}")).toBe("{index}");
+    expect(findUnfilledPathParam("/repos/alice/phoenix/issues")).toBeUndefined();
+  });
+});
+
+describe("SS-4.1 source poll — scope constants fill the collection-read path", () => {
+  it("resolves Gitea /repos/{owner}/{repo}/issues → /repos/alice/phoenix/issues (no {…} left)", () => {
+    const result = resolveSourceReadBinding({
+      ...SOURCE_INPUT_BASE,
+      rule: rule(),
+      sourceCapabilities: caps(),
+      sourceGroup: giteaIssuesGroup(),
+      sourceBinding: giteaIssuesBinding(GITEA_SCOPE),
+    });
+    expect(result?.path).toBe("/repos/alice/phoenix/issues");
+    expect(result?.path).not.toContain("{");
+  });
+});
+
+describe("SS-4.2 write — non-id scope filled, targetIdParamRef stays templated", () => {
+  it("Gitea update PATCH /repos/{owner}/{repo}/issues/{index}: owner/repo filled, {index} templated", () => {
+    const idRef = "issues/issueEditIssue#index";
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "issues/issueEditIssue",
+        targetIdParamRef: idRef,
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_SCOPE),
+    );
+    expect(binding?.method).toBe("PATCH");
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    expect(binding?.parameterLocations[idRef]).toEqual({ name: "index", in: "path" });
+  });
+
+  it("Gitea delete: owner/repo filled, {index} templated", () => {
+    const idRef = "issues/issueDelete#index";
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "delete",
+        targetOperationRef: "issues/issueDelete",
+        targetIdParamRef: idRef,
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_SCOPE),
+    );
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+});
+
+describe("SS-4.2 the Vikunja {id} collision — role, not bare name, decides", () => {
+  // One `tasks` resource, one scope constant `id = 42` (the project id), two ops sharing
+  // the bare path-param name `{id}` with OPPOSITE roles.
+  function vikunjaTasksGroup(): IrResourceGroup {
+    return {
+      resourceRef: "tasks",
+      name: "tasks",
+      operations: [
+        {
+          operationId: "put /projects/{id}/tasks",
+          method: "put",
+          path: "/projects/{id}/tasks",
+          parameters: [param("id", "path")],
+          requestSchema: { name: "Task", fields: [field("title", "string")] },
+        },
+        {
+          operationId: "post /tasks/{id}",
+          method: "post",
+          path: "/tasks/{id}",
+          parameters: [param("id", "path")],
+        },
+      ],
+      schemas: [],
+      crossResourceRefs: [],
+    };
+  }
+  const tasksBinding = scopedBinding("tasks", [scopeConstant("id", "42")]);
+
+  it("create PUT /projects/{id}/tasks: {id} is a SCOPE param → filled from the project constant (42)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "tasks/put /projects/{id}/tasks" }),
+      vikunjaTasksGroup(),
+      tasksBinding,
+    );
+    expect(binding?.method).toBe("PUT");
+    expect(binding?.pathTemplate).toBe("/projects/42/tasks");
+  });
+
+  it("update POST /tasks/{id}: {id} is the RECORD ID → stays templated, NEVER filled from the project constant", () => {
+    const idRef = "tasks/post /tasks/{id}#id";
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "tasks/post /tasks/{id}",
+        targetIdParamRef: idRef,
+      }),
+      vikunjaTasksGroup(),
+      tasksBinding,
+    );
+    expect(binding?.pathTemplate).toBe("/tasks/{id}");
+    expect(binding?.parameterLocations[idRef]).toEqual({ name: "id", in: "path" });
+  });
+});
+
+describe("SS-4.3 single-record read — scope filled, id parameter templated", () => {
+  it("resolveSingleRecordReadBinding + resolveSingleRecordRead fill owner/repo, leave {index}", () => {
+    const binding = giteaIssuesBinding(GITEA_SCOPE);
+    const readBinding = resolveSingleRecordReadBinding(giteaIssuesGroup(), binding);
+    expect(readBinding).toEqual({ readOperationId: "issueGetIssue", idParamRef: "index" });
+    const resolved = resolveSingleRecordRead({
+      binding: readBinding as CfReadBinding,
+      targetGroup: giteaIssuesGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: binding,
+    });
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    expect(resolved?.idLocation).toEqual({ name: "index", in: "path" });
+  });
+
+  it("RepoSingleRecordReadResolver loads the resource binding and fills scope end to end", async () => {
+    const specs = new Map<string, ApiSpec>([
+      ["spec-gitea", apiSpec({ id: "spec-gitea", appId: "gitea", parsedIR: [giteaIssuesGroup()] })],
+    ]);
+    const repos = new FakeRepos(
+      new Map(),
+      new Map(),
+      specs,
+      new Map([["spec-gitea", [giteaIssuesBinding(GITEA_SCOPE)]]]),
+      new Map([["gitea", app("gitea")]]),
+    );
+    const resolver = new RepoSingleRecordReadResolver(
+      repos.apiSpecs,
+      repos.registeredApps,
+      repos.resourceBindings,
+    );
+    const resolved = await resolver.resolve("gitea", {
+      readOperationId: "issueGetIssue",
+      idParamRef: "index",
+    });
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    expect(resolved?.baseUrl).toBe("https://gitea.test");
+  });
+});
+
+describe("SS-4.4 an unconfirmed / missing scope constant unresolves the whole binding", () => {
+  it("source read: a missing owner constant → undefined (never a fabricated URL)", () => {
+    const result = resolveSourceReadBinding({
+      ...SOURCE_INPUT_BASE,
+      rule: rule(),
+      sourceCapabilities: caps(),
+      sourceGroup: giteaIssuesGroup(),
+      sourceBinding: giteaIssuesBinding([scopeConstant("repo", "phoenix")]),
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("write: an UNCONFIRMED owner constant → undefined", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "issues/issueEditIssue",
+        targetIdParamRef: "issues/issueEditIssue#index",
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([
+        scopeConstant("owner", "alice", false),
+        scopeConstant("repo", "phoenix"),
+      ]),
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("single-record read: a missing repo constant → undefined", () => {
+    const resolved = resolveSingleRecordRead({
+      binding: { readOperationId: "issueGetIssue", idParamRef: "index" },
+      targetGroup: giteaIssuesGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: giteaIssuesBinding([scopeConstant("owner", "alice")]),
+    });
+    expect(resolved).toBeUndefined();
+  });
+});
+
+describe("SS-4.6 scenario-1 Gitea source + target resolve end to end", () => {
+  it("source poll → /repos/alice/phoenix/issues; update → /repos/alice/phoenix/issues/{index}", () => {
+    const binding = giteaIssuesBinding(GITEA_SCOPE);
+    const source = resolveSourceReadBinding({
+      ...SOURCE_INPUT_BASE,
+      rule: rule(),
+      sourceCapabilities: caps(),
+      sourceGroup: giteaIssuesGroup(),
+      sourceBinding: binding,
+    });
+    const idRef = "issues/issueEditIssue#index";
+    const update = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "issues/issueEditIssue",
+        targetIdParamRef: idRef,
+      }),
+      giteaIssuesGroup(),
+      binding,
+    );
+    expect(source?.path).toBe("/repos/alice/phoenix/issues");
+    expect(update?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    // The record id is filled per record downstream from the RecordLink, not here.
+    expect(update?.parameterLocations[idRef]).toEqual({ name: "index", in: "path" });
   });
 });
 

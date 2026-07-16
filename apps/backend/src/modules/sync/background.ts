@@ -276,7 +276,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     },
   );
   const singleRecordReader = new RestSingleRecordTargetReader(
-    new RepoSingleRecordReadResolver(apiSpecs, registeredApps),
+    new RepoSingleRecordReadResolver(apiSpecs, registeredApps, resourceBindings),
     protocol,
     credentialStore,
     governor,

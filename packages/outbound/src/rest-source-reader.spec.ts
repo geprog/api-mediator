@@ -376,3 +376,49 @@ describe("RestSourceReader — SP-2/SP-3 delta + abort", () => {
     expect(httpOutcome.ok).toBe(false);
   });
 });
+
+describe("RestSourceReader — SS-4.5 backstop: an unfilled scope path parameter is never sent", () => {
+  it("aborts a collection read whose path still carries a literal {owner}/{repo} (no request, no false-empty page)", async () => {
+    const governor = new AppLoadGovernor();
+    const protocol = new FakeProtocolClient(() => ({
+      status: 200,
+      headers: {},
+      body: { items: [] },
+    }));
+    // A scoped Gitea poll whose confirmed constants were (hypothetically) not substituted:
+    // the source read has NO record-id template, so `{owner}`/`{repo}` are genuinely-unfilled
+    // scope params — the reader must refuse rather than fetch `/repos/{owner}/{repo}/issues`.
+    const outcome = await reader(
+      binding({ path: "/repos/{owner}/{repo}/issues" }),
+      protocol,
+      governor,
+    ).readCollectionPage("rule-1", undefined);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain("{owner}");
+    }
+    // The literal `{owner}` never went on the wire — an empty page would be misread as mass deletion.
+    expect(protocol.requests).toHaveLength(0);
+  });
+
+  it("aborts a delta read with an unfilled scope param too", async () => {
+    const governor = new AppLoadGovernor();
+    const protocol = new FakeProtocolClient(() => ({
+      status: 200,
+      headers: {},
+      body: { items: [] },
+    }));
+    const outcome = await reader(
+      binding({
+        path: "/repos/{owner}/{repo}/issues",
+        delta: { cursorParam: "since", nextCursorPath: "since" },
+      }),
+      protocol,
+      governor,
+    ).readDelta("rule-1", "c1");
+
+    expect(outcome.ok).toBe(false);
+    expect(protocol.requests).toHaveLength(0);
+  });
+});
