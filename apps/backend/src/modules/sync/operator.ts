@@ -42,6 +42,7 @@ import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/teleme
 import { BadRequestError, NotFoundError } from "../../app-errors.js";
 import type { EnableRuleGateResult } from "./background.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos, type RuleArtifacts } from "./resolution.js";
+import { computeRequiredScopeBindings } from "./scope-requirements.js";
 
 /**
  * **The Sync HTTP API application service (SA-1..SA-3)** — the seam between the
@@ -855,6 +856,7 @@ export class SyncOperatorService {
       sourceCapabilities: artifacts.sourceApp.capabilities,
       targetCapabilities: artifacts.targetApp.capabilities,
       backfillSkipped,
+      requiredScopeBindings: computeRequiredScopeBindings(artifacts, { backfillSkipped }),
     };
   }
 

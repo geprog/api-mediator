@@ -1,4 +1,4 @@
-import type { ConfirmableRef, OperationMapping } from "@mediator/domain";
+import type { ConfirmableRef, OperationMapping, ResourceBinding } from "@mediator/domain";
 
 import type {
   EnablementDecision,
@@ -60,6 +60,30 @@ function isDeltaPolling(input: EnablementInput): boolean {
 /** A usable routed operation of an `action` needs its `targetIdParamRef` to route via the `RecordLink`. */
 function hasUsableRoutedOp(ops: readonly OperationMapping[], action: "update" | "delete"): boolean {
   return ops.some((op) => op.action === action && op.targetIdParamRef !== undefined);
+}
+
+/**
+ * SS-5 — a resource's scope path parameter has a **confirmed `constant`** binding: an
+ * entry keyed by `parameterName`, both confirmation stamps set, and a non-empty value.
+ * Mirrors the SS-1 confirmation discipline **and** the SS-4 resolver's own
+ * `confirmedConstantValue` guard exactly (`packages/outbound/src/path-template.ts`), so a
+ * scope parameter the gate reports satisfied is precisely one the resolver can fill — and
+ * one it reports unsatisfied is precisely one the resolver would leave as `{…}`.
+ *
+ * `ScopePathBinding` is currently a single-member (`constant`) union, so `entry.value` is
+ * read directly (mirroring the resolver's `confirmedConstantValue`). When Layers 2/3 add
+ * value-less kinds (`record-derived`/`scope-link`), `entry.value` stops type-checking here
+ * and this must narrow to `entry.kind === "constant"` first — the compiler enforces it, so
+ * a non-constant fill source can never be read as a Layer-1 literal.
+ */
+function isScopeConstantConfirmed(binding: ResourceBinding, parameterName: string): boolean {
+  return (binding.scopePathBindings ?? []).some(
+    (entry) =>
+      entry.parameterName === parameterName &&
+      entry.confirmedBy !== null &&
+      entry.confirmedAt !== null &&
+      entry.value.length > 0,
+  );
 }
 
 /**
@@ -238,6 +262,26 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
     !isRefConfirmed(targetBinding.changeTimestampRef)
   ) {
     degradations.push({ kind: "lww-observation-order", side: "target" });
+  }
+
+  // ── SS-5: required scope path-parameter bindings (constant) ──────────────────
+  // A scoped rule can only enable once every scope path parameter of the operations it
+  // actually calls has a confirmed `constant` binding — checked on the NAMED side's
+  // `ResourceBinding` (SS-5.5: source-op params on the source binding, target-op params
+  // on the target). The required set is precomputed by the SA classifier from the IR (it
+  // matches what the SS-4 resolver fills); each unconfirmed one blocks and joins the
+  // BE-1/BE-2 requirements in `stillNeeds` (SS-5.4). An empty list is a no-op for a
+  // non-scoped rule (backward-compatible).
+  for (const requirement of input.requiredScopeBindings) {
+    const binding = requirement.side === "source" ? sourceBinding : targetBinding;
+    if (!isScopeConstantConfirmed(binding, requirement.parameterName)) {
+      stillNeeds.push({
+        kind: "scope-binding",
+        parameterName: requirement.parameterName,
+        side: requirement.side,
+        resourceRef: requirement.resourceRef,
+      });
+    }
   }
 
   // ── Verdict (BE-1.5 / BE-2.5) ────────────────────────────────────────────────

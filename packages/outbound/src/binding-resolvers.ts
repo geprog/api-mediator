@@ -381,19 +381,32 @@ function isDeltaPolling(input: SourceReadBindingInput): boolean {
 }
 
 /**
- * Resolve the source-read operation (method/path): the pinned `SyncRule.pollOperationRef`
- * when it resolves in the source group, else the mode's confirmed structured ref —
- * the confirmed `collectionReadRef` operation for full-fetch, the confirmed
- * `deltaCursorRef`'s operation (the op carrying the cursor param) for delta.
+ * Resolve the **source poll operation** (the IR operation the Poller reads each cycle,
+ * whose method/path the source-read binding is composed from): the pinned
+ * `SyncRule.pollOperationRef` when it resolves in the source group, else the mode's
+ * confirmed structured ref — the confirmed `deltaCursorRef`'s operation (the op carrying
+ * the cursor param) when the rule is delta-polling, else the confirmed `collectionReadRef`
+ * operation for full-fetch. `undefined` when none resolves.
+ *
+ * Exported so the SS-5 enablement classifier (`docs/requirements/scoped-resource-sync.md`
+ * SS-5) resolves the **exact same** operation {@link resolveSourceReadBinding} fills its
+ * scope path parameters from — so the gate's required scope set matches the source read
+ * the resolver actually composes. A rule is delta-polling iff the source declares
+ * `supportsDeltaQuery` **and** the resource offers a delta operation (a *present*
+ * `deltaCursorRef`), mirroring {@link isDeltaPolling}.
  */
-function resolvePollOperation(
-  input: SourceReadBindingInput,
-  deltaPolling: boolean,
-): IrOperation | undefined {
+export function resolveSourcePollOperation(input: {
+  readonly rule: SyncRule;
+  readonly sourceGroup: IrResourceGroup;
+  readonly sourceBinding: ResourceBinding;
+  readonly sourceCapabilities: AppCapabilities;
+}): IrOperation | undefined {
   const pinned = resolvePinnedPollOperation(input.rule.pollOperationRef, input.sourceGroup);
   if (pinned !== undefined) {
     return pinned;
   }
+  const deltaPolling =
+    input.sourceCapabilities.supportsDeltaQuery && input.sourceBinding.deltaCursorRef !== undefined;
   if (deltaPolling) {
     const cursor = confirmedValue(input.sourceBinding.deltaCursorRef);
     return cursor?.kind === "parameter"
@@ -442,7 +455,7 @@ export function resolveSourceReadBinding(
   }
 
   const deltaPolling = isDeltaPolling(input);
-  const operation = resolvePollOperation(input, deltaPolling);
+  const operation = resolveSourcePollOperation(input);
   if (operation === undefined) {
     return undefined;
   }
@@ -569,14 +582,36 @@ export function resolveWriteOperationBinding(
 }
 
 /**
+ * The target IR operation an `OperationMapping` names — parse its `targetOperationRef`,
+ * guard the leading `resourceRef` against `targetGroup`, and look the operation up by id
+ * — or `undefined` when it does not resolve in the group (a stale/foreign ref). Mirrors
+ * {@link resolveWriteOperationBinding}'s own operation resolution, exported so the SS-5
+ * enablement classifier reasons over the **same** IR operation the write resolver fills.
+ */
+export function findMappedTargetOperation(
+  operationMapping: OperationMapping,
+  targetGroup: IrResourceGroup,
+): IrOperation | undefined {
+  const parsed = parseOperationRef(operationMapping.targetOperationRef);
+  if (parsed === undefined || parsed.resourceRef !== targetGroup.resourceRef) {
+    return undefined;
+  }
+  return findOperationById(targetGroup, parsed.operationId);
+}
+
+/**
  * The name of this write operation's **record-id path parameter** — the one whose `{…}`
  * must stay templated for the executor's `RecordLink` fill — or `undefined` when the
  * operation has no record-id path parameter to leave templated (an `action = create`
  * carries no `targetIdParamRef`, so all its path params are scope; and an id parameter
  * located in the query/header is not in the path template at all). Keyed to the
  * operation's role via `OperationMapping.targetIdParamRef`, never to a bare name.
+ *
+ * Exported so the SS-5 enablement classifier keys its write scope set to the **same**
+ * record-id determination the resolver leaves templated — the gate's required scope
+ * params (path params minus this) then match the resolver's fill exactly.
  */
-function writeRecordIdPathParam(
+export function writeRecordIdPathParam(
   operationMapping: OperationMapping,
   operation: IrOperation,
 ): string | undefined {

@@ -77,6 +77,13 @@ export const enablementRequirementDtoSchema = z.discriminatedUnion("kind", [
     ]),
   }),
   z.object({ kind: z.literal("identity-lookup-path") }),
+  // SS-5.4 — an unconfirmed scope path-parameter binding (constant) on the named side.
+  z.object({
+    kind: z.literal("scope-binding"),
+    parameterName: z.string(),
+    side: z.enum(["source", "target"]),
+    resourceRef: z.string(),
+  }),
 ]);
 export type EnablementRequirementDto = z.infer<typeof enablementRequirementDtoSchema>;
 
