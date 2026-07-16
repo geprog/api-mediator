@@ -1,9 +1,14 @@
-import type { ResourceBindingDto, ResourceBindingsResponse } from "@mediator/contracts";
+import type {
+  ResourceBindingDto,
+  ResourceBindingsResponse,
+  SessionRole,
+} from "@mediator/contracts";
 import type { Ir } from "@mediator/domain";
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getResourceBindings, updateResourceBinding } from "../../api/resource-bindings";
+import { useAuthStore } from "../../stores/auth";
 import { testGlobalOptions } from "../../testing/render";
 import BindingPanel from "./BindingPanel.vue";
 
@@ -206,5 +211,108 @@ describe("BindingPanel (RB-3)", () => {
     expect(wrapper.get('[data-testid="ref-state-collectionReadRef"]').text()).toContain(
       "confirmed",
     );
+  });
+});
+
+/** A bindings response whose `issues` resource carries a single `owner` scope constant. */
+function scopeFixture(overrides: { confirmed?: boolean }): ResourceBindingsResponse {
+  const confirmed = overrides.confirmed === true;
+  return {
+    bindings: [
+      {
+        id: BINDING_ID,
+        apiSpecId: SPEC_ID,
+        resourceRef: "issues",
+        refs: [],
+        scopeBindings: [
+          {
+            parameterName: "owner",
+            kind: "constant",
+            value: confirmed ? "alice" : "",
+            confirmedBy: confirmed ? "operator@example.com" : null,
+            confirmedAt: confirmed ? "2026-07-10T00:00:00.000Z" : null,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Mounts the panel and authenticates the given role (the scope section is role-gated). */
+function mountPanel(role: SessionRole) {
+  const wrapper = mount(BindingPanel, {
+    props: { specId: SPEC_ID, ir },
+    global: testGlobalOptions(),
+  });
+  useAuthStore().$patch({ state: { status: "authenticated", identity: role, role } });
+  return wrapper;
+}
+
+describe("BindingPanel — SS-6 scope-binding supply", () => {
+  it("renders a value input + unconfirmed indicator for a constant scope entry (SS-6.2)", async () => {
+    getBindingsMock.mockResolvedValue(scopeFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-bindings-issues"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="scope-state-owner"]').text()).toContain("unconfirmed");
+    // A value to TYPE IN — an input, not a confirm/correct ref picker.
+    expect(wrapper.find('[data-testid="scope-input-owner"]').exists()).toBe(true);
+  });
+
+  it("supplies a value and confirms via a scope PATCH { parameterName, value } (SS-6.2)", async () => {
+    getBindingsMock.mockResolvedValue(scopeFixture({}));
+    updateBindingMock.mockResolvedValue(firstBinding(scopeFixture({ confirmed: true })));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-input-owner"]').setValue("alice");
+    await wrapper.get('[data-testid="scope-confirm-owner"]').trigger("click");
+    await flushPromises();
+
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "owner",
+      value: "alice",
+    });
+  });
+
+  it("disables supply+confirm while the value is empty (SS-3.3 reflected)", async () => {
+    getBindingsMock.mockResolvedValue(scopeFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="scope-confirm-owner"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('[data-testid="scope-input-owner"]').setValue("alice");
+    expect(
+      wrapper.get('[data-testid="scope-confirm-owner"]').attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("reflects the confirmed state after supply+confirm (SS-6.3 refresh)", async () => {
+    getBindingsMock
+      .mockResolvedValueOnce(scopeFixture({}))
+      .mockResolvedValue(scopeFixture({ confirmed: true }));
+    updateBindingMock.mockResolvedValue(firstBinding(scopeFixture({ confirmed: true })));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="scope-state-owner"]').text()).toContain("unconfirmed");
+
+    await wrapper.get('[data-testid="scope-input-owner"]').setValue("alice");
+    await wrapper.get('[data-testid="scope-confirm-owner"]').trigger("click");
+    await flushPromises();
+
+    // The mutation invalidated the bindings query; the panel now shows the entry confirmed.
+    expect(wrapper.get('[data-testid="scope-state-owner"]').text()).toContain("confirmed");
+  });
+
+  it("renders read-only for a viewer — no input or confirm control (SS-6.4)", async () => {
+    getBindingsMock.mockResolvedValue(scopeFixture({ confirmed: true }));
+    const wrapper = mountPanel("viewer");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-input-owner"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-confirm-owner"]').exists()).toBe(false);
+    // The confirmed constant is operator config, shown as entered (SS-6.5) — never a secret.
+    expect(wrapper.get('[data-testid="scope-readonly-owner"]').text()).toContain("alice");
   });
 });

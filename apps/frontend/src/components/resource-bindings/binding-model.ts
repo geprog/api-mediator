@@ -1,4 +1,8 @@
-import type { ResourceBindingRefDto, ResourceBindingRefKind } from "@mediator/contracts";
+import type {
+  ResourceBindingRefDto,
+  ResourceBindingRefKind,
+  ResourceBindingScopeDto,
+} from "@mediator/contracts";
 import { assertNever, type IrRefTarget, type IrResourceGroup } from "@mediator/domain";
 
 /**
@@ -30,6 +34,31 @@ export function refState(ref: ResourceBindingRefDto): RefState {
  */
 export function canConfirm(ref: ResourceBindingRefDto): boolean {
   return ref.applicable && ref.value !== null;
+}
+
+/**
+ * A scope path-parameter binding's display state (SS-6.2). A `constant` scope
+ * entry has only two states — a scope binding is never `not-applicable` (it exists
+ * only because the resource's IR carries that non-record-id path parameter, SS-2):
+ * - `unconfirmed` — a derived, human-unratified entry (the SS-5 gate blocker);
+ * - `confirmed` — the operator supplied a literal and ratified it.
+ */
+export type ScopeBindingState = "confirmed" | "unconfirmed";
+
+export function scopeBindingState(scope: ResourceBindingScopeDto): ScopeBindingState {
+  return scope.confirmedAt !== null ? "confirmed" : "unconfirmed";
+}
+
+/**
+ * Whether a scope constant may be supplied + confirmed (SS-6.2). Unlike a ref
+ * (which ratifies a derived IR pointer), a scope constant is a literal the operator
+ * **types in**, so the guard is on the *typed value*, not on a derived guess: the
+ * server rejects confirming an empty value (SS-3.3), so the affordance is disabled
+ * until a non-blank value is entered. The value is sent as entered (SS-6.5); this
+ * only decides whether the confirm action is offered.
+ */
+export function canSupplyScope(value: string): boolean {
+  return value.trim().length > 0;
 }
 
 /** Human labels for the six ref kinds. */

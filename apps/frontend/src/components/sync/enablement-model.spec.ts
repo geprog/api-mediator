@@ -67,6 +67,31 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     expect(items[0]?.label).toContain("identity key");
   });
 
+  it("renders a scope-binding requirement as a blocker naming the parameter+resource, linked to its side's app (SS-6.1)", () => {
+    const items = enablementChecklist(
+      [{ kind: "scope-binding", parameterName: "owner", side: "source", resourceRef: "issues" }],
+      PAIR,
+    );
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    expect(item?.key).toBe("scope-binding:source:owner");
+    // Names the parameter and its resource so the operator knows exactly what to supply.
+    expect(item?.label).toContain("owner");
+    expect(item?.label).toContain("issues");
+    // Deep-links to the source side's app, whose spec reaches the RB-3 binding panel.
+    expect(item?.bindingLink).toBe("/apps/app-gitea");
+  });
+
+  it("keeps a scope-binding among the hard blockers so enable stays gated (SS-6.1)", () => {
+    const stillNeeds: EnablementRequirementDto[] = [
+      { kind: "scope-binding", parameterName: "repo", side: "target", resourceRef: "tasks" },
+    ];
+    expect(blockingRequirements(stillNeeds).map((requirement) => requirement.kind)).toEqual([
+      "scope-binding",
+    ]);
+    expect(canEnable({ stillNeeds, choice: "link-only", pushBlocked: false })).toBe(false);
+  });
+
   it("describes changeTimestampRef is NOT among the binding-ref blocker kinds (SU-5.2 structural)", () => {
     // The gate's binding-ref requirement enum never includes changeTimestampRef, so it can
     // never appear as a checklist blocker — it is a degradation, not a blocker (BE-2.4).
