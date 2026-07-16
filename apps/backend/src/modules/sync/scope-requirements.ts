@@ -36,9 +36,14 @@ import { confirmedValue, findIdentityField, type RuleArtifacts } from "./resolut
  *  - **source backfill collection read** (`collectionReadRef`) — enumerated; included
  *    under the same condition BE-2.2 requires the ref (full-fetch always, a delta rule
  *    only when backfill runs). No record-id param → every path param is scope.
- *  - **target fetch-and-match collection read** — only when fetch-and-match is the
- *    identity-lookup path (a filtered read's own scope params recur under the same name
- *    on the target write op, so they are covered there). No record-id param.
+ *  - **target identity-lookup collection read** — whenever the identity-lookup path
+ *    ISSUES a target collection read, i.e. for BOTH `fetch-and-match` AND `filtered-read`
+ *    (a filtered read runs `GET <collectionRead>?<lookupParam>=…`). Both resolve that
+ *    same collection read through `resolveSourceReadBinding` and fill its scope from the
+ *    **target** binding (`target-identity-lookup.ts`), so an asymmetrically-scoped target
+ *    (SS-2.4 — scoped collection read but id-only writes) would otherwise enable and then
+ *    throw on every lookup. No record-id param → every path param is scope. (`none`/
+ *    manual-only issues no target collection read → no requirement.)
  *  - **target create / update / delete** for what the rule propagates — record-id param
  *    is `OperationMapping.targetIdParamRef`-if-path on update/delete, **absent** on a
  *    create (so all its path params are scope, e.g. Vikunja `PUT /projects/{id}/tasks`).
@@ -89,17 +94,21 @@ export function computeRequiredScopeBindings(
     }
   }
 
-  // ── Target: the fetch-and-match collection read (when that is the lookup path) ─
+  // ── Target: the identity-lookup collection read (fetch-and-match OR filtered-read) ─
+  // Both lookup paths ISSUE the target collection read (filtered-read as
+  // `GET <collectionRead>?<lookupParam>=…`), resolved through the SAME
+  // `resolveSourceReadBinding` that fills its scope from the target binding — so either
+  // requires the collection read's scope params. A `none`/manual-only path issues none.
   const identityField = findIdentityField(artifacts.fieldMappings);
   if (identityField !== undefined) {
     const lookup = buildTargetLookup(artifacts, identityField);
-    if (lookup.kind === "fetch-and-match") {
-      const matchOperation = findOperationById(
+    if (lookup.kind === "fetch-and-match" || lookup.kind === "filtered-read") {
+      const lookupReadOperation = findOperationById(
         artifacts.targetGroup,
         lookup.binding.collectionReadOperationId,
       );
-      if (matchOperation !== undefined) {
-        collector.addAll("target", targetRef, scopeParamNamesOf(matchOperation, undefined));
+      if (lookupReadOperation !== undefined) {
+        collector.addAll("target", targetRef, scopeParamNamesOf(lookupReadOperation, undefined));
       }
     }
   }
@@ -131,7 +140,10 @@ export function computeRequiredScopeBindings(
   // ── Target: the single-record read (only when the rule needs it) ──────────────
   // A PUT-shaped update read-carries the target's current record (CF-5); a
   // `read-before-write` drift check reads it up front (CF-6). Either way its scope path
-  // parameters (all but the by-id read's own id) must be confirmed.
+  // parameters (all but the by-id read's own id) must be confirmed. The PUT arm is an
+  // intentional CONSERVATIVE SUPERSET: it fires whenever the first resolving update op is
+  // PUT, even if a run never actually withholds a field (so never read-carries) — this
+  // can only over-require a scope the resolver would fill anyway, never fabricate a URL.
   const needsSingleRecordRead =
     (artifacts.rule.targetDriftCheck ?? "none") === "read-before-write" ||
     firstUpdateMethod === "put";

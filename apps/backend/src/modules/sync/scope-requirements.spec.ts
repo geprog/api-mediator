@@ -15,7 +15,11 @@ import type {
   SyncRule,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
-import { findUnfilledPathParam, resolveWriteOperationBinding } from "@mediator/outbound";
+import {
+  findUnfilledPathParam,
+  resolveSourceReadBinding,
+  resolveWriteOperationBinding,
+} from "@mediator/outbound";
 import { evaluateEnablement, type EnablementInput } from "@mediator/sync-engine";
 import { describe, expect, it } from "vitest";
 
@@ -41,6 +45,9 @@ function confirmedRef(value: IrRefTarget): ConfirmableRef {
 }
 function pathParam(name: string): IrParameter {
   return { name, location: "path", required: true };
+}
+function queryParam(name: string): IrParameter {
+  return { name, location: "query", required: false };
 }
 function operation(o: {
   operationId: string;
@@ -361,6 +368,67 @@ describe("computeRequiredScopeBindings — Gitea issues → Vikunja tasks", () =
       computeRequiredScopeBindings(propagating, { backfillSkipped: false }),
     );
   });
+
+  it("a SCOPED delete op is required only when deletePropagation = propagate", () => {
+    // The delete op carries a scope (`{project}`) that no OTHER included op has (the update
+    // is id-only), so it isolates the propagation gate: `ignore` never calls the delete →
+    // no `project`; `propagate` calls it → `project` required.
+    const scopedDeleteTarget = group("tgt", [
+      operation({ operationId: "listTasks", method: "get", path: "/tasks" }),
+      operation({
+        operationId: "updateTask",
+        method: "post",
+        path: "/tasks/{id}",
+        parameters: [pathParam("id")],
+      }),
+      operation({
+        operationId: "deleteTaskScoped",
+        method: "delete",
+        path: "/projects/{project}/tasks/{id}",
+        parameters: [pathParam("project"), pathParam("id")],
+      }),
+    ]);
+    const scopedDeleteMapping = omap({
+      id: "deleteTaskScoped",
+      action: "delete",
+      targetOperationRef: "tgt/deleteTaskScoped",
+      targetIdParamRef: "tgt/deleteTaskScoped#id",
+    });
+    const base = {
+      operationMappings: [updateTaskMapping, scopedDeleteMapping],
+      sourceGroup: giteaIssues,
+      targetGroup: scopedDeleteTarget,
+      sourceBinding: sourceIssuesBinding([]),
+      targetBinding: targetTasksBinding([]),
+    } as const;
+
+    const ignoring = computeRequiredScopeBindings(
+      makeArtifacts({
+        ...base,
+        rule: makeRule({ pollOperationRef: "src/listRepoIssues", deletePropagation: "ignore" }),
+      }),
+      { backfillSkipped: false },
+    );
+    const propagating = computeRequiredScopeBindings(
+      makeArtifacts({
+        ...base,
+        rule: makeRule({ pollOperationRef: "src/listRepoIssues", deletePropagation: "propagate" }),
+      }),
+      { backfillSkipped: false },
+    );
+
+    // `ignore` never calls `DELETE /projects/{project}/tasks/{id}` → no target scope.
+    expect(ignoring.filter((r) => r.side === "target")).toEqual([]);
+    // `propagate` calls it → its `{project}` scope (its `{id}` is the record id) is required.
+    expect(propagating).toContainEqual({
+      parameterName: "project",
+      side: "target",
+      resourceRef: "tgt",
+    });
+    expect(propagating.filter((r) => r.side === "target")).toEqual([
+      { parameterName: "project", side: "target", resourceRef: "tgt" },
+    ]);
+  });
 });
 
 // ── Source backfill collection read conditioning (delta rule) ──────────────────
@@ -597,6 +665,119 @@ describe("scope requirements through evaluateEnablement (SA enable flow)", () =>
     if (decision.kind !== "blocked") throw new Error("expected blocked");
     expect(decision.stillNeeds).toEqual([
       { kind: "scope-binding", parameterName: "id", side: "target", resourceRef: "tgt" },
+    ]);
+  });
+});
+
+// ── Filtered-read lookup issues the target collection read (asymmetric scope) ───
+
+describe("computeRequiredScopeBindings — filtered-read target collection read", () => {
+  // An asymmetrically-scoped target (SS-2.4): its collection read (the filtered-read
+  // lookup) is `{board}`-scoped, but its propagated write is id-only. The `{board}` scope
+  // is therefore surfaced ONLY by the lookup read — proving filtered-read is gated too.
+  const flatSource = group("src", [
+    operation({ operationId: "listFlat", method: "get", path: "/flat" }),
+  ]);
+  const filteredReadTarget = group("tgt", [
+    operation({
+      operationId: "listBoardCards",
+      method: "get",
+      path: "/boards/{board}/cards",
+      parameters: [pathParam("board"), queryParam("title")],
+    }),
+    operation({
+      operationId: "updateCard",
+      method: "post",
+      path: "/cards/{id}",
+      parameters: [pathParam("id")],
+    }),
+  ]);
+  const filterKey: FieldMapping = { ...identityKey, targetLookupParamRef: "title" };
+  const updateCardMapping = omap({
+    id: "updateCard",
+    action: "update",
+    targetOperationRef: "tgt/updateCard",
+    targetIdParamRef: "tgt/updateCard#id",
+  });
+
+  function filteredReadArtifacts(targetScope: readonly ScopePathBinding[]): RuleArtifacts {
+    return makeArtifacts({
+      rule: makeRule({ pollOperationRef: "src/listFlat" }),
+      operationMappings: [updateCardMapping],
+      fieldMappings: [filterKey],
+      sourceGroup: flatSource,
+      targetGroup: filteredReadTarget,
+      sourceBinding: binding({ resourceRef: "src", nativeId: true, collectionRead: "listFlat" }),
+      targetBinding: binding({
+        resourceRef: "tgt",
+        nativeId: true,
+        collectionRead: "listBoardCards",
+        scopePathBindings: targetScope,
+      }),
+    });
+  }
+
+  function enablementInputFor(artifacts: RuleArtifacts): EnablementInput {
+    return {
+      rule: artifacts.rule,
+      fieldMappings: artifacts.fieldMappings,
+      operationMappings: artifacts.operationMappings,
+      sourceBinding: artifacts.sourceBinding,
+      targetBinding: artifacts.targetBinding,
+      sourceCapabilities: artifacts.sourceApp.capabilities,
+      targetCapabilities: artifacts.targetApp.capabilities,
+      backfillSkipped: false,
+      requiredScopeBindings: computeRequiredScopeBindings(artifacts, { backfillSkipped: false }),
+    };
+  }
+
+  /** Resolve the target collection read exactly as `RepoTargetCollectionReadResolver` does. */
+  function resolveLookupRead(
+    artifacts: RuleArtifacts,
+  ): ReturnType<typeof resolveSourceReadBinding> {
+    const lookupRule: SyncRule = {
+      id: "lookup",
+      approvedMappingId: "",
+      resourcePairRef: "",
+      status: "enabled",
+    };
+    return resolveSourceReadBinding({
+      rule: lookupRule,
+      sourceAppId: artifacts.targetApp.id,
+      baseUrl: artifacts.targetBaseUrl,
+      sourceCapabilities: { ...artifacts.targetApp.capabilities, supportsDeltaQuery: false },
+      sourceGroup: artifacts.targetGroup,
+      sourceBinding: artifacts.targetBinding,
+    });
+  }
+
+  it("requires the target {board} scope for a FILTERED-READ lookup, though every write is id-only", () => {
+    const required = computeRequiredScopeBindings(filteredReadArtifacts([]), {
+      backfillSkipped: false,
+    });
+    // The scope comes solely from the filtered-read collection read; the id-only update
+    // and the flat source contribute none.
+    expect(required).toEqual([{ parameterName: "board", side: "target", resourceRef: "tgt" }]);
+  });
+
+  it("no divergence: the lookup read resolves `{…}`-free exactly when the gate raises no scope blocker", () => {
+    // Confirmed → the same `resolveSourceReadBinding` the lookup uses composes a `{…}`-free
+    // path, and the gate enables.
+    const confirmed = filteredReadArtifacts([confirmedConstant("board", "b1")]);
+    const resolved = resolveLookupRead(confirmed);
+    expect(resolved?.path).toBe("/boards/b1/cards");
+    expect(findUnfilledPathParam(resolved?.path ?? "")).toBeUndefined();
+    expect(evaluateEnablement(enablementInputFor(confirmed)).kind).toBe("enable");
+
+    // Unconfirmed → the resolver refuses (undefined; the lookup would then throw), and the
+    // gate requires exactly that parameter — the two sets coincide.
+    const missing = filteredReadArtifacts([unconfirmedConstant("board")]);
+    expect(resolveLookupRead(missing)).toBeUndefined();
+    const decision = evaluateEnablement(enablementInputFor(missing));
+    expect(decision.kind).toBe("blocked");
+    if (decision.kind !== "blocked") throw new Error("expected blocked");
+    expect(decision.stillNeeds).toEqual([
+      { kind: "scope-binding", parameterName: "board", side: "target", resourceRef: "tgt" },
     ]);
   });
 });
