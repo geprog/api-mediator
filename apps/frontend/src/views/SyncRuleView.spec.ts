@@ -224,3 +224,59 @@ describe("SyncRuleView — SU-5 binding-ref blockers", () => {
     expect(wrapper.html()).not.toContain("checklist-item-binding-ref:target:changeTimestampRef");
   });
 });
+
+describe("SyncRuleView — SS-6 scope-binding blockers", () => {
+  it("lists an unconfirmed scope binding as a blocker naming the parameter+resource, linked to the binding panel (SS-6.1)", async () => {
+    const wrapper = await mountView(
+      [
+        rule({
+          stillNeeds: [
+            {
+              kind: "scope-binding",
+              parameterName: "owner",
+              side: "source",
+              resourceRef: "issues",
+            },
+          ],
+        }),
+      ],
+      "operator",
+    );
+
+    const item = wrapper.find('[data-testid="checklist-item-scope-binding:source:owner"]');
+    expect(item.exists()).toBe(true);
+    expect(item.text()).toContain("owner");
+    expect(item.text()).toContain("issues");
+    // Deep-links to the source side's app (SA-2 carries the app id), reaching RB-3.
+    const links = wrapper.findAllComponents(RouterLinkStub);
+    expect(links.some((link) => link.props("to") === "/apps/app-gitea")).toBe(true);
+    // SU-1 gate: enable stays disabled while any scope binding is unconfirmed.
+    expect(wrapper.get('[data-testid="enable-button"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("renders the scope-binding blocker read-only for a viewer — no supply control on this panel (SS-6.4)", async () => {
+    const wrapper = await mountView(
+      [
+        rule({
+          stillNeeds: [
+            {
+              kind: "scope-binding",
+              parameterName: "owner",
+              side: "source",
+              resourceRef: "issues",
+            },
+          ],
+        }),
+      ],
+      "viewer",
+    );
+
+    expect(wrapper.find('[data-testid="checklist-item-scope-binding:source:owner"]').exists()).toBe(
+      true,
+    );
+    expect(wrapper.find('[data-testid="rule-readonly"]').exists()).toBe(true);
+    // The value is entered on the RB-3 binding panel — never here.
+    expect(wrapper.find('[data-testid="scope-input-owner"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="enable-button"]').exists()).toBe(false);
+  });
+});

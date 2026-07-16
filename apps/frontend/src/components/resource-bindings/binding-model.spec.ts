@@ -1,13 +1,15 @@
-import type { ResourceBindingRefDto } from "@mediator/contracts";
+import type { ResourceBindingRefDto, ResourceBindingScopeDto } from "@mediator/contracts";
 import type { IrResourceGroup } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import {
   buildRefTargetOptions,
   canConfirm,
+  canSupplyScope,
   defaultTargetKind,
   describeTarget,
   refState,
+  scopeBindingState,
 } from "./binding-model";
 
 function refDto(overrides: Partial<ResourceBindingRefDto>): ResourceBindingRefDto {
@@ -105,5 +107,33 @@ describe("binding-model", () => {
   it("returns empty option groups for an undefined group", () => {
     const options = buildRefTargetOptions(undefined);
     expect(options).toEqual({ field: [], operation: [], parameter: [] });
+  });
+});
+
+function scopeDto(overrides: Partial<ResourceBindingScopeDto>): ResourceBindingScopeDto {
+  return {
+    parameterName: "owner",
+    kind: "constant",
+    value: "",
+    confirmedBy: null,
+    confirmedAt: null,
+    ...overrides,
+  };
+}
+
+describe("binding-model — scope path-parameter bindings (SS-6.2)", () => {
+  it("derives confirmed vs. unconfirmed from confirmedAt (no not-applicable state)", () => {
+    expect(scopeBindingState(scopeDto({}))).toBe("unconfirmed");
+    expect(
+      scopeBindingState(
+        scopeDto({ value: "alice", confirmedBy: "op", confirmedAt: "2026-07-10T00:00:00.000Z" }),
+      ),
+    ).toBe("confirmed");
+  });
+
+  it("only allows supply+confirm for a non-blank typed value (SS-3.3 reflected)", () => {
+    expect(canSupplyScope("")).toBe(false);
+    expect(canSupplyScope("   ")).toBe(false);
+    expect(canSupplyScope("alice")).toBe(true);
   });
 });
