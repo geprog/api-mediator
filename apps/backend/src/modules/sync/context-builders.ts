@@ -2,6 +2,7 @@ import type {
   FieldMapping,
   IrResourceGroup,
   OperationMapping,
+  ResourceBinding,
   SyncFieldStateSide,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
@@ -36,12 +37,15 @@ export interface ResolvedTargetOperations {
 
 /**
  * Resolve each `OperationMapping` to its `RestOperationBinding` and index by `action`
- * (the first that resolves per action wins). A stale/foreign `targetOperationRef` is
- * skipped — never a fabricated binding.
+ * (the first that resolves per action wins). A stale/foreign `targetOperationRef`, or a
+ * scoped op whose confirmed `constant` scope binding is missing (SS-4.4), is skipped —
+ * never a fabricated binding. `targetBinding` supplies the scope constants substituted
+ * into each op's non-record-id path parameters (SS-4.2).
  */
 export function resolveTargetOperations(
   operationMappings: readonly OperationMapping[],
   targetGroup: IrResourceGroup,
+  targetBinding: ResourceBinding,
 ): ResolvedTargetOperations {
   const resolved: {
     create?: ResolvedTargetOperation;
@@ -49,7 +53,7 @@ export function resolveTargetOperations(
     delete?: ResolvedTargetOperation;
   } = {};
   for (const operationMapping of operationMappings) {
-    const binding = resolveWriteOperationBinding(operationMapping, targetGroup);
+    const binding = resolveWriteOperationBinding(operationMapping, targetGroup, targetBinding);
     if (binding === undefined) {
       continue;
     }

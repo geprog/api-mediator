@@ -93,6 +93,11 @@ export {
   type SyncRuleReader,
 } from "./binding-resolvers.js";
 
+// Scope path-parameter substitution (SS-4) + the backstop: fill a scoped operation's
+// non-record-id path params from confirmed `constant` bindings; detect an unfilled `{…}`
+// before it reaches the wire.
+export { fillScopePathParameters, findUnfilledPathParam } from "./path-template.js";
+
 // The REST single-record target reader — Conflict Detection's SingleRecordTargetReader
 // seam (CF-5/CF-6), obeying OC-3 load discipline and returning the target's stored
 // representation verbatim so hashFieldValue matches the persisted baseline.

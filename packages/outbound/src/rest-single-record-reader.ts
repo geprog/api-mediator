@@ -9,6 +9,7 @@ import type { JsonValue } from "@mediator/transform";
 import type { ResolvedSingleRecordRead, SingleRecordReadResolver } from "./binding-resolvers.js";
 import type { CredentialAccess, CredentialApplier } from "./executor.js";
 import { AppLoadGovernor } from "./load-governor.js";
+import { findUnfilledPathParam } from "./path-template.js";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protocol-client.js";
 
 /**
@@ -125,15 +126,17 @@ function buildReadRequest(resolved: ResolvedSingleRecordRead, nativeId: string):
   } else {
     headers[location.name] = nativeId;
   }
-  // Guard against an unfilled path template (a single-record read whose operation has
-  // path params BEYOND the record id — the constant-path-parameter-binding open
-  // question, e.g. a Gitea `/repos/{owner}/{repo}/issues/{index}`). Sending `{owner}`
+  // SS-4.5 backstop: after the record-id substitution, a still-templated path param is a
+  // genuinely-unfilled SCOPE param (a scoped single-record read whose op has params BEYOND
+  // the record id, e.g. Gitea `/repos/{owner}/{repo}/issues/{index}`). Sending `{owner}`
   // literally would 404, which `classifyRead` would turn into a **fabricated not-found**
-  // ("target gone"), violating this reader's own contract. Throw instead.
-  const unfilled = /\{[^}]+\}/.exec(path);
-  if (unfilled !== null) {
+  // ("target gone"), violating this reader's own contract. Throw instead. The record id is
+  // filled above, so it never false-trips this. (`resolveSingleRecordRead` normally fills
+  // scope or unresolves upstream — this is defense-in-depth.)
+  const unfilled = findUnfilledPathParam(path);
+  if (unfilled !== undefined) {
     throw new Error(
-      `single-record read path still has an unfilled parameter '${unfilled[0]}' after the id substitution — constant path-parameter binding is not resolved for this operation`,
+      `single-record read path still has an unfilled parameter '${unfilled}' after the id substitution — scope path-parameter binding is not resolved for this operation`,
     );
   }
   return {

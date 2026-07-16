@@ -9,6 +9,7 @@ import { readPath, type JsonValue } from "@mediator/transform";
 
 import type { CredentialAccess, CredentialApplier } from "./executor.js";
 import { AppLoadGovernor } from "./load-governor.js";
+import { findUnfilledPathParam } from "./path-template.js";
 import type {
   HttpMethod,
   OutboundRequest,
@@ -237,6 +238,18 @@ export class RestSourceReader implements SourceReader {
     binding: RestSourceReadBinding,
     query: readonly [string, string][],
   ): Promise<{ ok: true; response: OutboundResponse } | { ok: false; reason: string }> {
+    // SS-4.5 backstop: a source read has NO record-id path parameter (the record id is a
+    // response field), so a still-templated `{…}` is a genuinely-unfilled SCOPE parameter.
+    // Refuse the call rather than send a literal `{owner}` — a silently-empty page would
+    // be misread as mass deletion (SP-4). The `resolveSourceReadBinding` fill normally
+    // prevents this (it unresolves an unconfirmed scope); this is defense-in-depth.
+    const unfilled = findUnfilledPathParam(binding.path);
+    if (unfilled !== undefined) {
+      return {
+        ok: false,
+        reason: `unfilled scope path parameter ${unfilled} in the source read path`,
+      };
+    }
     const limits = binding.limits ?? this.#defaultLimits;
     const acquired = this.#governor.tryAcquire(binding.sourceAppId, limits);
     if (!acquired.granted) {

@@ -101,7 +101,11 @@ async function buildBackfillRunInput(
   repos: RuleArtifactRepos,
 ): Promise<BackfillRunInput> {
   const identityField = findIdentityField(artifacts.fieldMappings) ?? PLACEHOLDER_IDENTITY;
-  const operations = resolveTargetOperations(artifacts.operationMappings, artifacts.targetGroup);
+  const operations = resolveTargetOperations(
+    artifacts.operationMappings,
+    artifacts.targetGroup,
+    artifacts.targetBinding,
+  );
   const resolution = buildResolutionContext(
     artifacts,
     identityField,

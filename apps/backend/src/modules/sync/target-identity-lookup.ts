@@ -1,6 +1,7 @@
 import type { IrParameter, OutboundLoadLimits, SyncRule } from "@mediator/domain";
 import {
   AppLoadGovernor,
+  findUnfilledPathParam,
   resolveSourceReadBinding,
   type CredentialAccess,
   type CredentialApplier,
@@ -266,6 +267,18 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
     | { readonly ok: true; readonly response: OutboundResponse }
     | { readonly ok: false; readonly reason: string }
   > {
+    // SS-4.5 backstop: this scoped collection read (`GET /repos/{owner}/{repo}/issues` for
+    // fetch-and-match) has no record-id path parameter, so a still-templated `{…}` is a
+    // genuinely-unfilled SCOPE parameter. Refuse rather than send a literal `{owner}` (an
+    // empty filtered read would fabricate a no-match → a duplicate create). Normally
+    // `resolveSourceReadBinding` already unresolves an unconfirmed scope; defense-in-depth.
+    const unfilled = findUnfilledPathParam(binding.path);
+    if (unfilled !== undefined) {
+      return {
+        ok: false,
+        reason: `unfilled scope path parameter ${unfilled} in the target lookup path`,
+      };
+    }
     const limits = binding.limits ?? this.#defaultLimits;
     const acquired = this.#governor.tryAcquire(targetAppId, limits);
     if (!acquired.granted) {
