@@ -265,8 +265,10 @@ operations it calls is confirmed, **so that** a rule never goes live to fail on 
 
 1. **Given** enable (extends BE-2), **when** the gate checks bindings, **then** it is rejected unless
    every scope path parameter of the operations the rule will call has a confirmed binding: source poll
-   (`pollOperationRef`), backfill collection read (`collectionReadRef`), fetch-and-match target read (when
-   that is the lookup path), and the target create/update/delete for what it propagates.
+   (`pollOperationRef`), backfill collection read (`collectionReadRef`), the target identity-lookup
+   collection read (whenever the lookup path **issues** it — both `fetch-and-match` and `filtered-read`
+   run `GET <collectionRead>[?<lookupParam>=…]`, resolved with the target binding's scope), and the target
+   create/update/delete for what it propagates.
 2. **Given** the rule needs a single-record target read (PUT read-carry / `read-before-write`), **when**
    the gate runs, **then** that read's scope parameters must also be confirmed.
 3. **Given** an operation whose only path parameter is the record id, **when** the gate checks it,
