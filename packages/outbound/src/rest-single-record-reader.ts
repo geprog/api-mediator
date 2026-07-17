@@ -70,7 +70,13 @@ export class RestSingleRecordTargetReader implements SingleRecordTargetReader {
   }
 
   public async readRecord(request: SingleRecordReadRequest): Promise<SingleRecordReadResult> {
-    const resolved = await this.#resolver.resolve(request.targetAppId, request.binding);
+    // SS-8b — thread the captured scope so a scoped read fills its `record-derived` scope
+    // param; the resolver's SS-4.5 backstop still refuses an unfilled `{owner}`.
+    const resolved = await this.#resolver.resolve(
+      request.targetAppId,
+      request.binding,
+      request.capturedScope,
+    );
     if (resolved === undefined) {
       // A config error (the read op / id param does not resolve) — not a "not found".
       throw new Error(

@@ -1,4 +1,4 @@
-import type { RecordLink } from "@mediator/domain";
+import type { RecordLink, SourceScopeRef } from "@mediator/domain";
 import type { JsonRecord } from "@mediator/transform";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -311,5 +311,107 @@ describe("Poller — SP-5 enqueue-then-advance (SACRED): a crash never loses a c
     const outcome = await empty.poller.pollOnce(RULE_ID);
     expect(outcome).toMatchObject({ kind: "completed", enqueued: [] });
     expect(empty.state.stateOf(RULE_ID)?.advanceCount).toBe(1);
+  });
+});
+
+describe("Poller — SS-8.2 captured scope (cross-scope read, record-carried scope, single cursor)", () => {
+  // Gitea `Issue` carries its container as `repository.owner` + `repository.name`
+  // (scenario-1) — the source resource's confirmed `sourceScopeRef`.
+  const GITEA_SCOPE_REF: SourceScopeRef = {
+    components: [
+      { key: "owner", fieldPath: "repository.owner" },
+      { key: "name", fieldPath: "repository.name" },
+    ],
+    confirmedBy: "operator-1",
+    confirmedAt: NOW,
+  };
+
+  function issue(nativeId: string, owner: string, name: string): ObservedRecord {
+    return { nativeId, record: { id: nativeId, title: "t", repository: { owner, name } } };
+  }
+
+  it("a confirmed sourceScopeRef captures each record's scope onto its DetectedChange (Gitea {owner,name})", async () => {
+    const h = harness(plan({ sourceScopeRef: GITEA_SCOPE_REF }));
+    // ONE cross-scope collection read returns issues across TWO repos — the record
+    // self-carries its scope; the Poller needs only the single collection read.
+    h.reader.setFullFetch(RULE_ID, [
+      { records: [issue("1", "alice", "phoenix"), issue("2", "bob", "atlas")] },
+    ]);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    const byId = new Map(pending(h.queue).map((p) => [p.sourceNativeId, p.capturedScope]));
+    expect(byId.get("1")).toStrictEqual({ owner: "alice", name: "phoenix" });
+    expect(byId.get("2")).toStrictEqual({ owner: "bob", name: "atlas" });
+  });
+
+  it("keeps its single per-rule cursor/snapshot unchanged — no per-scope state (SS-8.2)", async () => {
+    const h = harness(plan({ mode: "delta", cursor: "c0", sourceScopeRef: GITEA_SCOPE_REF }));
+    // A delta over the cross-scope read: records from different repos, ONE `since`/`before`
+    // cursor advance — not one per repo.
+    h.reader.setDelta(RULE_ID, [
+      { records: [issue("1", "alice", "phoenix"), issue("2", "bob", "atlas")], nextCursor: "c1" },
+    ]);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    // Exactly one advance of the single cursor, regardless of how many scopes appeared.
+    expect(h.state.stateOf(RULE_ID)?.cursor).toBe("c1");
+    expect(h.state.stateOf(RULE_ID)?.advanceCount).toBe(1);
+    // Delta keeps no snapshot — and there is no per-scope snapshot either.
+    expect(h.state.stateOf(RULE_ID)?.snapshotRef).toBeUndefined();
+    // Both records still carried their captured scope through the single-cursor poll.
+    expect(pending(h.queue).map((p) => p.capturedScope)).toStrictEqual([
+      { owner: "alice", name: "phoenix" },
+      { owner: "bob", name: "atlas" },
+    ]);
+  });
+
+  it("no sourceScopeRef → no capturedScope (a constant / non-scoped rule is unaffected)", async () => {
+    const h = harness(plan()); // no sourceScopeRef on the plan
+    h.reader.setFullFetch(RULE_ID, [{ records: [issue("1", "alice", "phoenix")] }]);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    const payloads = pending(h.queue);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.capturedScope).toBeUndefined();
+    expect("capturedScope" in (payloads[0] ?? {})).toBe(false);
+  });
+
+  it("a record missing one component captures only the present ones (SS-7 omission → fail-loud downstream)", async () => {
+    const h = harness(plan({ sourceScopeRef: GITEA_SCOPE_REF }));
+    // The second issue carries owner but no repository.name.
+    h.reader.setFullFetch(RULE_ID, [
+      {
+        records: [
+          issue("1", "alice", "phoenix"),
+          { nativeId: "2", record: { id: "2", repository: { owner: "bob" } } },
+        ],
+      },
+    ]);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    const byId = new Map(pending(h.queue).map((p) => [p.sourceNativeId, p.capturedScope]));
+    expect(byId.get("1")).toStrictEqual({ owner: "alice", name: "phoenix" });
+    // Only the present component is captured; `name` is omitted (never null/placeholder).
+    expect(byId.get("2")).toStrictEqual({ owner: "bob" });
+  });
+
+  it("a delete carries no capturedScope (the source record is gone)", async () => {
+    const h = harness(plan({ sourceScopeRef: GITEA_SCOPE_REF }));
+    h.state.seedSnapshot(
+      RULE_ID,
+      new Map([["gone", contentHashOfRecord(issue("gone", "a", "b").record)]]),
+    );
+    h.reader.setFullFetch(RULE_ID, [{ records: [] }]);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    const payloads = pending(h.queue);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({ sourceNativeId: "gone", changeKind: "delete" });
+    expect(payloads[0]?.capturedScope).toBeUndefined();
   });
 });

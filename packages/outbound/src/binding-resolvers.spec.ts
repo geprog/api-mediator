@@ -13,6 +13,7 @@ import type {
   RegisteredApp,
   ResourceBinding,
   ScopePathBinding,
+  ScopeTransform,
   SyncRule,
 } from "@mediator/domain";
 import type {
@@ -135,6 +136,23 @@ function scopeConstant(parameterName: string, value: string, confirmed = true): 
     kind: "constant",
     parameterName,
     value,
+    confirmedBy: confirmed ? "operator" : null,
+    confirmedAt: confirmed ? CONFIRMED_AT : null,
+  };
+}
+
+/** A `record-derived` scope path-parameter binding (SS-8 shape), confirmed by default. */
+function scopeRecordDerived(
+  parameterName: string,
+  sourceScopeKey: string,
+  opts: { transform?: ScopeTransform; confirmed?: boolean } = {},
+): ScopePathBinding {
+  const confirmed = opts.confirmed ?? true;
+  return {
+    kind: "record-derived",
+    parameterName,
+    sourceScopeKey,
+    ...(opts.transform !== undefined ? { transform: opts.transform } : {}),
     confirmedBy: confirmed ? "operator" : null,
     confirmedAt: confirmed ? CONFIRMED_AT : null,
   };
@@ -1233,6 +1251,261 @@ describe("SS-4.6 scenario-1 Gitea source + target resolve end to end", () => {
     expect(update?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
     // The record id is filled per record downstream from the RecordLink, not here.
     expect(update?.parameterLocations[idRef]).toEqual({ name: "index", in: "path" });
+  });
+});
+
+// ── 9. SS-8b: record-derived scope fill from the change's captured scope ─────────
+
+/**
+ * The Gitea `issues` resource re-used as a `record-derived` **target**: `{owner}`/`{repo}`
+ * are filled from the record's captured scope (SS-8.3). The captured scope keys the source
+ * `sourceScopeRef` produced (`owner` + `name`, from a Gitea issue's `repository.owner`/
+ * `repository.name`) are selected per-parameter by each binding's `sourceScopeKey` — here
+ * `owner → {owner}` and `name → {repo}`.
+ */
+const GITEA_RECORD_DERIVED = [
+  scopeRecordDerived("owner", "owner"),
+  scopeRecordDerived("repo", "name"),
+];
+const CAPTURED = { owner: "alice", name: "phoenix" };
+
+describe("SS-8.3 write — record-derived scope filled from the captured scope", () => {
+  it("create POST /repos/{owner}/{repo}/issues → /repos/alice/phoenix/issues (filled from captured scope)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      CAPTURED,
+    );
+    expect(binding?.method).toBe("POST");
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues");
+    expect(binding?.pathTemplate).not.toContain("{");
+  });
+
+  it("update: record-derived owner/repo filled, the record-id {index} stays templated (SS-4 discipline)", () => {
+    const idRef = "issues/issueEditIssue#index";
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "issues/issueEditIssue",
+        targetIdParamRef: idRef,
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      CAPTURED,
+    );
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    expect(binding?.parameterLocations[idRef]).toEqual({ name: "index", in: "path" });
+  });
+
+  it("the value passes through a rename transform unchanged (value-preserving)", () => {
+    const rename: ScopeTransform = { kind: "rename" };
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([
+        scopeRecordDerived("owner", "owner", { transform: rename }),
+        scopeRecordDerived("repo", "name", { transform: rename }),
+      ]),
+      CAPTURED,
+    );
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues");
+  });
+
+  it("a captured scope keyed differently from the target param is selected by sourceScopeKey", () => {
+    // sourceScopeKey `name` fills target param `repo` — the key selects the component.
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([
+        scopeRecordDerived("owner", "owner"),
+        scopeRecordDerived("repo", "name"),
+      ]),
+      { owner: "octo", name: "hub" },
+    );
+    expect(binding?.pathTemplate).toBe("/repos/octo/hub/issues");
+  });
+
+  it("a numeric captured value is stringified into the path (shared value-space)", () => {
+    const group: IrResourceGroup = {
+      resourceRef: "tasks",
+      name: "tasks",
+      operations: [
+        {
+          operationId: "createTask",
+          method: "put",
+          path: "/projects/{id}/tasks",
+          parameters: [param("id", "path")],
+          requestSchema: { name: "Task", fields: [field("title", "string")] },
+        },
+      ],
+      schemas: [],
+      crossResourceRefs: [],
+    };
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "tasks/createTask" }),
+      group,
+      scopedBinding("tasks", [scopeRecordDerived("id", "project")]),
+      { project: 42 },
+    );
+    expect(binding?.pathTemplate).toBe("/projects/42/tasks");
+  });
+});
+
+describe("SS-8.3 fail-loud — a missing / unconfirmed / uncaptured record-derived scope refuses the write", () => {
+  it("a missing captured component → undefined (never a fabricated scope)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "alice" }, // `name` was not carried by the source record
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("an UNCONFIRMED record-derived binding → undefined (used nowhere until confirmed)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([
+        scopeRecordDerived("owner", "owner"),
+        scopeRecordDerived("repo", "name", { confirmed: false }),
+      ]),
+      CAPTURED,
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("no captured scope at all (e.g. a delete) but record-derived bindings → undefined", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "delete",
+        targetOperationRef: "issues/issueDelete",
+        targetIdParamRef: "issues/issueDelete#index",
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      // capturedScope omitted — a delete carries none.
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("a captured value that is JSON null is not a usable scope segment → undefined", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "alice", name: null },
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("an EMPTY-STRING captured component refuses the write — no `//` path (wrong-container guard)", () => {
+    // owner="" would compose /repos//phoenix/issues, which many servers collapse to
+    // /repos/phoenix/issues — the repo name becomes the owner. Refuse loudly instead.
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+    expect(binding?.pathTemplate ?? "").not.toContain("//");
+  });
+
+  it("a `/`-containing captured component refuses the write (no injected path segments)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "alice/evil", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("a `..` captured component refuses the write (no path traversal)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "..", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+    expect(binding?.pathTemplate ?? "").not.toContain("..");
+  });
+
+  it("the record-id param is NEVER filled from the captured scope (record-id-vs-scope discipline)", () => {
+    // A defensive record-derived entry named for the record-id param + a captured `index`
+    // component must NOT fill `{index}` — it stays templated for the RecordLink fill.
+    const idRef = "issues/issueEditIssue#index";
+    const binding = resolveWriteOperationBinding(
+      operationMapping({
+        action: "update",
+        targetOperationRef: "issues/issueEditIssue",
+        targetIdParamRef: idRef,
+      }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([
+        scopeRecordDerived("owner", "owner"),
+        scopeRecordDerived("repo", "name"),
+        scopeRecordDerived("index", "index"),
+      ]),
+      { owner: "alice", name: "phoenix", index: 999 },
+    );
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+});
+
+describe("SS-8.3 no-regression + single-record read", () => {
+  it("a constant scope param still fills when a captured scope is supplied (mixed constant + record-derived)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding([scopeConstant("owner", "alice"), scopeRecordDerived("repo", "name")]),
+      { name: "phoenix" },
+    );
+    expect(binding?.pathTemplate).toBe("/repos/alice/phoenix/issues");
+  });
+
+  it("a constant-only binding is unchanged whether or not a captured scope is supplied (SS-4 no regression)", () => {
+    const withScope = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_SCOPE),
+      CAPTURED,
+    );
+    const withoutScope = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_SCOPE),
+    );
+    expect(withScope?.pathTemplate).toBe("/repos/alice/phoenix/issues");
+    expect(withoutScope?.pathTemplate).toBe("/repos/alice/phoenix/issues");
+  });
+
+  it("single-record read fills record-derived scope, leaves the record-id {index} templated", () => {
+    const readBinding: CfReadBinding = { readOperationId: "issueGetIssue", idParamRef: "index" };
+    const resolved = resolveSingleRecordRead({
+      binding: readBinding,
+      targetGroup: giteaIssuesGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      capturedScope: CAPTURED,
+    });
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+    expect(resolved?.idLocation).toEqual({ name: "index", in: "path" });
+  });
+
+  it("single-record read with a missing captured component → undefined (fail loud)", () => {
+    const readBinding: CfReadBinding = { readOperationId: "issueGetIssue", idParamRef: "index" };
+    const resolved = resolveSingleRecordRead({
+      binding: readBinding,
+      targetGroup: giteaIssuesGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      capturedScope: { owner: "alice" },
+    });
+    expect(resolved).toBeUndefined();
   });
 });
 

@@ -305,6 +305,10 @@ const changePayloadSchema = z
     sourceNativeId: z.string(),
     changeKind: z.enum(["create", "update", "delete"]),
     observedRecord: z.record(z.string(), jsonValueSchema).optional(),
+    // SS-8.5 — the captured scope that rode WITH the change through the queue payload
+    // (the `{ component-key → value }` routing key a `record-derived` target scope
+    // binding fills from). Absent for a non-scoped / constant-only rule.
+    capturedScope: z.record(z.string(), jsonValueSchema).optional(),
   })
   .superRefine((payload, ctx) => {
     if (payload.changeKind !== "delete" && payload.observedRecord === undefined) {
@@ -1057,6 +1061,7 @@ export function parseDetectedChange(payload: Record<string, unknown>): DetectedC
     sourceNativeId: value.sourceNativeId,
     changeKind: value.changeKind,
     observedRecord: value.observedRecord,
+    capturedScope: value.capturedScope,
   });
 }
 

@@ -15,6 +15,7 @@ import type {
   TargetLookupCapability,
   TargetReadBinding,
 } from "@mediator/sync-engine";
+import type { CapturedScope } from "@mediator/transform";
 
 import { confirmedFieldPath, confirmedValue, type RuleArtifacts } from "./resolution.js";
 
@@ -38,14 +39,18 @@ export interface ResolvedTargetOperations {
 /**
  * Resolve each `OperationMapping` to its `RestOperationBinding` and index by `action`
  * (the first that resolves per action wins). A stale/foreign `targetOperationRef`, or a
- * scoped op whose confirmed `constant` scope binding is missing (SS-4.4), is skipped —
- * never a fabricated binding. `targetBinding` supplies the scope constants substituted
- * into each op's non-record-id path parameters (SS-4.2).
+ * scoped op whose scope binding cannot be filled (an unconfirmed `constant` — SS-4.4 —
+ * or a `record-derived` param whose captured component is missing — SS-8.3), is skipped —
+ * never a fabricated binding; the pipeline then refuses the write loudly (`#requireOperation`
+ * throws → the dispatcher parks) rather than mis-scoping. `targetBinding` supplies the
+ * scope `constant`s (SS-4.2); `capturedScope` — the change's captured scope, present only
+ * on a scoped rule's create/update — fills each `record-derived` scope param (SS-8.3).
  */
 export function resolveTargetOperations(
   operationMappings: readonly OperationMapping[],
   targetGroup: IrResourceGroup,
   targetBinding: ResourceBinding,
+  capturedScope?: CapturedScope,
 ): ResolvedTargetOperations {
   const resolved: {
     create?: ResolvedTargetOperation;
@@ -53,7 +58,12 @@ export function resolveTargetOperations(
     delete?: ResolvedTargetOperation;
   } = {};
   for (const operationMapping of operationMappings) {
-    const binding = resolveWriteOperationBinding(operationMapping, targetGroup, targetBinding);
+    const binding = resolveWriteOperationBinding(
+      operationMapping,
+      targetGroup,
+      targetBinding,
+      capturedScope,
+    );
     if (binding === undefined) {
       continue;
     }

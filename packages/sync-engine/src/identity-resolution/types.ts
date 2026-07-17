@@ -1,5 +1,5 @@
 import type { AuditLogEntry, FieldMapping, RecordLink, TombstoneReason } from "@mediator/domain";
-import type { JsonRecord, JsonValue } from "@mediator/transform";
+import type { CapturedScope, JsonRecord, JsonValue } from "@mediator/transform";
 
 /**
  * Types for the **Identity Resolution** stage — the sync pipeline's first stage
@@ -37,6 +37,19 @@ export interface DetectedChange {
   readonly changeKind: ChangeKind;
   /** The source record as observed this poll. Absent/undefined on a delete (the record is gone). */
   readonly observedRecord?: JsonRecord | undefined;
+  /**
+   * The record's **captured scope** (`docs/glossary.md` *captured scope*; SS-8
+   * criterion 5) — the `{ component-key → value }` map the Poller extracted from the
+   * observed record via the **source** resource's confirmed `sourceScopeRef` (SS-7),
+   * riding **with** this detected change as an in-flight attribute (NOT persisted sync
+   * state, so the Poller's single per-rule `cursor`/snapshot is unchanged — SS-8.2). A
+   * `record-derived` **target** scope binding (SS-8.3) fills its scope path parameter
+   * from this by the binding's `sourceScopeKey`, and — under multi-scope — scoped
+   * identity (SS-14) consumes it. **Absent** for a non-scoped / constant-only rule (the
+   * source resource has no confirmed `sourceScopeRef`) and on a delete (the source
+   * record is gone, so nothing was captured) — backward-compatible.
+   */
+  readonly capturedScope?: CapturedScope | undefined;
 }
 
 /**

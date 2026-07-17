@@ -14,9 +14,10 @@ import type {
   SyncRule,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
-import type { JsonValue } from "@mediator/transform";
+import type { CapturedScope, JsonValue } from "@mediator/transform";
 
 import { fillScopePathParameters } from "./path-template.js";
+import { resolveRecordDerivedScopeValues } from "./record-derived-scope.js";
 import type { HttpMethod, ParameterLocation, RestOperationBinding } from "./protocol-client.js";
 import type {
   RestDeltaConvention,
@@ -525,21 +526,28 @@ export function resolveSourceReadBinding(
  * which the executor fills); an id parameter that resolves to a cookie is therefore
  * absent from the map and the executor reports the config error rather than mis-placing it.
  *
- * SS-4.2 — the returned `pathTemplate` has every **scope** (non-record-id) path parameter
- * substituted from the TARGET resource's confirmed `constant` bindings, while the
- * **record-id** parameter (named by `OperationMapping.targetIdParamRef`, present on
+ * SS-4.2 / SS-8.3 — the returned `pathTemplate` has every **scope** (non-record-id) path
+ * parameter substituted from the TARGET resource's confirmed `constant` bindings **or**,
+ * for a confirmed `record-derived` binding, from `capturedScope` (the change's captured
+ * scope) by the binding's `sourceScopeKey` — value-preserving `transform` applied — while
+ * the **record-id** parameter (named by `OperationMapping.targetIdParamRef`, present on
  * update/delete, absent on create) stays **templated** for the executor's per-record
  * id-fill from the `RecordLink`. The record-id-vs-scope split is keyed to the operation's
  * **role**, not to a bare name: on a create there is no `targetIdParamRef`, so ALL its
  * path parameters are scope (Vikunja `PUT /projects/{id}/tasks` fills `{id}` from the
- * project scope constant), whereas the same-named `{id}` on the `POST /tasks/{id}` update
- * is the record id and is never filled from a scope. An unconfirmed scope parameter →
- * `undefined` (the whole binding unresolves; SS-4.4), never a fabricated URL.
+ * project scope), whereas the same-named `{id}` on the `POST /tasks/{id}` update is the
+ * record id and is never filled from a scope. An unconfirmed scope constant, or a
+ * `record-derived` param whose captured component is absent, → `undefined` (the whole
+ * binding unresolves; SS-4.4 / SS-8.3), never a fabricated URL.
+ *
+ * `capturedScope` is omitted for a non-scoped / constant-only rule and on a delete (no
+ * source record was captured) — the fill is then constant-only, unchanged from SS-4.
  */
 export function resolveWriteOperationBinding(
   operationMapping: OperationMapping,
   targetGroup: IrResourceGroup,
   targetBinding: ResourceBinding,
+  capturedScope?: CapturedScope,
 ): RestOperationBinding | undefined {
   const parsed = parseOperationRef(operationMapping.targetOperationRef);
   if (parsed === undefined || parsed.resourceRef !== targetGroup.resourceRef) {
@@ -554,13 +562,21 @@ export function resolveWriteOperationBinding(
     return undefined;
   }
 
+  const scopePathBindings = targetBinding.scopePathBindings ?? [];
+  const recordDerivedValues =
+    capturedScope !== undefined
+      ? resolveRecordDerivedScopeValues(scopePathBindings, capturedScope)
+      : undefined;
   const pathTemplate = fillScopePathParameters(
     operation.path,
-    targetBinding.scopePathBindings ?? [],
+    scopePathBindings,
     writeRecordIdPathParam(operationMapping, operation),
+    recordDerivedValues,
   );
   if (pathTemplate === undefined) {
-    return undefined; // SS-4.4 — an unconfirmed scope constant never fabricates a URL.
+    // SS-4.4 / SS-8.3 — an unconfirmed scope constant or a missing captured component
+    // never fabricates a URL; the whole op unresolves and the write is refused upstream.
+    return undefined;
   }
 
   const parameterLocations: Record<string, ParameterLocation> = {};
@@ -730,13 +746,18 @@ export interface ResolvedSingleRecordRead {
  * resolved (never a fabricated call). Pure — the repo-backed
  * {@link RepoSingleRecordReadResolver} loads the IR + app + `ResourceBinding` and calls this.
  *
- * SS-4.3 — the returned `pathTemplate` has every **scope** (non-record-id) path parameter
- * substituted from the resource's confirmed `constant` bindings (`targetBinding`), while
- * the **record-id** parameter (`binding.idParamRef` — the by-id read's own id parameter,
- * the most-specific/last path param) stays **templated** for the reader's per-record
- * id-fill from the `RecordLink`. An unconfirmed scope parameter → `undefined` (SS-4.4),
- * never a fabricated URL; the {@link RestSingleRecordTargetReader} backstop then never
- * sees a literal `{owner}`.
+ * SS-4.3 / SS-8.3 — the returned `pathTemplate` has every **scope** (non-record-id) path
+ * parameter substituted from the resource's confirmed `constant` bindings (`targetBinding`)
+ * **or**, for a confirmed `record-derived` binding, from `capturedScope` (the change's
+ * captured scope) by the binding's `sourceScopeKey`, while the **record-id** parameter
+ * (`binding.idParamRef` — the by-id read's own id parameter, the most-specific/last path
+ * param) stays **templated** for the reader's per-record id-fill from the `RecordLink`. An
+ * unconfirmed scope constant, or a `record-derived` param whose captured component is
+ * absent, → `undefined` (SS-4.4 / SS-8.3), never a fabricated URL; the
+ * {@link RestSingleRecordTargetReader} backstop then never sees a literal `{owner}`.
+ *
+ * `capturedScope` is omitted for a non-scoped / constant-only read — the fill is then
+ * constant-only, unchanged from SS-4.
  */
 export function resolveSingleRecordRead(input: {
   readonly binding: SingleRecordReadBinding;
@@ -745,6 +766,8 @@ export function resolveSingleRecordRead(input: {
   readonly limits?: OutboundLoadLimits;
   /** The resource's `ResourceBinding` — its confirmed `constant` scope bindings fill the non-id path params. */
   readonly targetBinding?: ResourceBinding;
+  /** The change's captured scope — fills a `record-derived` scope param by its `sourceScopeKey` (SS-8.3). */
+  readonly capturedScope?: CapturedScope;
 }): ResolvedSingleRecordRead | undefined {
   const operation = findOperationById(input.targetGroup, input.binding.readOperationId);
   if (operation === undefined) {
@@ -762,15 +785,23 @@ export function resolveSingleRecordRead(input: {
   if (idLocation === undefined) {
     return undefined; // an id in a cookie is not fillable.
   }
+  const scopePathBindings = input.targetBinding?.scopePathBindings ?? [];
+  const recordDerivedValues =
+    input.capturedScope !== undefined
+      ? resolveRecordDerivedScopeValues(scopePathBindings, input.capturedScope)
+      : undefined;
   const pathTemplate = fillScopePathParameters(
     operation.path,
-    input.targetBinding?.scopePathBindings ?? [],
+    scopePathBindings,
     // The record-id parameter stays templated only when it is IN the path (a query/header
     // id leaves ALL path params as scope); the reader fills the id location downstream.
     idLocation.in === "path" ? input.binding.idParamRef : undefined,
+    recordDerivedValues,
   );
   if (pathTemplate === undefined) {
-    return undefined; // SS-4.4 — an unconfirmed scope constant never fabricates a URL.
+    // SS-4.4 / SS-8.3 — an unconfirmed scope constant or a missing captured component
+    // never fabricates a URL.
+    return undefined;
   }
   return stripUndefined({
     baseUrl: input.baseUrl,
@@ -962,6 +993,8 @@ export interface SingleRecordReadResolver {
   resolve(
     targetAppId: string,
     binding: SingleRecordReadBinding,
+    /** The change's captured scope — fills a `record-derived` scope param on a scoped read (SS-8.3). */
+    capturedScope?: CapturedScope,
   ): Promise<ResolvedSingleRecordRead | undefined>;
 }
 
@@ -989,6 +1022,7 @@ export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
   public async resolve(
     targetAppId: string,
     binding: SingleRecordReadBinding,
+    capturedScope?: CapturedScope,
   ): Promise<ResolvedSingleRecordRead | undefined> {
     const app = await this.#registeredApps.getById(targetAppId);
     if (app?.baseUrl === undefined) {
@@ -1012,6 +1046,7 @@ export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
             baseUrl: app.baseUrl,
             limits: app.outboundLimits,
             targetBinding: resourceBinding,
+            capturedScope,
           }),
         );
         if (resolved !== undefined) {

@@ -36,6 +36,7 @@ import { AppLoadGovernor } from "./load-governor.js";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protocol-client.js";
 import { FakeSyncEventStore } from "./sync-event-store.js";
 import {
+  parseDetectedChange,
   SyncPipelineHandler,
   type ParkedConflictResolutionRecord,
   type ParkedConflictWriter,
@@ -1023,6 +1024,38 @@ describe("SyncPipelineHandler — payload parsing", () => {
     await expect(
       h.handler.handle({ id: "q", queueKey: "k", payload: { ruleId: 42 }, attempts: 1 }),
     ).rejects.toBeInstanceOf(PermanentOutboundError);
+  });
+
+  it("SS-8.5 — the captured scope round-trips through the ordering-queue payload parse", () => {
+    const change: DetectedChange = {
+      ruleId: RULE_AB,
+      mappingId: MAP_AB,
+      sourceAppId: APP_A,
+      targetAppId: APP_B,
+      resourcePairRef: PAIR,
+      sourceNativeId: "42",
+      changeKind: "create",
+      observedRecord: { id: 42, title: "t", repository: { owner: "alice", name: "phoenix" } },
+      capturedScope: { owner: "alice", name: "phoenix" },
+    };
+    const roundTripped = parseDetectedChange(buildChangePayload(change));
+    expect(roundTripped.capturedScope).toStrictEqual({ owner: "alice", name: "phoenix" });
+  });
+
+  it("SS-8.5 — a change with no captured scope round-trips with capturedScope absent (backward-compatible)", () => {
+    const change: DetectedChange = {
+      ruleId: RULE_AB,
+      mappingId: MAP_AB,
+      sourceAppId: APP_A,
+      targetAppId: APP_B,
+      resourcePairRef: PAIR,
+      sourceNativeId: "42",
+      changeKind: "create",
+      observedRecord: { id: 42, title: "t" },
+    };
+    const payload = buildChangePayload(change);
+    expect("capturedScope" in payload).toBe(false);
+    expect(parseDetectedChange(payload).capturedScope).toBeUndefined();
   });
 });
 

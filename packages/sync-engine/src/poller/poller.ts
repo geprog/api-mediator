@@ -1,4 +1,4 @@
-import type { JsonRecord } from "@mediator/transform";
+import { extractCapturedScope, type JsonRecord } from "@mediator/transform";
 
 import type { ChangeKind, DetectedChange } from "../identity-resolution/types.js";
 import type { QueueKeyResolver } from "../ordering/queue-key-resolver.js";
@@ -252,6 +252,21 @@ export class Poller {
         ? "update"
         : "create";
 
+    // SS-8.2 — when the source resource has a confirmed `sourceScopeRef`, capture THIS
+    // record's scope from the record already fetched (the cross-scope collection read
+    // needs no special handling — one call, single cursor; the NEW work is purely the
+    // per-record capture). A partial record yields a partial map (SS-7's helper omits an
+    // absent component) which a `record-derived` fill later refuses on rather than
+    // fabricating (SS-8.3). No capture without a confirmed ref, or on a delete (the record
+    // is gone) — constant rules unaffected. An empty capture is treated as "no scope".
+    let capturedScope: DetectedChange["capturedScope"];
+    if (observedRecord !== undefined && plan.sourceScopeRef !== undefined) {
+      const captured = extractCapturedScope(observedRecord, plan.sourceScopeRef);
+      if (Object.keys(captured).length > 0) {
+        capturedScope = captured;
+      }
+    }
+
     const change: DetectedChange = {
       ruleId: plan.ruleId,
       mappingId: plan.mappingId,
@@ -261,6 +276,7 @@ export class Poller {
       sourceNativeId,
       changeKind,
       ...(observedRecord !== undefined ? { observedRecord } : {}),
+      ...(capturedScope !== undefined ? { capturedScope } : {}),
     };
     return {
       queueKey: resolved.queueKey,

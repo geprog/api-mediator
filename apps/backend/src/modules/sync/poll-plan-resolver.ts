@@ -1,4 +1,4 @@
-import type { ResourceBinding } from "@mediator/domain";
+import type { ResourceBinding, SourceScopeRef } from "@mediator/domain";
 import type { PollPlan, PollPlanResolution, PollPlanResolver } from "@mediator/sync-engine";
 
 import {
@@ -68,6 +68,11 @@ export class RepoPollPlanResolver implements PollPlanResolver {
       return { pollable: false, reason: "unconfirmed-poll-operation" };
     }
 
+    // SS-8.2 — a confirmed source `sourceScopeRef` rides on the plan so the Poller
+    // captures each record's scope from the record it already fetched (one call, single
+    // cursor — no per-scope state). Absent/unconfirmed → omitted → the Poller captures
+    // nothing (constant / non-scoped rules unaffected — SS-7.4).
+    const sourceScopeRef = confirmedSourceScopeRef(artifacts.sourceBinding);
     const plan: PollPlan = {
       ruleId: artifacts.rule.id,
       mappingId: artifacts.mapping.id,
@@ -77,6 +82,7 @@ export class RepoPollPlanResolver implements PollPlanResolver {
       mode: deltaPolling ? "delta" : "full-fetch",
       identitySourcePath: identityField.sourcePath,
       cursor: artifacts.rule.cursor ?? undefined,
+      ...(sourceScopeRef !== undefined ? { sourceScopeRef } : {}),
     };
     return { pollable: true, plan };
   }
@@ -95,4 +101,18 @@ export class RepoPollPlanResolver implements PollPlanResolver {
       ? confirmedValue(sourceBinding.deltaCursorRef) !== undefined
       : confirmedValue(sourceBinding.collectionReadRef) !== undefined;
   }
+}
+
+/**
+ * The source resource's `sourceScopeRef` when it is **confirmed** (both
+ * `confirmedBy`/`confirmedAt` set), else `undefined`. An unconfirmed ref is used nowhere
+ * (SS-7.4), so the Poller captures no scope and constant / non-scoped rules are
+ * unaffected. The ref's own schema guarantees at least one component when present.
+ */
+function confirmedSourceScopeRef(sourceBinding: ResourceBinding): SourceScopeRef | undefined {
+  const ref = sourceBinding.sourceScopeRef;
+  if (ref === undefined || ref.confirmedBy === null || ref.confirmedAt === null) {
+    return undefined;
+  }
+  return ref;
 }
