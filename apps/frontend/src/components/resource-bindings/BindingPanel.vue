@@ -1,9 +1,5 @@
 <script setup lang="ts">
-import type {
-  ResourceBindingDto,
-  ResourceBindingScopeConstantDto,
-  UpdateResourceBindingRequest,
-} from "@mediator/contracts";
+import type { ResourceBindingDto, UpdateResourceBindingRequest } from "@mediator/contracts";
 import type { Ir } from "@mediator/domain";
 import Card from "primevue/card";
 import Message from "primevue/message";
@@ -25,15 +21,29 @@ import ScopeBindingRow from "./ScopeBindingRow.vue";
  * The IR is supplied by the parent (shared with the IR viewer) to feed each
  * resource's correction picker without a second fetch.
  *
- * Also hosts the SS-6.2 scope path-parameter supply UI: each `constant` scope entry
- * is a value the operator types in (not an IR pointer), and confirming it clears the
- * SS-5 enablement blocker via the same PATCH + query invalidation (SS-6.3).
+ * Also hosts the SS-6/SS-9 scope path-parameter supply UI: each scope entry offers the
+ * SS-9.2 kind choice (`constant` / `record-derived`, with `scope-link` disabled) and,
+ * per kind, the input to supply — a `constant` value (SS-3) or a `record-derived`
+ * `sourceScopeKey` (SS-8a). Confirming it clears the SS-5/SS-9 enablement blocker via the
+ * same PATCH + query invalidation, so the panel and the enablement checklist both reflect
+ * the satisfied item (SS-6.3 / SU-5.3).
  */
-const props = defineProps<{ specId: string; ir: Ir }>();
+const props = defineProps<{
+  specId: string;
+  ir: Ir;
+  /**
+   * Rule/source context for a `record-derived` choice (SS-9.2): the **source** resource's
+   * confirmed `sourceScopeRef` component keys. Provided when the panel is reached with rule
+   * context (the enablement `source-scope-ref` deep-link knows the rule → source resource),
+   * threaded to each scope row as its `sourceScopeKey` pick list; `undefined` in a standalone
+   * spec/binding view, where the row falls back to a free-text `sourceScopeKey` input.
+   */
+  sourceScopeKeyOptions?: readonly string[];
+}>();
 
 const auth = useAuthStore();
-// SS-6.4 — the scope value input + confirm action are absent for a viewer. Only the
-// scope section is role-gated here; the operational ref rows keep their RB-3 behavior.
+// SS-6.4 / SS-9.3 — the kind selector, inputs + confirm action are absent for a viewer. Only
+// the scope section is role-gated here; the operational ref rows keep their RB-3 behavior.
 const scopeReadonly = computed<boolean>(() => !auth.isOperator);
 
 const bindingsQuery = useResourceBindings(() => props.specId);
@@ -53,18 +63,6 @@ const targetOptionsByBinding = computed<Record<string, RefTargetOptions>>(() => 
 
 function optionsFor(bindingId: string): RefTargetOptions {
   return targetOptionsByBinding.value[bindingId] ?? { field: [], operation: [], parameter: [] };
-}
-
-/**
- * The `constant` scope entries the SS-6 supply row renders. `record-derived` entries
- * (SS-8) need the kind-choice UI of the separate SS-9 slice, so they are filtered out
- * here rather than rendered by the constant-only {@link ScopeBindingRow}. Today every
- * derived entry defaults to `constant` (SS-2), so this filters nothing in practice.
- */
-function constantScopeBindings(binding: ResourceBindingDto): ResourceBindingScopeConstantDto[] {
-  return binding.scopeBindings.filter(
-    (scope): scope is ResourceBindingScopeConstantDto => scope.kind === "constant",
-  );
 }
 
 function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindingRequest }): void {
@@ -120,24 +118,28 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
             @correct="applyUpdate"
           />
 
-          <!-- SS-6.2: scope path-parameter constants — values to supply, not refs to ratify. -->
+          <!-- SS-6.2 / SS-9.2: scope path-parameter bindings — a fill-source kind to choose
+               and that kind's datum to supply, not refs to ratify. Each entry renders per its
+               DTO kind (`constant`/`record-derived`), whichever it currently is. -->
           <section
-            v-if="constantScopeBindings(binding).length > 0"
+            v-if="binding.scopeBindings.length > 0"
             class="binding-card__scopes"
             :data-testid="`scope-bindings-${binding.resourceRef}`"
           >
             <h4 class="binding-card__scopes-title">Scope path parameters</h4>
             <p class="binding-card__scopes-hint">
-              Non-record-id path parameters this resource is reached through. Each is a
-              <strong>constant you supply</strong>; a rule cannot enable until every one is
-              confirmed (SS-5).
+              Non-record-id path parameters this resource is reached through. For each, choose how
+              it is filled — a <strong>constant</strong> you supply or a
+              <strong>record-derived</strong> source scope key — and confirm it; a rule cannot
+              enable until every one is confirmed (SS-5/SS-9).
             </p>
             <ScopeBindingRow
-              v-for="scope in constantScopeBindings(binding)"
+              v-for="scope in binding.scopeBindings"
               :key="scope.parameterName"
               :binding-id="binding.id"
               :scope="scope"
               :readonly="scopeReadonly"
+              :source-scope-key-options="props.sourceScopeKeyOptions"
               @confirm="applyUpdate"
             />
           </section>

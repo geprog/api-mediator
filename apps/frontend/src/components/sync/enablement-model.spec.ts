@@ -99,7 +99,7 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     );
     expect(items).toHaveLength(1);
     const item = items[0];
-    expect(item?.key).toBe("source-scope-ref:source:name");
+    expect(item?.key).toBe("source-scope-ref:source:issues:name");
     // Names the selected component and its source resource so the operator knows what to confirm.
     expect(item?.label).toContain("name");
     expect(item?.label).toContain("issues");
@@ -116,6 +116,29 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
       "source-scope-ref",
     ]);
     expect(canEnable({ stillNeeds, choice: "link-only", pushBlocked: false })).toBe(false);
+  });
+
+  it("keys a source-scope-ref by resource so two params sharing a sourceScopeKey stay distinct (SS-9.2)", () => {
+    // Two record-derived scope parameters selecting the SAME sourceScopeKey ('name') on
+    // DIFFERENT source resources. With the old `side:sourceScopeKey` key they collided into
+    // one row / clashed on the Vue `:key`; including `resourceRef` keeps them distinct.
+    const items = enablementChecklist(
+      [
+        { kind: "source-scope-ref", side: "source", resourceRef: "issues", sourceScopeKey: "name" },
+        {
+          kind: "source-scope-ref",
+          side: "source",
+          resourceRef: "comments",
+          sourceScopeKey: "name",
+        },
+      ],
+      PAIR,
+    );
+    expect(items).toHaveLength(2);
+    const keys = items.map((item) => item.key);
+    expect(new Set(keys).size).toBe(2);
+    expect(keys).toContain("source-scope-ref:source:issues:name");
+    expect(keys).toContain("source-scope-ref:source:comments:name");
   });
 
   it("describes changeTimestampRef is NOT among the binding-ref blocker kinds (SU-5.2 structural)", () => {

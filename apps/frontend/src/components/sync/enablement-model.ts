@@ -141,8 +141,11 @@ export function describeRequirement(
       // SS-9.1a — a hard blocker: the source record's scope capture (sourceScopeRef) must
       // be confirmed carrying the component a record-derived scope binding selects (SS-7).
       // Deep-links to the source app where the Phase-1 binding panel (RB-3) confirms it.
+      // The key carries `resourceRef` too (not just side + sourceScopeKey): two scope
+      // parameters selecting the **same** `sourceScopeKey` on **different** resources would
+      // otherwise collide into one row / clash on the Vue `:key`.
       return {
-        key: `source-scope-ref:${requirement.side}:${requirement.sourceScopeKey}`,
+        key: `source-scope-ref:${requirement.side}:${requirement.resourceRef}:${requirement.sourceScopeKey}`,
         label: `Confirm the ${requirement.side} record scope capture (sourceScopeRef) carrying the component '${requirement.sourceScopeKey}' on ${requirement.resourceRef}.`,
         bindingLink: bindingLinkFor(requirement.side, resourcePair),
       };
