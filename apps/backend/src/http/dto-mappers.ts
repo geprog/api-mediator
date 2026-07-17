@@ -3,6 +3,7 @@ import {
   type ApiSpecMetadataDto,
   type RegisteredAppDto,
   type ResourceBindingDto,
+  type ResourceBindingScopeDto,
   type ResourceGroupSummary,
 } from "@mediator/contracts";
 import type {
@@ -53,10 +54,12 @@ export function toApiSpecMetadataDto(spec: ApiSpec): ApiSpecMetadataDto {
  * its value, confirmation state, and `applicable` flag (computed from the owning
  * app's `capabilities`), so a caller can tell not-applicable / unconfirmed /
  * confirmed apart in one pass; and every scope path-parameter binding is listed
- * with its `parameterName`, fill-source `kind`, literal `value`, and
- * confirmed/unconfirmed state (SS-3 criterion 6). The scope `value` is operator
- * config (shown as entered), never credential/live payload. Built explicitly
- * (never spread from the domain entity), so nothing beyond these fields leaks.
+ * with its `parameterName`, fill-source `kind`, and confirmed/unconfirmed state plus
+ * the per-kind datum (`constant`'s literal `value` — SS-3 criterion 6; a
+ * `record-derived`'s `sourceScopeKey` + optional `transform` — SS-8 criterion 1). The
+ * scope `value` is operator config (shown as entered), never credential/live payload.
+ * Built explicitly (never spread from the domain entity), so nothing beyond these
+ * fields leaks.
  */
 export function toResourceBindingDto(
   binding: ResourceBinding,
@@ -73,13 +76,31 @@ export function toResourceBindingDto(
       confirmedAt: confirmedAt !== null ? confirmedAt.toISOString() : null,
     };
   });
-  const scopeBindings = (binding.scopePathBindings ?? []).map((entry) => ({
-    parameterName: entry.parameterName,
-    kind: entry.kind,
-    value: entry.value,
-    confirmedBy: entry.confirmedBy,
-    confirmedAt: entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null,
-  }));
+  const scopeBindings = (binding.scopePathBindings ?? []).map((entry): ResourceBindingScopeDto => {
+    const confirmedAt = entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null;
+    // `record-derived` (SS-8) reports its `sourceScopeKey` (+ any value-preserving
+    // `transform`) and carries no constant literal (`value: ""`); `constant` (SS-3)
+    // reports its operator-authored literal. The flat DTO keeps `value` a string for
+    // both so the SS-6 panel renders unchanged (SS-9 adds kind-aware rendering).
+    if (entry.kind === "record-derived") {
+      return {
+        parameterName: entry.parameterName,
+        kind: "record-derived",
+        value: "",
+        sourceScopeKey: entry.sourceScopeKey,
+        ...(entry.transform !== undefined ? { transform: entry.transform } : {}),
+        confirmedBy: entry.confirmedBy,
+        confirmedAt,
+      };
+    }
+    return {
+      parameterName: entry.parameterName,
+      kind: "constant",
+      value: entry.value,
+      confirmedBy: entry.confirmedBy,
+      confirmedAt,
+    };
+  });
   // `sourceScopeRef` (SS-7): null when absent (no container field), else the
   // component set + its single confirmed/unconfirmed state (SS-9's UI consumes it).
   const source = binding.sourceScopeRef;

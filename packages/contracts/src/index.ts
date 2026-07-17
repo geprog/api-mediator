@@ -73,6 +73,8 @@ export {
   updateResourceBindingRequestSchema,
   updateResourceBindingResponseSchema,
   updateScopeBindingRequestSchema,
+  updateScopeConstantBindingRequestSchema,
+  updateScopeRecordDerivedBindingRequestSchema,
   updateSourceScopeRefRequestSchema,
   type ResourceBindingDto,
   type ResourceBindingRefDto,
@@ -84,6 +86,8 @@ export {
   type UpdateResourceBindingRequest,
   type UpdateResourceBindingResponse,
   type UpdateScopeBindingRequest,
+  type UpdateScopeConstantBindingRequest,
+  type UpdateScopeRecordDerivedBindingRequest,
   type UpdateSourceScopeRefRequest,
 } from "./resource-bindings.js";
 

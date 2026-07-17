@@ -70,15 +70,16 @@ function hasUsableRoutedOp(ops: readonly OperationMapping[], action: "update" | 
  * scope parameter the gate reports satisfied is precisely one the resolver can fill — and
  * one it reports unsatisfied is precisely one the resolver would leave as `{…}`.
  *
- * `ScopePathBinding` is currently a single-member (`constant`) union, so `entry.value` is
- * read directly (mirroring the resolver's `confirmedConstantValue`). When Layers 2/3 add
- * value-less kinds (`record-derived`/`scope-link`), `entry.value` stops type-checking here
- * and this must narrow to `entry.kind === "constant"` first — the compiler enforces it, so
- * a non-constant fill source can never be read as a Layer-1 literal.
+ * The `entry.kind === "constant"` narrow both selects the `constant` member (so
+ * `entry.value` type-checks, mirroring the resolver's `confirmedConstantValue`) and
+ * keeps this gate **constant-only**: a `record-derived` (SS-8) / `scope-link` entry does
+ * not satisfy the SS-5 constant requirement — recognizing a `record-derived` binding as
+ * a satisfied scope requirement is SS-9's gate delta, not this one.
  */
 function isScopeConstantConfirmed(binding: ResourceBinding, parameterName: string): boolean {
   return (binding.scopePathBindings ?? []).some(
     (entry) =>
+      entry.kind === "constant" &&
       entry.parameterName === parameterName &&
       entry.confirmedBy !== null &&
       entry.confirmedAt !== null &&

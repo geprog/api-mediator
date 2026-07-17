@@ -133,11 +133,12 @@ function pathParameterNames(pathTemplate: string): string[] {
  * emptiness guard here keeps the resolver from ever composing a `//` path from a
  * malformed row.
  *
- * `ScopePathBinding` is currently a single-member (`constant`) union, so `binding.value`
- * is read directly — mirroring the domain `scopePathBindingSchema` superRefine. When
- * Layers 2/3 add value-less kinds (`record-derived`/`scope-link`), `binding.value` stops
- * type-checking here and this must narrow to `binding.kind === "constant"` first — the
- * compiler enforces it, so a non-constant fill source can never be read as a literal.
+ * The `binding.kind === "constant"` narrow both selects the `constant` member (so
+ * `binding.value` type-checks — mirroring the domain `scopePathBindingSchema` superRefine)
+ * and keeps this resolver **constant-only**: a `record-derived` (SS-8) / `scope-link`
+ * entry yields no constant literal here, so the parameter is left `{…}` — filling a
+ * `record-derived` scope parameter from the record's captured scope is SS-8b's resolver
+ * fill, not this function.
  */
 function confirmedConstantValue(
   scopePathBindings: readonly ScopePathBinding[],
@@ -145,6 +146,7 @@ function confirmedConstantValue(
 ): string | undefined {
   for (const binding of scopePathBindings) {
     if (
+      binding.kind === "constant" &&
       binding.parameterName === parameterName &&
       binding.confirmedBy !== null &&
       binding.confirmedAt !== null &&

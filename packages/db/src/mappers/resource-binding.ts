@@ -4,6 +4,7 @@ import {
   type ResourceBinding,
   type ScopeComponent,
   type ScopePathBinding,
+  type ScopeTransform,
   type SourceScopeRef,
   stripUndefined,
 } from "@mediator/domain";
@@ -43,20 +44,37 @@ export interface ConfirmableRefPatch {
 export type ResourceBindingRefPatch = Partial<Record<ResourceBindingRefKind, ConfirmableRefPatch>>;
 
 /**
- * Confirm/correct **one** `constant` scope path-parameter binding for
- * {@link ResourceBindingRepository.updateScopePathBinding}. Addressed by
+ * Confirm/correct **one** scope path-parameter binding for
+ * {@link ResourceBindingRepository.updateScopePathBinding}, addressed by
  * `parameterName` (scope bindings are keyed by name, not the six ref kinds — a
- * distinct patch shape from {@link ResourceBindingRefPatch}): it sets the entry's
- * literal `value` and stamps its confirmation, rewriting only that entry of the
- * `jsonb` collection and leaving every sibling scope entry and all operational
- * refs untouched (SS-3.2). `value` is a free literal (not an IR pointer, SS-3.4).
+ * distinct patch shape from {@link ResourceBindingRefPatch}). A **discriminated
+ * union over `kind`**, one member per fill source it can confirm an entry *into*:
+ *
+ * - `constant` (SS-3) — sets the entry's literal `value` + confirmation.
+ * - `record-derived` (SS-8) — sets the entry's `sourceScopeKey` (+ optional
+ *   value-preserving `transform`) + confirmation, **dropping** the `constant`'s
+ *   `value` (a derived entry defaults to `kind: constant` at SS-2, so confirming it
+ *   `record-derived` rewrites the member).
+ *
+ * Either way it rewrites **only** the matching entry of the `jsonb` collection,
+ * leaving every sibling scope entry and all operational refs untouched (SS-3.2).
  */
-export interface ScopePathBindingPatch {
+export interface ScopeConstantBindingPatch {
+  readonly kind: "constant";
   readonly parameterName: string;
   readonly value: string;
   readonly confirmedBy: string | null;
   readonly confirmedAt: Date | null;
 }
+export interface ScopeRecordDerivedBindingPatch {
+  readonly kind: "record-derived";
+  readonly parameterName: string;
+  readonly sourceScopeKey: string;
+  readonly transform?: ScopeTransform;
+  readonly confirmedBy: string | null;
+  readonly confirmedAt: Date | null;
+}
+export type ScopePathBindingPatch = ScopeConstantBindingPatch | ScopeRecordDerivedBindingPatch;
 
 /**
  * Confirm/correct the whole `sourceScopeRef` for
@@ -171,28 +189,43 @@ function fromScopePathBindingRow(row: ScopePathBindingRow): ScopePathBinding {
 
 /**
  * Apply a {@link ScopePathBindingPatch} to a scope-binding `jsonb` collection:
- * rewrite **only** the entry whose `parameterName` matches (setting its literal
- * `value` and confirmation, `confirmedAt` as ISO-8601), leaving every sibling
- * entry byte-identical (SS-3.2). Returns the new collection and whether an entry
- * matched, so a caller can reject a `parameterName` that is not a derived scope
- * entry of the resource (SS-3.4) rather than silently no-op. Only the `constant`
- * kind carries a `value`; when Layers 2/3 add value-less kinds this narrows.
+ * rewrite **only** the entry whose `parameterName` matches — to the shape of the
+ * patch's `kind` (a `constant`'s literal `value`, or a `record-derived`'s
+ * `sourceScopeKey` + optional `transform`) plus its confirmation (`confirmedAt` as
+ * ISO-8601) — leaving every sibling entry byte-identical (SS-3.2). The matched entry
+ * is **replaced** (not spread over its prior fields), so confirming an SS-2-default
+ * `constant` entry `record-derived` drops the stale `value` and vice-versa. Returns
+ * the new collection and whether an entry matched, so a caller can reject a
+ * `parameterName` that is not a derived scope entry of the resource (SS-3.4) rather
+ * than silently no-op.
  */
 export function applyScopePathBindingPatch(
   rows: readonly ScopePathBindingRow[],
   patch: ScopePathBindingPatch,
 ): { readonly rows: ScopePathBindingRow[]; readonly matched: boolean } {
   let matched = false;
+  const confirmedAt = patch.confirmedAt === null ? null : patch.confirmedAt.toISOString();
   const next = rows.map((row): ScopePathBindingRow => {
     if (row.parameterName !== patch.parameterName) {
       return row;
     }
     matched = true;
+    if (patch.kind === "constant") {
+      return {
+        kind: "constant",
+        parameterName: patch.parameterName,
+        value: patch.value,
+        confirmedBy: patch.confirmedBy,
+        confirmedAt,
+      };
+    }
     return {
-      ...row,
-      value: patch.value,
+      kind: "record-derived",
+      parameterName: patch.parameterName,
+      sourceScopeKey: patch.sourceScopeKey,
+      ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
       confirmedBy: patch.confirmedBy,
-      confirmedAt: patch.confirmedAt === null ? null : patch.confirmedAt.toISOString(),
+      confirmedAt,
     };
   });
   return { rows: next, matched };

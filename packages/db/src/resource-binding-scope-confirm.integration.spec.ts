@@ -41,6 +41,9 @@ suite("updateScopePathBinding persistence integration (requires Postgres)", () =
   const appId = randomUUID();
   const specId = randomUUID();
   const bindingId = randomUUID();
+  // A second, isolated binding for the record-derived confirm (SS-8), so it does not
+  // share mutable scope state with the constant-confirm tests above.
+  const bindingId2 = randomUUID();
   const createdAt = new Date("2026-07-15T00:00:00.000Z");
   const confirmedAt = new Date("2026-07-15T09:30:00.000Z");
 
@@ -101,18 +104,31 @@ suite("updateScopePathBinding persistence integration (requires Postgres)", () =
     ],
   };
 
+  // The record-derived confirm's own binding: same two unconfirmed constant seeds.
+  const binding2: ResourceBinding = {
+    id: bindingId2,
+    apiSpecId: specId,
+    resourceRef: "issues",
+    nativeIdRef: { value: { kind: "field", path: "id" }, confirmedBy: null, confirmedAt: null },
+    scopePathBindings: [
+      { kind: "constant", parameterName: "owner", value: "", confirmedBy: null, confirmedAt: null },
+      { kind: "constant", parameterName: "repo", value: "", confirmedBy: null, confirmedAt: null },
+    ],
+  };
+
   beforeAll(async () => {
     db = createDb(resolveDatabaseUrl(process.env));
     await runMigrations(db);
     await tx(db, async (txn) => {
       await new RegisteredAppRepository(txn).create(app);
       await new ApiSpecRepository(txn).create(spec);
-      await new ResourceBindingRepository(txn).createMany([binding]);
+      await new ResourceBindingRepository(txn).createMany([binding, binding2]);
     });
   });
 
   afterAll(async () => {
     await db.delete(resourceBindingRef).where(eq(resourceBindingRef.resourceBindingId, bindingId));
+    await db.delete(resourceBindingRef).where(eq(resourceBindingRef.resourceBindingId, bindingId2));
     await db.delete(resourceBinding).where(eq(resourceBinding.apiSpecId, specId));
     await db.delete(apiSpec).where(eq(apiSpec.id, specId));
     await db.delete(registeredApp).where(eq(registeredApp.id, appId));
@@ -123,6 +139,7 @@ suite("updateScopePathBinding persistence integration (requires Postgres)", () =
     const repo = new ResourceBindingRepository(db);
 
     const updated = await repo.updateScopePathBinding(bindingId, {
+      kind: "constant",
       parameterName: "owner",
       value: "alice",
       confirmedBy: "op@example.test",
@@ -168,6 +185,7 @@ suite("updateScopePathBinding persistence integration (requires Postgres)", () =
     const before = await repo.getById(bindingId);
 
     const result = await repo.updateScopePathBinding(bindingId, {
+      kind: "constant",
       parameterName: "tenant",
       value: "acme",
       confirmedBy: "op@example.test",
@@ -178,5 +196,46 @@ suite("updateScopePathBinding persistence integration (requires Postgres)", () =
     expect(result?.scopePathBindings?.some((entry) => entry.parameterName === "tenant")).toBe(
       false,
     );
+  });
+
+  it("confirms one scope entry record-derived by parameterName, leaving the constant sibling untouched (SS-8)", async () => {
+    const repo = new ResourceBindingRepository(db);
+
+    const updated = await repo.updateScopePathBinding(bindingId2, {
+      kind: "record-derived",
+      parameterName: "owner",
+      sourceScopeKey: "owner",
+      transform: { kind: "rename" },
+      confirmedBy: "op@example.test",
+      confirmedAt,
+    });
+    expect(updated).toBeDefined();
+
+    // Reload independently to prove the write hit the jsonb column, not just memory.
+    const reloaded = await repo.getById(bindingId2);
+    const byName = new Map(
+      (reloaded?.scopePathBindings ?? []).map((entry) => [entry.parameterName, entry]),
+    );
+
+    // The confirmed entry becomes the record-derived member (kind flipped, no `value`
+    // key), sourceScopeKey + transform set, confirmation stamped, confirmedAt a Date.
+    expect(byName.get("owner")).toStrictEqual({
+      kind: "record-derived",
+      parameterName: "owner",
+      sourceScopeKey: "owner",
+      transform: { kind: "rename" },
+      confirmedBy: "op@example.test",
+      confirmedAt,
+    });
+    expect(byName.get("owner")?.confirmedAt).toBeInstanceOf(Date);
+
+    // The sibling constant scope entry is byte-identical to its unconfirmed seed.
+    expect(byName.get("repo")).toStrictEqual({
+      kind: "constant",
+      parameterName: "repo",
+      value: "",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
   });
 });

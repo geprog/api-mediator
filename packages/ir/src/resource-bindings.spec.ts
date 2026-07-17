@@ -7,6 +7,7 @@ import type {
   Ir,
   IrOperation,
   ResourceBinding,
+  ScopePathBinding,
 } from "@mediator/domain";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -42,6 +43,16 @@ function resolveOperation(ir: Ir, resourceRef: string, operationId: string): IrO
   const operation = group?.operations.find((op) => op.operationId === operationId);
   if (!operation) throw new Error(`operation '${operationId}' not found in '${resourceRef}'`);
   return operation;
+}
+
+/**
+ * The `constant` literal of a derived scope entry. SS-2 derivation yields only
+ * `kind: "constant"` entries, so this narrows for the assertions below; a
+ * non-constant entry is a test failure.
+ */
+function constantValueOf(entry: ScopePathBinding | undefined): string {
+  if (entry?.kind !== "constant") throw new Error("expected a constant scope entry");
+  return entry.value;
 }
 
 /** Every ref actually present on a binding (absent keys are omitted). */
@@ -271,7 +282,7 @@ describe("deriveResourceBindings — scopePathBindings (SS-2)", () => {
       expect(entry.confirmedBy).toBeNull();
       expect(entry.confirmedAt).toBeNull();
       // owner/repo carry no single-value hint in the spec → empty candidate.
-      expect(entry.value).toBe("");
+      expect(constantValueOf(entry)).toBe("");
     }
   });
 
@@ -376,10 +387,10 @@ describe("deriveResourceBindings — scopePathBindings (SS-2)", () => {
       (binding.scopePathBindings ?? []).map((entry) => [entry.parameterName, entry] as const),
     );
     // Layer-1 entries are all `kind: "constant"`, so `value` is present.
-    expect(byName.get("tenant")?.value).toBe("acme"); // single-value enum
-    expect(byName.get("region")?.value).toBe("eu"); // schema default
-    expect(byName.get("zone")?.value).toBe("z1"); // example
-    expect(byName.get("bucket")?.value).toBe(""); // multi-value enum → no candidate
+    expect(constantValueOf(byName.get("tenant"))).toBe("acme"); // single-value enum
+    expect(constantValueOf(byName.get("region"))).toBe("eu"); // schema default
+    expect(constantValueOf(byName.get("zone"))).toBe("z1"); // example
+    expect(constantValueOf(byName.get("bucket"))).toBe(""); // multi-value enum → no candidate
     // A prefilled candidate is still only a candidate — never confirmed.
     for (const entry of byName.values()) {
       expect(entry.confirmedBy).toBeNull();
