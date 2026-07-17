@@ -20,7 +20,7 @@ rules); system (derives scope sets, discovers/resolves `ScopeLink`s, enumerates 
 substitutes at resolution, gates at enablement); viewer (read-only).
 
 **Concept references (whole file):** [data-model.md](../architecture/data-model.md) `ResourceBinding`
-(`scopePathBindings`), `ScopeLink`, `RecordLink`, `OperationMapping.targetIdParamRef`,
+(`scopePathBindings`, `sourceScopeRef`), `ScopeLink`, `RecordLink`, `OperationMapping.targetIdParamRef`,
 `ParameterMapping`, `SyncRule`, `FieldMapping.isIdentityKey`;
 [sync-engine.md](../architecture/sync-engine.md) *Change detection*, *Identity correlation*, *Change
 types*, *Ordering and consistency* (scoped record identity), *Initial backfill*;
@@ -96,8 +96,9 @@ general fallback but not exercisable against scenario-1's *trimmed* source (no r
    match) — a mini container-level backfill — or harvested from record-carried scope where a container-list op
    is absent.
 2. **Per-param binding references its source via a discriminated union** on `ResourceBinding.scopePathBindings`:
-   `constant` (literal) | `record-derived` (`sourceScopeRef` field path, shared value-space) | `scope-link`
-   (`scopeKeyRef` into the resolved `ScopeLink`). Exact shape in `data-model.md` `ResourceBinding`.
+   `constant` (literal) | `record-derived` (`sourceScopeKey` selecting a component of the source
+   resource's `sourceScopeRef`, shared value-space) | `scope-link` (`scopeKeyRef` into the resolved
+   `ScopeLink`). Exact shape in `data-model.md` `ResourceBinding`.
 3. **Poll enumeration:** prefer cross-scope read + record-carried scope-source (single cursor, unchanged Poller);
    fall back to per-scope enumeration (container `collectionReadRef` + per-scope cursor/snapshot) only where no
    cross-scope read exists. See the analysis above.
@@ -324,19 +325,30 @@ scope where value-spaces coincide.
 
 ## SS-7 — `sourceScopeRef`: where a record carries its scope
 
-**As an** operator, **I** confirm the field path on a resource's record that carries its container
+**As an** operator, **I** confirm the field path(s) on a resource's record that carry its container
 identity, **so that** the pipeline can capture each record's scope and route its write.
 
 ### Acceptance criteria
 
 1. **Given** a resource whose records carry their container, **when** its binding is derived (extends
-   RB-1), **then** a `sourceScopeRef` (one or more field paths) is guessed **unconfirmed** — e.g. Gitea
-   `Issue.repository.owner`+`repository.name`, Vikunja `Task.project_id`.
-2. **Given** the operator, **when** they confirm/correct `sourceScopeRef`, **then** it is validated
-   against the resource's response schema (a real field path) and stamped `confirmedBy`/`confirmedAt`.
+   RB-1), **then** a `sourceScopeRef` is guessed **unconfirmed** as a **keyed set of scope components**,
+   each `{ key, fieldPath }` — `key` a stable component name (defaulting to the `fieldPath`'s leaf
+   segment, operator-correctable), `fieldPath` an IR field path — e.g. Gitea `Issue`'s `owner` + `name`
+   (from `repository.owner`/`repository.name`), Vikunja `Task`'s `project` (from `project_id`).
+2. **Given** the operator, **when** they confirm/correct `sourceScopeRef`, **then** each component's
+   `fieldPath` is validated against the resource's response schema (a real field path) and the ref is
+   stamped `confirmedBy`/`confirmedAt`.
 3. **Given** a resource whose records do **not** carry a container field, **when** derived, **then**
-   `sourceScopeRef` is absent (record-derived scope is unavailable for that resource).
+   `sourceScopeRef` is absent (record-derived scope is unavailable for that resource — the parameter
+   needs a `constant` or `scope-link` binding).
 4. **Given** an unconfirmed `sourceScopeRef`, **when** the system operates, **then** it is used nowhere.
+5. **Given** a confirmed `sourceScopeRef`, **when** the Poller reads a source record, **then** it
+   extracts that record's **captured scope** — the `{ key → value }` map over the ref's components
+   (Gitea `{ owner: "alice", name: "phoenix" }`, Vikunja `{ project: 42 }`) — the routing key a
+   `record-derived` **target** binding (SS-8) and, under multi-scope, scoped identity (SS-14) consume.
+   `sourceScopeRef` is **resource-level** (a property of the *source* resource); the per-parameter
+   selector that reads a captured component is the `record-derived` binding's `sourceScopeKey` (SS-8),
+   a **distinct** field.
 
 ### Out of scope
 
@@ -356,20 +368,33 @@ per-scope state.
 
 ### Acceptance criteria
 
-1. **Given** a `scopePathBindings` entry, **when** set to `kind: "record-derived"`, **then** it carries
-   `{ parameterName, sourceScopeRef, transform? }` and is confirmed per parameter like any other binding.
+1. **Given** a `scopePathBindings` entry on a **target** resource, **when** set to
+   `kind: "record-derived"`, **then** it carries `{ parameterName, sourceScopeKey, transform? }` — where
+   `sourceScopeKey` names which captured-scope component fills this parameter (the `key` of a component
+   of the **source** resource's `sourceScopeRef`, resolved through the rule's source↔target resource
+   pair) — and is confirmed per parameter like any other binding. A target with N scope parameters
+   carries N such entries, one per parameter.
 2. **Given** a source **cross-scope collection read** (e.g. Gitea `GET /repos/issues/search`) pinned as
    `pollOperationRef`, **when** the Poller runs, **then** it makes **one** call, captures each record's
-   scope via the source `sourceScopeRef`, and keeps its **existing single per-rule `cursor`/snapshot**
-   unchanged (native id keyed globally; a `since`/`before` param drives delta) — no per-scope state.
-3. **Given** a target scope parameter bound `record-derived` and a **shared value-space**, **when** a
-   write is composed, **then** the parameter is filled from the record's captured source scope (applying
-   `transform` if set); a value-preserving `transform` only, mirroring identity-key discipline.
-4. **Given** the value-spaces are **not** shared (e.g. Gitea repo name vs Vikunja project id), **when**
-   the operator attempts a `record-derived` target binding, **then** it is not a valid choice — the
-   parameter needs a `scope-link` (Layer 3); the UI/gate says so.
-5. **Given** a captured record scope, **when** it is recorded, **then** it is available to the write side
-   and to scoped record identity (SS-14) as the record's source container.
+   scope via the source resource's `sourceScopeRef` (SS-7), and keeps its **existing single per-rule
+   `cursor`/snapshot** unchanged (native id keyed globally; a `since`/`before` param drives delta) —
+   **no per-scope state**.
+3. **Given** a target scope parameter bound `record-derived`, **when** a write is composed, **then** the
+   parameter is filled from the record's **captured scope** by the entry's `sourceScopeKey` (applying
+   `transform` if set); `transform` is **value-preserving only** (mirroring identity-key discipline) and
+   a value-altering one is **rejected at confirm time** — the captured scope must round-trip (it also
+   keys scoped identity), so altering it would break container round-tripping.
+4. **Given** the mediator **cannot infer** value-space equivalence, **when** the operator selects
+   `record-derived` for a target scope parameter, **then** that selection **is** the operator's assertion
+   that the captured component and the target parameter share a value-space (recorded at confirm time);
+   where the operator knows the value-spaces are arbitrary (Gitea repo name vs Vikunja project id)
+   `record-derived` is the wrong choice and a `scope-link` (Layer 3) is required — the UI presents this
+   as guidance and the operator chooses; it is **not** machine-detected.
+5. **Given** a captured scope, **when** its change is durably enqueued, **then** the captured scope
+   travels **with that detected change** through the pipeline as an in-flight attribute of the enqueued
+   per-record change (alongside its native id, action, and content) — **not** new persisted sync state,
+   so the Poller's single per-rule `cursor`/snapshot is unchanged (SS-8.2) — reaching the write side
+   (this story) and scoped record identity (SS-14).
 
 ### Out of scope
 
@@ -388,12 +413,15 @@ Blocked by SS-7, SS-4, Phase-4 SP-2. Precedes SS-9.
 
 ### Acceptance criteria
 
-1. **Given** a `record-derived` binding, **when** the gate runs (extends SS-5), **then** it requires the
-   referenced `sourceScopeRef` confirmed and (for a target binding) a shared value-space; otherwise it is
-   listed as needing a `scope-link` instead.
+1. **Given** a `record-derived` binding, **when** the gate runs (extends SS-5), **then** it requires
+   (a) the **source** resource's `sourceScopeRef` confirmed with the component named by the binding's
+   `sourceScopeKey` present, and (b) for a target binding, the binding itself confirmed (the operator's
+   shared-value-space assertion); a parameter the operator has flagged arbitrary-value-space is listed as
+   needing a `scope-link` instead. The gate checks **structural presence**, never value-space equivalence
+   (which the mediator cannot verify).
 2. **Given** the binding panel, **when** it renders a scope parameter, **then** it offers the **kind
    choice** (`constant` / `record-derived` / `scope-link`) with `record-derived` requiring a
-   `sourceScopeRef` pick from the IR.
+   `sourceScopeKey` pick — one component of the source resource's confirmed `sourceScopeRef`.
 3. **Given** a `viewer`, **when** they view, **then** it is read-only.
 
 ### Out of scope
