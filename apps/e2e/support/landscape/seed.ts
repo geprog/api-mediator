@@ -34,6 +34,7 @@ import type {
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
+  ScopePathBinding,
   SyncRule,
 } from "@mediator/domain";
 import { inArray, or } from "drizzle-orm";
@@ -88,6 +89,12 @@ export const SYNCED_ITEM_TITLE = "Fix login button alignment";
 export interface SyncScaffold {
   readonly giteaAppId: string;
   readonly vikunjaAppId: string;
+  /**
+   * The Gitea `issues` `ResourceBinding` — carries the unconfirmed `owner`/`repo` scope
+   * `constant` bindings the journey confirms via the SS-3 scope-patch API. Shared by both
+   * issues rules (G2V polls it as source; V2G looks up + would-write it as target).
+   */
+  readonly giteaIssuesBindingId: string;
   readonly mappingG2VId: string;
   readonly mappingV2GId: string;
   readonly mappingCommentsId: string;
@@ -111,6 +118,16 @@ function confirmedOp(operationId: string): ConfirmableRef {
 }
 function confirmedField(path: string): ConfirmableRef {
   return confirmed({ kind: "field", path });
+}
+
+/**
+ * An **unconfirmed** `constant` scope path-parameter binding — the derived-but-not-yet-
+ * supplied shape ingestion emits (SS-2 criterion 2): empty value, both confirmation stamps
+ * null. The journey confirms it through the real `PATCH /api/resource-bindings/:id`
+ * scope-patch (SS-3), proving the gate blocks until it is confirmed.
+ */
+function unconfirmedScopeConstant(parameterName: string): ScopePathBinding {
+  return { kind: "constant", parameterName, value: "", confirmedBy: null, confirmedAt: null };
 }
 
 function appOf(id: string, name: string, baseUrl: string): RegisteredApp {
@@ -240,6 +257,7 @@ export async function seedSyncScaffold(tokens: LandscapeTokens): Promise<SyncSca
   const ruleG2VId = randomUUID();
   const ruleV2GId = randomUUID();
   const ruleCommentsId = randomUUID();
+  const giteaIssuesBindingId = randomUUID();
 
   const issuesPairRef = canonicalPairRef(
     { appId: giteaAppId, resourceRef: "issues" },
@@ -252,11 +270,15 @@ export async function seedSyncScaffold(tokens: LandscapeTokens): Promise<SyncSca
 
   const bindings: ResourceBinding[] = [
     {
-      id: randomUUID(),
+      id: giteaIssuesBindingId,
       apiSpecId: giteaIssuesSpecId,
       resourceRef: "issues",
       nativeIdRef: confirmedField("id"),
-      collectionReadRef: confirmedOp("giteaSearchIssues"),
+      collectionReadRef: confirmedOp("giteaListIssues"),
+      // The scoped issue ops carry `{owner}`/`{repo}` scope path params, derived unconfirmed
+      // (SS-2). The journey confirms them (alice/phoenix) via the SS-3 scope-patch API, and
+      // the SS-5 gate blocks enablement until then.
+      scopePathBindings: [unconfirmedScopeConstant("owner"), unconfirmedScopeConstant("repo")],
     },
     {
       id: randomUUID(),
@@ -407,6 +429,7 @@ export async function seedSyncScaffold(tokens: LandscapeTokens): Promise<SyncSca
   return {
     giteaAppId,
     vikunjaAppId,
+    giteaIssuesBindingId,
     mappingG2VId,
     mappingV2GId,
     mappingCommentsId,

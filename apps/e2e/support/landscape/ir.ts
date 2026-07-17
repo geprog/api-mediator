@@ -2,17 +2,15 @@ import type { IrOperation, IrResourceGroup, IrSchema } from "@mediator/domain";
 
 /**
  * A **faithful minimal IR** for the scenario-1 Gitea/Vikunja apps — the "replayed
- * mapping" scaffold's spec side. Rather than ingest the committed OAS (whose real
- * grouping would place Gitea's only param-free issue list — `GET /repos/issues/search`
- * — in a separate `search` resource group, and whose scoped issue list carries the
- * unfilled `{owner}/{repo}` **constant path parameters** the engine cannot yet bind —
- * see the report), this hand-authors exactly the operations the sync round needs, at
- * the apps' **real** paths, so every outbound call the engine composes hits the live
- * container correctly.
+ * mapping" scaffold's spec side, at the apps' **real** paths so every outbound call the
+ * engine composes hits the live container correctly. It mirrors the committed
+ * Gitea/Vikunja `issues`/`tasks` groups (a minimal subset — the sync round's operations).
  *
  * Native-id + collection-read choices (the only ones actually executed):
- *  - Gitea source poll → `giteaSearchIssues` = `GET /repos/issues/search` (param-free, the
- *    ground-truth's alternative collection read), native id `id`.
+ *  - Gitea source poll → `giteaListIssues` = `GET /repos/{owner}/{repo}/issues` — the REAL
+ *    scoped collection read, native id `id`. Its `{owner}`/`{repo}` are **scope** path
+ *    parameters the Layer-1 SS-4 resolver substitutes from the binding's confirmed
+ *    `constant` scope bindings (this capstone exercises exactly that against live Gitea).
  *  - Vikunja source poll / target identity lookup → `vikunjaListTasks` = `GET /tasks`
  *    (param-free), native id `id`.
  *  - Vikunja target update → `vikunjaUpdateTask` = `POST /tasks/{id}` (Vikunja updates with
@@ -94,9 +92,19 @@ export const GITEA_ISSUES_GROUP: IrResourceGroup = {
   resourceRef: "issues",
   name: "issues",
   operations: [
-    // The param-free collection read the source poll + target identity lookup use.
-    op("giteaSearchIssues", "get", "/repos/issues/search", [], ISSUE_SCHEMA),
-    // Never executed (only satisfies the echo rule's gate; its {owner}/{repo} are constants).
+    // The REAL scoped collection read the source poll + target identity lookup use — its
+    // `{owner}`/`{repo}` are SCOPE path parameters the SS-4 resolver substitutes from the
+    // binding's confirmed `constant` scope bindings (Layer 1), no longer the param-free
+    // `/repos/issues/search` workaround.
+    op(
+      "giteaListIssues",
+      "get",
+      "/repos/{owner}/{repo}/issues",
+      [pathParam("owner"), pathParam("repo")],
+      ISSUE_SCHEMA,
+    ),
+    // The scoped by-index update — never executed (only satisfies the echo rule's gate);
+    // `{owner}`/`{repo}` are scope params, `{index}` is the record id.
     op("giteaEditIssue", "patch", "/repos/{owner}/{repo}/issues/{index}", [
       pathParam("owner"),
       pathParam("repo"),
@@ -173,7 +181,7 @@ export const VIKUNJA_COMMENTS_GROUP: IrResourceGroup = {
 // ── Ref strings (the serialized `resourceRef/operationId[#parameter]` form the resolvers
 //    and `OperationMapping.targetIdParamRef` parse). ──────────────────────────────────
 
-export const GITEA_ISSUES_LIST_OP = "issues/giteaSearchIssues";
+export const GITEA_ISSUES_LIST_OP = "issues/giteaListIssues";
 export const GITEA_ISSUES_EDIT_OP = "issues/giteaEditIssue";
 export const GITEA_ISSUES_EDIT_ID_PARAM = "issues/giteaEditIssue#index";
 export const GITEA_COMMENTS_LIST_OP = "comments/giteaListComments";
