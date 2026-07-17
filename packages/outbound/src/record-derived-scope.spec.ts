@@ -95,6 +95,26 @@ describe("resolveRecordDerivedScopeValues (SS-8b)", () => {
     expect(resolve([recordDerived("owner", "owner")], { owner: [1, 2] })).toStrictEqual({});
   });
 
+  it("omits an EMPTY-STRING captured component (never composes a `//` collapsing path segment)", () => {
+    // A source record carrying `repository.owner: ""` must not fill `{owner}` with "" — a
+    // `/repos//phoenix` path collapses to `/repos/phoenix`, silently re-routing containers.
+    // Only the empty component is dropped (the sibling still resolves); the fill then fails
+    // loudly on the missing `owner` param (asserted in binding-resolvers.spec.ts).
+    expect(resolve([recordDerived("owner", "owner")], { owner: "" })).toStrictEqual({});
+    expect(
+      resolve([recordDerived("owner", "owner"), recordDerived("repo", "name")], {
+        owner: "",
+        name: "phoenix",
+      }),
+    ).toStrictEqual({ repo: "phoenix" });
+  });
+
+  it("omits a captured component containing a path separator or a `.`/`..` traversal segment", () => {
+    expect(resolve([recordDerived("owner", "owner")], { owner: "a/b" })).toStrictEqual({});
+    expect(resolve([recordDerived("owner", "owner")], { owner: "." })).toStrictEqual({});
+    expect(resolve([recordDerived("owner", "owner")], { owner: ".." })).toStrictEqual({});
+  });
+
   it("omits a param whose transform is value-ALTERING (never touches a scope that must round-trip)", () => {
     const coerce: ScopeTransform = {
       kind: "coerce",

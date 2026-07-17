@@ -116,20 +116,34 @@ function applyScopeTransform(
 }
 
 /**
- * Stringify a captured scope value for use as a URL path segment. Only a scalar
- * (string / finite number / boolean) is a usable scope value; JSON `null`, an object,
- * or an array is **not** — those return `undefined` so the fill refuses rather than
- * composing a nonsense path.
+ * Stringify a captured scope value into a value usable as **one** URL path segment, or
+ * `undefined` when it is not — so the fill refuses (→ the op unresolves → the write is
+ * parked) rather than composing a wrong-container path from untrusted per-record input.
+ *
+ * The captured scope is external, untrusted, per-record data at the **container-routing**
+ * boundary, so this closes the whole unsafe-segment class in one guard (mirroring and
+ * extending the `constant` branch's `value.length > 0` rule onto the more-dangerous
+ * record-derived branch — a `//` path collapses to fewer segments on many servers, so a
+ * blank component silently re-routes to the wrong container):
+ *  - JSON `null` / object / array — not a scalar scope value;
+ *  - the **empty string** — would compose `/repos//x` (collapses → `/repos/x`, so the
+ *    next segment is misread as this one);
+ *  - a value containing a path separator `/` — would inject extra path segments;
+ *  - `.` or `..` — path traversal (`/repos/../x`).
+ * A finite number / boolean is always a safe single segment.
  */
 function toScopeParamString(value: JsonValue): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
   if (typeof value === "number") {
     return Number.isFinite(value) ? String(value) : undefined;
   }
   if (typeof value === "boolean") {
     return String(value);
   }
-  return undefined;
+  if (typeof value !== "string") {
+    return undefined; // null / object / array
+  }
+  if (value.length === 0 || value.includes("/") || value === "." || value === "..") {
+    return undefined; // not a single, safe path segment
+  }
+  return value;
 }

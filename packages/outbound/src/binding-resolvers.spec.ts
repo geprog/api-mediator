@@ -1400,6 +1400,40 @@ describe("SS-8.3 fail-loud — a missing / unconfirmed / uncaptured record-deriv
     expect(binding).toBeUndefined();
   });
 
+  it("an EMPTY-STRING captured component refuses the write — no `//` path (wrong-container guard)", () => {
+    // owner="" would compose /repos//phoenix/issues, which many servers collapse to
+    // /repos/phoenix/issues — the repo name becomes the owner. Refuse loudly instead.
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+    expect(binding?.pathTemplate ?? "").not.toContain("//");
+  });
+
+  it("a `/`-containing captured component refuses the write (no injected path segments)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "alice/evil", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+  });
+
+  it("a `..` captured component refuses the write (no path traversal)", () => {
+    const binding = resolveWriteOperationBinding(
+      operationMapping({ action: "create", targetOperationRef: "issues/issueCreateIssue" }),
+      giteaIssuesGroup(),
+      giteaIssuesBinding(GITEA_RECORD_DERIVED),
+      { owner: "..", name: "phoenix" },
+    );
+    expect(binding).toBeUndefined();
+    expect(binding?.pathTemplate ?? "").not.toContain("..");
+  });
+
   it("the record-id param is NEVER filled from the captured scope (record-id-vs-scope discipline)", () => {
     // A defensive record-derived entry named for the record-id param + a captured `index`
     // component must NOT fill `{index}` — it stays templated for the RecordLink fill.
