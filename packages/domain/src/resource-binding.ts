@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+import { transformConfigSchema } from "./field-mapping.js";
+import { transformKindSchema } from "./mapping-enums.js";
+
 /**
  * `ResourceBinding` — the per-resource operational bindings of an `ApiSpec`:
  * the concrete IR elements that make an app's declared `capabilities`
@@ -110,15 +113,79 @@ export const scopeConstantBindingSchema = z.object({
 export type ScopeConstantBinding = z.infer<typeof scopeConstantBindingSchema>;
 
 /**
+ * The optional `transform` a `record-derived` scope binding (below) may carry —
+ * modeled by **reusing the `FieldMapping` transform shape**: a
+ * {@link transformKindSchema} `kind` plus the optional {@link transformConfigSchema}
+ * `config`.
+ *
+ * A captured scope is a **routing/identity key that must round-trip** (it also keys
+ * scoped identity matching under multi-scope — SS-14), so a `record-derived`
+ * transform is **value-preserving only**, exactly as an identity `FieldMapping`
+ * (`isIdentityKey = true`) may carry only `transform = rename` (AS-5 /
+ * `docs/architecture/data-model.md` `FieldMapping.isIdentityKey`). See
+ * {@link isValuePreservingScopeTransform}; the constraint is enforced by
+ * {@link scopePathBindingSchema}'s refinement below (domain layer) and again at
+ * confirm time (SS-8 criterion 3).
+ */
+export const scopeTransformSchema = z.object({
+  kind: transformKindSchema,
+  config: transformConfigSchema.optional(),
+});
+export type ScopeTransform = z.infer<typeof scopeTransformSchema>;
+
+/**
+ * The value-preserving rule for a {@link ScopeTransform}, mirroring the identity-key
+ * rule **exactly** — the identity `FieldMapping` constraint is
+ * `transform === "rename"` (AS-5, `field-mapping.ts`), so the single value-preserving
+ * transform **kind** is `rename`. A `coerce` / `aggregate` / `expression` transform
+ * alters the value and is rejected for a captured scope that must round-trip.
+ */
+export function isValuePreservingScopeTransform(transform: ScopeTransform): boolean {
+  return transform.kind === "rename";
+}
+
+/**
+ * The **`record-derived`** scope path-parameter binding (SS-8, Layer 2):
+ * `{ kind: "record-derived", parameterName, sourceScopeKey, transform?, confirmedBy,
+ * confirmedAt }`. The parameter is filled **per record** from the record's *captured
+ * scope* (extracted by the *source* resource's `sourceScopeRef` — SS-7) when the two
+ * sides share (or value-preservingly transform between) the scope value-space.
+ *
+ * - `sourceScopeKey` selects **which** captured component fills this parameter — the
+ *   `key` of a component of the source resource's `sourceScopeRef`, resolved through
+ *   the rule's source↔target resource pair. It is validated here only as a **required,
+ *   non-empty string** (so a confirmed entry always carries one): it is **not** checked
+ *   against the source resource's components here — that is cross-resource and per-rule,
+ *   which the SS-9 enablement gate does, not this per-binding shape.
+ * - `transform` is optional and **value-preserving only** ({@link scopeTransformSchema},
+ *   {@link isValuePreservingScopeTransform}); a value-altering transform is rejected by
+ *   the refinement below.
+ *
+ * Choosing `record-derived` **is the operator's assertion** that the captured component
+ * and the target parameter share a value-space (SS-8 criterion 4); where they are
+ * genuinely arbitrary a `scope-link` (Layer 3) is required instead.
+ */
+export const scopeRecordDerivedBindingSchema = z.object({
+  kind: z.literal("record-derived"),
+  parameterName: z.string(),
+  sourceScopeKey: z.string().min(1),
+  transform: scopeTransformSchema.optional(),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: z.date().nullable(),
+});
+export type ScopeRecordDerivedBinding = z.infer<typeof scopeRecordDerivedBindingSchema>;
+
+/**
  * The `scopePathBindings` entry union. Modeled as a `z.discriminatedUnion` over
- * `kind` so `record-derived` / `scope-link` slot in as additional members
- * without reshaping. The confirmed-pair invariant — `confirmedBy`/`confirmedAt`
- * are **both null while unconfirmed and both set together on confirmation** (SS-1
- * criterion 4, mirroring {@link confirmableRefSchema}) — is enforced here for
- * every kind, since all kinds carry the same confirmation pair.
+ * `kind` so `record-derived` (SS-8) slots in beside `constant` (SS-1) without
+ * reshaping; `scope-link` (Layer 3) will slot in the same way. The confirmed-pair
+ * invariant — `confirmedBy`/`confirmedAt` are **both null while unconfirmed and both
+ * set together on confirmation** (SS-1 criterion 4, mirroring
+ * {@link confirmableRefSchema}) — is enforced here for every kind, since all kinds
+ * carry the same confirmation pair.
  */
 export const scopePathBindingSchema = z
-  .discriminatedUnion("kind", [scopeConstantBindingSchema])
+  .discriminatedUnion("kind", [scopeConstantBindingSchema, scopeRecordDerivedBindingSchema])
   .superRefine((binding, ctx) => {
     const byIsNull = binding.confirmedBy === null;
     const atIsNull = binding.confirmedAt === null;
@@ -131,18 +198,35 @@ export const scopePathBindingSchema = z
       });
       return;
     }
+    const confirmed = !byIsNull && !atIsNull;
     // A confirmed `constant` names an operator-authored literal; it cannot be
     // confirmed empty (data-model.md `ResourceBinding` scopePathBindings). An
-    // unconfirmed entry may be empty (a derived candidate awaiting supply). When
-    // Layers 2/3 add value-less kinds, `binding.value` stops type-checking here
-    // and this must narrow to `binding.kind === "constant"` — enforced by the
-    // compiler, so the invariant cannot silently over-apply.
-    const confirmed = !byIsNull && !atIsNull;
-    if (confirmed && binding.value.length === 0) {
+    // unconfirmed entry may be empty (a derived candidate awaiting supply). The
+    // `binding.kind === "constant"` narrow both selects the constant member (so
+    // `binding.value` type-checks) and keeps the invariant off the value-less
+    // `record-derived` member.
+    if (binding.kind === "constant" && confirmed && binding.value.length === 0) {
       ctx.addIssue({
         code: "custom",
         message: "a confirmed constant scope binding must carry a non-empty value",
         path: ["value"],
+      });
+    }
+    // A `record-derived` transform must be value-preserving (mirrors the identity-key
+    // rule — SS-8 criterion 3). Enforced whether confirmed or not: a captured scope
+    // that must round-trip may never carry a value-altering transform. `sourceScopeKey`
+    // is `min(1)` on the member schema, so a confirmed `record-derived` always carries
+    // a non-empty one (the confirmed⇒required-field invariant) without a refinement.
+    if (
+      binding.kind === "record-derived" &&
+      binding.transform !== undefined &&
+      !isValuePreservingScopeTransform(binding.transform)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "a record-derived scope binding's transform must be value-preserving (transform.kind = rename)",
+        path: ["transform", "kind"],
       });
     }
   });

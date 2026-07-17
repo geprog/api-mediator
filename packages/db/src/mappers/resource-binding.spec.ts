@@ -119,6 +119,50 @@ describe("mapResourceBinding", () => {
     ]);
     expect(binding.scopePathBindings?.[1]?.confirmedAt).toBeInstanceOf(Date);
   });
+
+  it("round-trips a confirmed record-derived scope entry (kind/sourceScopeKey/transform, ISO confirmedAt back to a Date), a constant sibling untouched (SS-8)", () => {
+    const binding = mapResourceBinding(
+      parentRow({
+        scopePathBindings: [
+          {
+            kind: "record-derived",
+            parameterName: "owner",
+            sourceScopeKey: "owner",
+            transform: { kind: "rename" },
+            confirmedBy: "operator@example.test",
+            confirmedAt: confirmedAt.toISOString(),
+          },
+          {
+            kind: "constant",
+            parameterName: "repo",
+            value: "phoenix",
+            confirmedBy: "operator@example.test",
+            confirmedAt: confirmedAt.toISOString(),
+          },
+        ],
+      }),
+      [],
+    );
+
+    expect(binding.scopePathBindings).toStrictEqual([
+      {
+        kind: "record-derived",
+        parameterName: "owner",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      },
+      {
+        kind: "constant",
+        parameterName: "repo",
+        value: "phoenix",
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      },
+    ]);
+    expect(binding.scopePathBindings?.[0]?.confirmedAt).toBeInstanceOf(Date);
+  });
 });
 
 describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
@@ -193,6 +237,35 @@ describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
         confirmedAt: confirmedAt.toISOString(),
       },
     ]);
+  });
+
+  it("serializes a record-derived scope entry into the parent insert (sourceScopeKey/transform carried, no value key), Date confirmedAt as ISO (SS-8)", () => {
+    const insert = toResourceBindingInsert({
+      ...binding,
+      scopePathBindings: [
+        {
+          kind: "record-derived",
+          parameterName: "owner",
+          sourceScopeKey: "owner",
+          transform: { kind: "rename" },
+          confirmedBy: "operator@example.test",
+          confirmedAt,
+        },
+      ],
+    });
+
+    expect(insert.scopePathBindings).toStrictEqual([
+      {
+        kind: "record-derived",
+        parameterName: "owner",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+        confirmedBy: "operator@example.test",
+        confirmedAt: confirmedAt.toISOString(),
+      },
+    ]);
+    const first = insert.scopePathBindings?.[0];
+    expect(first !== undefined && "value" in first).toBe(false);
   });
 
   it("serializes a confirmed sourceScopeRef into the parent insert, Date confirmedAt as ISO (SS-7)", () => {
@@ -293,6 +366,7 @@ describe("applyScopePathBindingPatch", () => {
     const { rows, matched } = applyScopePathBindingPatch(
       [unconfirmed("owner"), unconfirmed("repo")],
       {
+        kind: "constant",
         parameterName: "owner",
         value: "alice",
         confirmedBy: "op@example.test",
@@ -314,9 +388,62 @@ describe("applyScopePathBindingPatch", () => {
     ]);
   });
 
+  it("confirms a record-derived entry: flips kind, sets sourceScopeKey + value-preserving transform, drops the constant value (SS-8)", () => {
+    const { rows, matched } = applyScopePathBindingPatch(
+      [unconfirmed("owner"), unconfirmed("repo")],
+      {
+        kind: "record-derived",
+        parameterName: "owner",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+        confirmedBy: "op@example.test",
+        confirmedAt: scopeConfirmedAt,
+      },
+    );
+
+    expect(matched).toBe(true);
+    // The matched entry becomes the record-derived member — no stale `value` key —
+    // while the sibling constant stays byte-identical to its seed (SS-3.2).
+    expect(rows).toStrictEqual([
+      {
+        kind: "record-derived",
+        parameterName: "owner",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+        confirmedBy: "op@example.test",
+        confirmedAt: scopeConfirmedAt.toISOString(),
+      },
+      { kind: "constant", parameterName: "repo", value: "", confirmedBy: null, confirmedAt: null },
+    ]);
+    // The rewritten entry carries no `value` key (record-derived has no literal).
+    expect(rows[0] !== undefined && "value" in rows[0]).toBe(false);
+  });
+
+  it("confirms a record-derived entry without a transform: the key is simply omitted (SS-8)", () => {
+    const { rows } = applyScopePathBindingPatch([unconfirmed("owner")], {
+      kind: "record-derived",
+      parameterName: "owner",
+      sourceScopeKey: "owner",
+      confirmedBy: "op@example.test",
+      confirmedAt: scopeConfirmedAt,
+    });
+
+    expect(rows).toStrictEqual([
+      {
+        kind: "record-derived",
+        parameterName: "owner",
+        sourceScopeKey: "owner",
+        confirmedBy: "op@example.test",
+        confirmedAt: scopeConfirmedAt.toISOString(),
+      },
+    ]);
+    expect(rows[0] !== undefined && "transform" in rows[0]).toBe(false);
+  });
+
   it("reports matched=false and returns the collection unchanged when the parameter is absent (SS-3.4)", () => {
     const seed = [unconfirmed("owner"), unconfirmed("repo")];
     const { rows, matched } = applyScopePathBindingPatch(seed, {
+      kind: "constant",
       parameterName: "tenant",
       value: "acme",
       confirmedBy: "op@example.test",

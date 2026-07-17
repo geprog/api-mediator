@@ -112,7 +112,8 @@ describe("ResourceBinding schema", () => {
     });
     expect(parsed.scopePathBindings).toHaveLength(2);
     expect(parsed.scopePathBindings?.[0]?.parameterName).toBe("owner");
-    expect(parsed.scopePathBindings?.[1]?.value).toBe("phoenix");
+    const repoEntry = parsed.scopePathBindings?.[1];
+    expect(repoEntry?.kind === "constant" ? repoEntry.value : undefined).toBe("phoenix");
   });
 
   it("accepts an empty scopePathBindings collection (SS-1 crit 1: param-free resource)", () => {
@@ -191,12 +192,84 @@ describe("scopePathBindingSchema — constant kind (SS-1 crit 2-4)", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects an entry with an unknown kind (union is closed until Layers 2/3)", () => {
+  it("rejects an entry with an unknown kind (union is constant | record-derived — no scope-link yet, Layer 3)", () => {
+    const result = scopePathBindingSchema.safeParse({
+      kind: "scope-link",
+      parameterName: "owner",
+      scopeKeyRef: "repo",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("scopePathBindingSchema — record-derived kind (SS-8 crit 1, 3, 4)", () => {
+  const confirmedAt = new Date("2026-07-16T12:00:00.000Z");
+
+  it("accepts a derived, unconfirmed record-derived entry (no transform), round-tripping its fields", () => {
+    const parsed = scopePathBindingSchema.parse({
+      kind: "record-derived",
+      parameterName: "id",
+      sourceScopeKey: "project",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(parsed).toStrictEqual({
+      kind: "record-derived",
+      parameterName: "id",
+      sourceScopeKey: "project",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+  });
+
+  it("accepts a confirmed record-derived entry with a value-preserving (rename) transform", () => {
+    const parsed = scopePathBindingSchema.parse({
+      kind: "record-derived",
+      parameterName: "id",
+      sourceScopeKey: "project",
+      transform: { kind: "rename" },
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(parsed.kind).toBe("record-derived");
+    expect(parsed.confirmedBy).toBe("operator@example.test");
+    expect(parsed.confirmedAt).toStrictEqual(confirmedAt);
+    expect(parsed.kind === "record-derived" ? parsed.transform : undefined).toStrictEqual({
+      kind: "rename",
+    });
+  });
+
+  it("rejects a value-altering transform (coerce) — a captured scope must round-trip (mirrors the identity-key rename-only rule)", () => {
     const result = scopePathBindingSchema.safeParse({
       kind: "record-derived",
-      parameterName: "owner",
-      sourceScopeRef: "repository.owner",
-      confirmedBy: null,
+      parameterName: "id",
+      sourceScopeKey: "project",
+      transform: { kind: "coerce", config: { coerce: { to: "string", from: "number" } } },
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a record-derived entry with an empty sourceScopeKey (confirmed⇒required-field invariant)", () => {
+    const result = scopePathBindingSchema.safeParse({
+      kind: "record-derived",
+      parameterName: "id",
+      sourceScopeKey: "",
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("enforces the confirmed-pair invariant on record-derived: rejects confirmedBy set while confirmedAt null", () => {
+    const result = scopePathBindingSchema.safeParse({
+      kind: "record-derived",
+      parameterName: "id",
+      sourceScopeKey: "project",
+      confirmedBy: "operator@example.test",
       confirmedAt: null,
     });
     expect(result.success).toBe(false);

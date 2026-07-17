@@ -605,3 +605,172 @@ describe("PATCH /api/resource-bindings/:id — sourceScopeRef (SS-7)", () => {
     );
   });
 });
+
+describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  it("confirms a scope entry record-derived: flips kind, sets sourceScopeKey + value-preserving transform, stamps confirmation (SS-8.1/8.3/8.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        parameterName: "owner",
+        kind: "record-derived",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    expect(owner.kind).toBe("record-derived");
+    expect(owner.sourceScopeKey).toBe("owner");
+    expect(owner.transform).toStrictEqual({ kind: "rename" });
+    expect(owner.confirmedBy).toBe("operator");
+    expect(owner.confirmedAt).not.toBeNull();
+    // A record-derived entry carries no constant literal.
+    expect(owner.value).toBe("");
+  });
+
+  it("confirms record-derived without a transform (the key is simply absent)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "record-derived", sourceScopeKey: "owner" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    expect(owner.kind).toBe("record-derived");
+    expect(owner.sourceScopeKey).toBe("owner");
+    expect(owner.transform).toBeUndefined();
+  });
+
+  it("is per-parameter: confirming owner record-derived leaves the repo constant + operational refs untouched (SS-3.2 discipline)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "record-derived", sourceScopeKey: "owner" },
+    });
+
+    const updated = response.json<UpdateResourceBindingResponse>();
+    // The sibling scope entry stays an unconfirmed constant.
+    const repo = scopeEntry(updated, "repo");
+    expect(repo.kind).toBe("constant");
+    expect(repo.value).toBe("");
+    expect(repo.confirmedBy).toBeNull();
+    // No operational ref was touched by a scope confirm.
+    expect(updated.refs.find((ref) => ref.kind === "nativeIdRef")?.confirmedBy).toBeNull();
+    expect(updated.refs.find((ref) => ref.kind === "collectionReadRef")?.confirmedBy).toBeNull();
+  });
+
+  it("GET reports a confirmed record-derived entry's kind/sourceScopeKey/transform/confirmed state (SS-8.1)", async () => {
+    server = buildTestServer();
+    const { specId, bindings } = await registerScopedAndGetBindings(server);
+
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        parameterName: "owner",
+        kind: "record-derived",
+        sourceScopeKey: "owner",
+        transform: { kind: "rename" },
+      },
+    });
+
+    // Re-read via GET to prove the state is reported by the read endpoint, not just
+    // the PATCH response DTO.
+    const reread = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: `/api/specs/${specId}/resource-bindings`,
+    });
+    const issues = issuesBinding(reread.json<ResourceBindingsResponse>().bindings);
+    const owner = scopeEntry(issues, "owner");
+    expect(owner.kind).toBe("record-derived");
+    expect(owner.sourceScopeKey).toBe("owner");
+    expect(owner.transform).toStrictEqual({ kind: "rename" });
+    expect(owner.confirmedBy).toBe("operator");
+    expect(owner.confirmedAt).not.toBeNull();
+  });
+
+  it("rejects confirming record-derived with an empty sourceScopeKey (SS-8.1)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "record-derived", sourceScopeKey: "" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects confirming record-derived with a value-altering transform (SS-8.3 — the value-preserving rule)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        parameterName: "owner",
+        kind: "record-derived",
+        sourceScopeKey: "owner",
+        transform: { kind: "coerce", config: { coerce: { to: "string", from: "number" } } },
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a parameterName not in the resource's derived scope set (SS-8 / SS-3.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "tenant", kind: "record-derived", sourceScopeKey: "owner" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("forbids a viewer from confirming a record-derived binding (OA-2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_VIEWER, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "record-derived", sourceScopeKey: "owner" },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("attributes confirmedBy to the authenticated operator identity (OA-3)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR_ALICE, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "repo", kind: "record-derived", sourceScopeKey: "name" },
+    });
+
+    const repo = scopeEntry(response.json<UpdateResourceBindingResponse>(), "repo");
+    expect(repo.confirmedBy).toBe("alice");
+    expect(repo.sourceScopeKey).toBe("name");
+  });
+});

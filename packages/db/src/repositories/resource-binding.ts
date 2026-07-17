@@ -114,14 +114,16 @@ export class ResourceBindingRepository {
 
   /**
    * Confirm/correct one **scope path-parameter** binding by `parameterName`
-   * (SS-3). `scope_path_bindings` is a `jsonb` collection on the parent row, so
-   * this reads the collection, rewrites **only** the matching entry's literal
-   * `value` + confirmation via {@link applyScopePathBindingPatch}, and writes the
-   * collection back — leaving every sibling scope entry and all operational
-   * `resource_binding_ref` rows untouched (SS-3.2). When no entry matches (the
-   * `parameterName` is not a derived scope entry of the resource) it writes
-   * nothing and returns the binding unchanged; the service rejects that case up
-   * front (SS-3.4), so the read-modify-write only runs for a real entry.
+   * (SS-3 `constant` / SS-8 `record-derived`). `scope_path_bindings` is a `jsonb`
+   * collection on the parent row, so this reads the collection, rewrites **only**
+   * the matching entry — to the shape of the patch's `kind` (constant `value`, or
+   * record-derived `sourceScopeKey` + optional `transform`) + confirmation — via
+   * {@link applyScopePathBindingPatch}, and writes the collection back, leaving every
+   * sibling scope entry and all operational `resource_binding_ref` rows untouched
+   * (SS-3.2). When no entry matches (the `parameterName` is not a derived scope entry
+   * of the resource) it writes nothing and returns the binding unchanged; the service
+   * rejects that case up front (SS-3.4 / SS-8), so the read-modify-write only runs for
+   * a real entry.
    *
    * Returns the updated binding, or `undefined` if no binding with `id` exists.
    */

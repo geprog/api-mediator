@@ -1,4 +1,4 @@
-import { irRefTargetSchema } from "@mediator/domain";
+import { irRefTargetSchema, scopeTransformSchema } from "@mediator/domain";
 import { z } from "zod";
 
 import { isoDateTimeSchema, resourceBindingRefKindSchema } from "./common.js";
@@ -33,21 +33,31 @@ export const resourceBindingRefDtoSchema = z.object({
 export type ResourceBindingRefDto = z.infer<typeof resourceBindingRefDtoSchema>;
 
 /**
- * One resource's **scope path-parameter binding** on the wire (SS-3 criterion 6):
- * a derived scope entry, keyed by `parameterName`, with its fill-source `kind`,
- * its literal `value`, and its confirmed/unconfirmed state.
+ * One resource's **scope path-parameter binding** on the wire (SS-3 criterion 6,
+ * SS-8 criterion 1): a derived scope entry, keyed by `parameterName`, with its
+ * fill-source `kind`, its confirmed/unconfirmed state, and the per-kind datum SS-9's
+ * UI consumes:
  *
- * Unlike a {@link resourceBindingRefDtoSchema} (whose `value` is an IR *pointer*),
- * a `constant` scope binding's `value` is the operator-authored literal — shown as
- * entered (it is operator config, not credential/live payload — SS-3.6). Empty
- * while unconfirmed (`confirmedAt: null`); a confirmed constant carries a
- * non-empty literal (`confirmedBy`/`confirmedAt` set). `kind` is a `z.enum` so the
- * `record-derived`/`scope-link` members (Layers 2/3) extend it without reshaping.
+ * - `constant` — `value` is the operator-authored literal, shown as entered (operator
+ *   config, not credential/live payload — SS-3.6). Empty while unconfirmed
+ *   (`confirmedAt: null`); a confirmed constant carries a non-empty literal.
+ * - `record-derived` — `sourceScopeKey` names which captured-scope component fills the
+ *   parameter and `transform` (present only when set) is its value-preserving transform;
+ *   a record-derived entry carries **no** constant literal, so `value` is `""`.
+ *
+ * A **flat** shape (`value` always a string; `sourceScopeKey`/`transform` present only
+ * on a `record-derived` entry) rather than a discriminated union, so the SS-6 binding
+ * panel keeps rendering `value` unchanged (SS-9 adds the kind-aware rendering). `kind`
+ * is a `z.enum` so the Layer-3 `scope-link` member extends it without reshaping.
  */
 export const resourceBindingScopeDtoSchema = z.object({
   parameterName: z.string(),
-  kind: z.enum(["constant"]),
+  kind: z.enum(["constant", "record-derived"]),
   value: z.string(),
+  /** `record-derived` only: which captured-scope component fills this parameter (SS-8). */
+  sourceScopeKey: z.string().optional(),
+  /** `record-derived` only, and only when set: the value-preserving transform (SS-8). */
+  transform: scopeTransformSchema.optional(),
   confirmedBy: z.string().nullable(),
   confirmedAt: isoDateTimeSchema.nullable(),
 });
@@ -111,25 +121,61 @@ export const updateResourceBindingRefRequestSchema = z
 export type UpdateResourceBindingRefRequest = z.infer<typeof updateResourceBindingRefRequestSchema>;
 
 /**
- * The **scope-binding** patch of the same action (SS-3): supply and confirm one
- * scope path-parameter `constant`, addressed by `parameterName` (scope bindings
- * are keyed by parameter name, not `refKind`). A confirm supplies the literal
- * `value` and stamps `confirmedBy`/`confirmedAt` in one action (SS-3.1). `value`
- * is a **free literal**, not IR-validated (SS-3.4 — only `parameterName` is
- * checked, against the resource's derived scope set, server-side). `value` is
- * optional here so an **empty or absent** value reaches the service as the single
- * SS-3.3 rejection ("a scope binding cannot be confirmed into use without a
- * value") — mirroring where RB-2 puts its confirm/correct validations. `.strict()`
- * on both branches makes the two patch shapes mutually exclusive — a payload
- * carrying both `refKind` and `parameterName` is rejected, so a ref patch and a
- * scope patch cannot combine in one request.
+ * The **scope-binding** patch of the same action: supply and confirm one scope
+ * path-parameter binding, addressed by `parameterName` (scope bindings are keyed by
+ * parameter name, not `refKind`). It is itself a **discriminated confirm** — one
+ * shape per fill source it can confirm an entry *into*:
+ *
+ * - **`constant`** (SS-3) — {@link updateScopeConstantBindingRequestSchema}: supplies
+ *   the literal `value` and stamps confirmation in one action (SS-3.1). Carries **no**
+ *   `kind` key, so the constant wire shape is **unchanged** from Layer 1 (no SS-3
+ *   regression); it is the branch that has no `kind`.
+ * - **`record-derived`** (SS-8) — {@link updateScopeRecordDerivedBindingRequestSchema}:
+ *   carries `kind: "record-derived"` and sets `sourceScopeKey` (+ optional
+ *   value-preserving `transform`) + confirmation in one action (SS-8.1/8.3).
+ *
+ * Both branches are `.strict()`, so they are mutually exclusive (a `constant` payload
+ * cannot carry `kind`/`sourceScopeKey`, and a `record-derived` payload cannot carry
+ * `value`) and neither can combine with a `refKind`/`components` patch. Both are
+ * routed to the scope-binding service by their shared `parameterName` key; the service
+ * then discriminates on `kind`.
  */
-export const updateScopeBindingRequestSchema = z
+export const updateScopeConstantBindingRequestSchema = z
   .object({
     parameterName: z.string().min(1),
     value: z.string().optional(),
   })
   .strict();
+export type UpdateScopeConstantBindingRequest = z.infer<
+  typeof updateScopeConstantBindingRequestSchema
+>;
+
+/**
+ * The `record-derived` scope-binding confirm (SS-8). `sourceScopeKey` is **optional**
+ * on the wire so an **empty or absent** key reaches the service as the single SS-8
+ * rejection ("a record-derived scope binding cannot be confirmed without a
+ * sourceScopeKey") — mirroring how {@link updateScopeConstantBindingRequestSchema}
+ * defers the empty-`value` check to the service. `transform` is validated for the
+ * **value-preserving** rule in the service ({@link scopeTransformSchema} itself accepts
+ * any transform kind, so a value-altering one parses but is rejected 400 there),
+ * mirroring the identity-key rule exactly.
+ */
+export const updateScopeRecordDerivedBindingRequestSchema = z
+  .object({
+    parameterName: z.string().min(1),
+    kind: z.literal("record-derived"),
+    sourceScopeKey: z.string().optional(),
+    transform: scopeTransformSchema.optional(),
+  })
+  .strict();
+export type UpdateScopeRecordDerivedBindingRequest = z.infer<
+  typeof updateScopeRecordDerivedBindingRequestSchema
+>;
+
+export const updateScopeBindingRequestSchema = z.union([
+  updateScopeConstantBindingRequestSchema,
+  updateScopeRecordDerivedBindingRequestSchema,
+]);
 export type UpdateScopeBindingRequest = z.infer<typeof updateScopeBindingRequestSchema>;
 
 /**
@@ -163,13 +209,15 @@ export type UpdateSourceScopeRefRequest = z.infer<typeof updateSourceScopeRefReq
 
 /**
  * `PATCH /api/resource-bindings/:id` request: an operational-ref patch (RB-2), a
- * scope-binding patch (SS-3), **or** a `sourceScopeRef` patch (SS-7), distinguished
- * by which key it carries (`refKind` / `parameterName` / `components`). One PATCH
- * confirms exactly one binding target.
+ * scope-binding patch — `constant` (SS-3) **or** `record-derived` (SS-8) — **or** a
+ * `sourceScopeRef` patch (SS-7), distinguished by which key it carries (`refKind` /
+ * `parameterName` / `components`); the two scope-binding shapes are then told apart by
+ * the presence of `kind`. One PATCH confirms exactly one binding target.
  */
 export const updateResourceBindingRequestSchema = z.union([
   updateResourceBindingRefRequestSchema,
-  updateScopeBindingRequestSchema,
+  updateScopeConstantBindingRequestSchema,
+  updateScopeRecordDerivedBindingRequestSchema,
   updateSourceScopeRefRequestSchema,
 ]);
 export type UpdateResourceBindingRequest = z.infer<typeof updateResourceBindingRequestSchema>;

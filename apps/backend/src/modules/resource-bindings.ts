@@ -3,11 +3,14 @@ import type {
   UpdateResourceBindingRefRequest,
   UpdateResourceBindingRequest,
   UpdateScopeBindingRequest,
+  UpdateScopeConstantBindingRequest,
+  UpdateScopeRecordDerivedBindingRequest,
   UpdateSourceScopeRefRequest,
 } from "@mediator/contracts";
-import type { ResourceBindingRefPatch } from "@mediator/db";
+import type { ResourceBindingRefPatch, ScopePathBindingPatch } from "@mediator/db";
 import {
   assertNever,
+  isValuePreservingScopeTransform,
   type ApiSpec,
   type AppCapabilities,
   type IrField,
@@ -69,12 +72,12 @@ export interface ResourceBindingServiceDeps {
 
 /**
  * Confirm or correct a single `ResourceBinding` binding. The PATCH request is a
- * discriminated union of three per-target patch shapes, each confirmed **in
- * isolation** — confirming one never touches another:
+ * discriminated union of per-target patch shapes, each confirmed **in isolation** —
+ * confirming one never touches another:
  *
  * - an **operational-ref** patch (`refKind`) — one of the six refs (RB-2, crit 3);
- * - a **scope-binding** patch (`parameterName`) — one scope path-parameter
- *   `constant` (SS-3, crit 2);
+ * - a **scope-binding** patch (`parameterName`) — one scope path-parameter, itself
+ *   discriminated on `kind`: a `constant` (SS-3, crit 2) or a `record-derived` (SS-8);
  * - a **`sourceScopeRef`** patch (`components`) — the whole record-scope-capture
  *   ref, confirmed as one (SS-7, crit 2).
  *
@@ -109,9 +112,10 @@ export class ResourceBindingService implements BindingConfirmer {
         throw new NotFoundError(`RegisteredApp ${spec.appId} not found.`);
       }
 
-      // The three patch shapes are mutually exclusive by construction:
-      // `parameterName` addresses a scope binding (SS-3), `components` the whole
-      // `sourceScopeRef` (SS-7), and `refKind` an operational ref (RB-2).
+      // The patch shapes are mutually exclusive by construction: `parameterName`
+      // addresses a scope binding (SS-3 constant / SS-8 record-derived, then told apart
+      // by `kind`), `components` the whole `sourceScopeRef` (SS-7), and `refKind` an
+      // operational ref (RB-2).
       const updated =
         "parameterName" in request
           ? await this.#confirmScopeBinding(stores, binding, request, operatorIdentity)
@@ -179,18 +183,16 @@ export class ResourceBindingService implements BindingConfirmer {
   }
 
   /**
-   * Supply + confirm one scope path-parameter `constant` (SS-3). Sets `value` and
-   * stamps `confirmedBy`/`confirmedAt` in one action (crit 1). Validations:
+   * Supply + confirm one scope path-parameter binding. A **discriminated confirm**:
+   * a `record-derived` request (carrying `kind: "record-derived"`) builds its patch via
+   * {@link #recordDerivedScopePatch} (SS-8); everything else is the `constant` confirm
+   * via {@link #constantScopePatch} (SS-3). Both are **per parameter** — the repository rewrites
+   * only the one matching entry of the `jsonb` collection, leaving every sibling
+   * scope entry, all operational refs, and the `sourceScopeRef` untouched (SS-3.2).
    *
-   * - **crit 3** — an empty/absent `value` is rejected: a scope binding cannot be
-   *   confirmed into use without a value.
-   * - **crit 4** — `parameterName` must be an existing derived scope entry of the
-   *   resource (`ResourceBinding.scopePathBindings`, the IR-derived scope set of
-   *   SS-2); the supplied `value` itself is a **free literal**, never IR-validated
-   *   (contrast an operational ref's IR-pointer value).
-   *
-   * The repository rewrites only that one entry of the `jsonb` collection, so the
-   * confirmation is per parameter (crit 2) and no operational ref is touched.
+   * Both share the SS-3.4/SS-8 rule that `parameterName` must be an existing derived
+   * scope entry of the resource (`ResourceBinding.scopePathBindings`, the IR-derived
+   * scope set of SS-2), checked here before either kind-specific validation.
    */
   async #confirmScopeBinding(
     stores: TxStores,
@@ -198,17 +200,7 @@ export class ResourceBindingService implements BindingConfirmer {
     request: UpdateScopeBindingRequest,
     operatorIdentity: string,
   ): Promise<ResourceBinding> {
-    // SS-3 crit 3: an empty/absent value cannot be confirmed into use.
-    const value = request.value;
-    if (value === undefined || value.length === 0) {
-      throw new BadRequestError(
-        `Scope parameter '${request.parameterName}' cannot be confirmed without a value.`,
-        [{ path: "value", message: "a scope constant requires a non-empty value" }],
-      );
-    }
-
-    // SS-3 crit 4: the parameter must be a derived scope entry of the resource;
-    // the value is a free literal (never IR-validated).
+    // SS-3.4 / SS-8: the parameter must be a derived scope entry of the resource.
     const entry = (binding.scopePathBindings ?? []).find(
       (candidate) => candidate.parameterName === request.parameterName,
     );
@@ -219,16 +211,101 @@ export class ResourceBindingService implements BindingConfirmer {
       );
     }
 
-    const updated = await stores.resourceBindings.updateScopePathBinding(binding.id, {
-      parameterName: request.parameterName,
-      value,
-      confirmedBy: operatorIdentity,
-      confirmedAt: new Date(),
-    });
+    const patch =
+      "kind" in request
+        ? this.#recordDerivedScopePatch(request, operatorIdentity)
+        : this.#constantScopePatch(request, operatorIdentity);
+
+    const updated = await stores.resourceBindings.updateScopePathBinding(binding.id, patch);
     if (updated === undefined) {
       throw new NotFoundError(`ResourceBinding ${binding.id} not found.`);
     }
     return updated;
+  }
+
+  /**
+   * The `constant` scope confirm (SS-3): sets `value` and stamps
+   * `confirmedBy`/`confirmedAt` in one action (crit 1). An empty/absent `value` is
+   * rejected — a scope binding cannot be confirmed into use without a value (crit 3);
+   * the supplied `value` is a **free literal**, never IR-validated (crit 4, contrast an
+   * operational ref's IR-pointer value).
+   */
+  #constantScopePatch(
+    request: UpdateScopeConstantBindingRequest,
+    operatorIdentity: string,
+  ): ScopePathBindingPatch {
+    // SS-3 crit 3: an empty/absent value cannot be confirmed into use.
+    const value = request.value;
+    if (value === undefined || value.length === 0) {
+      throw new BadRequestError(
+        `Scope parameter '${request.parameterName}' cannot be confirmed without a value.`,
+        [{ path: "value", message: "a scope constant requires a non-empty value" }],
+      );
+    }
+    return {
+      kind: "constant",
+      parameterName: request.parameterName,
+      value,
+      confirmedBy: operatorIdentity,
+      confirmedAt: new Date(),
+    };
+  }
+
+  /**
+   * The `record-derived` scope confirm (SS-8): sets the entry's `sourceScopeKey`
+   * (+ optional value-preserving `transform`) and stamps `confirmedBy`/`confirmedAt`
+   * in one action — the entry's `kind` flips from its SS-2-default `constant` to
+   * `record-derived`, dropping the stale literal. Validations:
+   *
+   * - **crit 1** — an empty/absent `sourceScopeKey` is rejected (the confirmed⇒required
+   *   invariant): a `record-derived` binding cannot be confirmed without naming which
+   *   captured-scope component fills the parameter. It is **not** validated against the
+   *   source resource's `sourceScopeRef` here — that is cross-resource + per-rule, which
+   *   the SS-9 gate checks, not this per-binding confirm.
+   * - **crit 3** — a present `transform` must be **value-preserving**
+   *   ({@link isValuePreservingScopeTransform}, mirroring the identity-key rule exactly:
+   *   `transform.kind === "rename"`); a value-altering one is rejected — the captured
+   *   scope is a routing/identity key that must round-trip.
+   *
+   * Selecting `record-derived` **is** the operator's shared-value-space assertion
+   * (crit 4), recorded by stamping the confirmation.
+   */
+  #recordDerivedScopePatch(
+    request: UpdateScopeRecordDerivedBindingRequest,
+    operatorIdentity: string,
+  ): ScopePathBindingPatch {
+    // SS-8 crit 1: a record-derived binding cannot be confirmed without a sourceScopeKey.
+    const sourceScopeKey = request.sourceScopeKey;
+    if (sourceScopeKey === undefined || sourceScopeKey.length === 0) {
+      throw new BadRequestError(
+        `Scope parameter '${request.parameterName}' cannot be confirmed record-derived without a sourceScopeKey.`,
+        [{ path: "sourceScopeKey", message: "a record-derived binding requires a sourceScopeKey" }],
+      );
+    }
+
+    // SS-8 crit 3: a present transform must be value-preserving (rename), exactly as an
+    // identity key (AS-5) — a value-altering transform would break scope round-tripping.
+    const transform = request.transform;
+    if (transform !== undefined && !isValuePreservingScopeTransform(transform)) {
+      throw new BadRequestError(
+        `Scope parameter '${request.parameterName}' cannot use a value-altering transform: a captured scope must round-trip.`,
+        [
+          {
+            path: "transform",
+            message: "a record-derived transform must be value-preserving (rename)",
+          },
+        ],
+      );
+    }
+
+    return {
+      kind: "record-derived",
+      parameterName: request.parameterName,
+      sourceScopeKey,
+      ...(transform !== undefined ? { transform } : {}),
+      confirmedBy: operatorIdentity,
+      confirmedAt: new Date(),
+    };
   }
 
   /**

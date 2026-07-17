@@ -13,6 +13,7 @@ import type {
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
+  ScopePathBinding,
 } from "@mediator/domain";
 import Fastify, { type FastifyInstance } from "fastify";
 
@@ -164,24 +165,37 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
   ): Promise<ResourceBinding | undefined> {
     const existing = this.store.bindings.get(id);
     if (existing === undefined) return Promise.resolve(undefined);
-    // Mirror ResourceBindingRepository.updateScopePathBinding exactly: rewrite
-    // only the entry whose parameterName matches (per-parameter — SS-3.2),
-    // leaving every sibling scope entry AND all operational refs untouched; when
-    // no entry matches, write nothing and return the binding unchanged.
+    // Mirror ResourceBindingRepository.updateScopePathBinding (via
+    // applyScopePathBindingPatch) exactly: rewrite only the entry whose
+    // parameterName matches (per-parameter — SS-3.2) to the shape of the patch's
+    // `kind` (a `constant`'s literal `value`, or a `record-derived`'s
+    // `sourceScopeKey` + optional `transform`) — replacing the member, not spreading
+    // over its prior fields — leaving every sibling scope entry AND all operational
+    // refs untouched; when no entry matches, write nothing and return unchanged.
     const scope = existing.scopePathBindings ?? [];
     if (!scope.some((entry) => entry.parameterName === patch.parameterName)) {
       return Promise.resolve(existing);
     }
-    const nextScope = scope.map((entry) =>
-      entry.parameterName === patch.parameterName
-        ? {
-            ...entry,
-            value: patch.value,
-            confirmedBy: patch.confirmedBy,
-            confirmedAt: patch.confirmedAt,
-          }
-        : entry,
-    );
+    const nextScope = scope.map((entry): ScopePathBinding => {
+      if (entry.parameterName !== patch.parameterName) return entry;
+      if (patch.kind === "constant") {
+        return {
+          kind: "constant",
+          parameterName: patch.parameterName,
+          value: patch.value,
+          confirmedBy: patch.confirmedBy,
+          confirmedAt: patch.confirmedAt,
+        };
+      }
+      return {
+        kind: "record-derived",
+        parameterName: patch.parameterName,
+        sourceScopeKey: patch.sourceScopeKey,
+        ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
+        confirmedBy: patch.confirmedBy,
+        confirmedAt: patch.confirmedAt,
+      };
+    });
     const updated: ResourceBinding = { ...existing, scopePathBindings: nextScope };
     this.store.bindings.set(id, updated);
     return Promise.resolve(updated);
