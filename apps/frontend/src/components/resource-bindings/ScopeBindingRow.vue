@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import type { ResourceBindingScopeDto, UpdateResourceBindingRequest } from "@mediator/contracts";
+import type {
+  ResourceBindingScopeConstantDto,
+  UpdateResourceBindingRequest,
+} from "@mediator/contracts";
 import Button from "primevue/button";
 import Tag from "primevue/tag";
 import { computed, ref } from "vue";
@@ -16,10 +19,14 @@ import { canSupplyScope, scopeBindingState } from "./binding-model.js";
  * shown exactly as entered (never a live payload / credential value, SS-6.5). Emits
  * the intended scope patch; the panel owns the mutation. For a viewer the input and
  * action are absent — read-only (SS-6.4; OA-2 is the server guarantee).
+ *
+ * This row is **constant-only** (its prop is the {@link ResourceBindingScopeConstantDto}
+ * member): the panel filters `record-derived` entries out, whose kind-choice UI is the
+ * separate SS-9 slice.
  */
 const props = defineProps<{
   bindingId: string;
-  scope: ResourceBindingScopeDto;
+  scope: ResourceBindingScopeConstantDto;
   /** Read-only for a viewer (`!isOperator`): the input + confirm action are absent. */
   readonly: boolean;
 }>();

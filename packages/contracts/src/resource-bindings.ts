@@ -34,33 +34,49 @@ export type ResourceBindingRefDto = z.infer<typeof resourceBindingRefDtoSchema>;
 
 /**
  * One resource's **scope path-parameter binding** on the wire (SS-3 criterion 6,
- * SS-8 criterion 1): a derived scope entry, keyed by `parameterName`, with its
- * fill-source `kind`, its confirmed/unconfirmed state, and the per-kind datum SS-9's
- * UI consumes:
+ * SS-8 criterion 1, SS-9): a derived scope entry keyed by `parameterName`, with its
+ * confirmed/unconfirmed state and the per-kind datum the SS-6/SS-9 UI consumes. Modeled
+ * as a **discriminated union on `kind`** so each fill source reports exactly its own
+ * datum (a `record-derived` entry no longer carries a misleading `value: ""` — the SS-8a
+ * should-fix), and so the SS-9 kind-choice UI can render each kind correctly:
  *
- * - `constant` — `value` is the operator-authored literal, shown as entered (operator
+ * - `constant` — carries the operator-authored literal `value`, shown as entered (operator
  *   config, not credential/live payload — SS-3.6). Empty while unconfirmed
- *   (`confirmedAt: null`); a confirmed constant carries a non-empty literal.
- * - `record-derived` — `sourceScopeKey` names which captured-scope component fills the
- *   parameter and `transform` (present only when set) is its value-preserving transform;
- *   a record-derived entry carries **no** constant literal, so `value` is `""`.
+ *   (`confirmedAt: null`); a confirmed constant carries a non-empty literal. The SS-6
+ *   constant panel reads this member's `value`.
+ * - `record-derived` — carries `sourceScopeKey` (which captured-scope component fills the
+ *   parameter — SS-8) and `transform` (present only when set — its value-preserving
+ *   transform); it carries **no** constant literal.
  *
- * A **flat** shape (`value` always a string; `sourceScopeKey`/`transform` present only
- * on a `record-derived` entry) rather than a discriminated union, so the SS-6 binding
- * panel keeps rendering `value` unchanged (SS-9 adds the kind-aware rendering). `kind`
- * is a `z.enum` so the Layer-3 `scope-link` member extends it without reshaping.
+ * The Layer-3 `scope-link` member slots into the same union without reshaping.
  */
-export const resourceBindingScopeDtoSchema = z.object({
+export const resourceBindingScopeConstantDtoSchema = z.object({
   parameterName: z.string(),
-  kind: z.enum(["constant", "record-derived"]),
+  kind: z.literal("constant"),
   value: z.string(),
-  /** `record-derived` only: which captured-scope component fills this parameter (SS-8). */
-  sourceScopeKey: z.string().optional(),
-  /** `record-derived` only, and only when set: the value-preserving transform (SS-8). */
+  confirmedBy: z.string().nullable(),
+  confirmedAt: isoDateTimeSchema.nullable(),
+});
+export type ResourceBindingScopeConstantDto = z.infer<typeof resourceBindingScopeConstantDtoSchema>;
+
+export const resourceBindingScopeRecordDerivedDtoSchema = z.object({
+  parameterName: z.string(),
+  kind: z.literal("record-derived"),
+  /** Which captured-scope component (source `sourceScopeRef` key) fills this parameter (SS-8). */
+  sourceScopeKey: z.string(),
+  /** Present only when set: the value-preserving transform applied to the captured value (SS-8). */
   transform: scopeTransformSchema.optional(),
   confirmedBy: z.string().nullable(),
   confirmedAt: isoDateTimeSchema.nullable(),
 });
+export type ResourceBindingScopeRecordDerivedDto = z.infer<
+  typeof resourceBindingScopeRecordDerivedDtoSchema
+>;
+
+export const resourceBindingScopeDtoSchema = z.discriminatedUnion("kind", [
+  resourceBindingScopeConstantDtoSchema,
+  resourceBindingScopeRecordDerivedDtoSchema,
+]);
 export type ResourceBindingScopeDto = z.infer<typeof resourceBindingScopeDtoSchema>;
 
 /**

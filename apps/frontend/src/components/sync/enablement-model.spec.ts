@@ -92,6 +92,32 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     expect(canEnable({ stillNeeds, choice: "link-only", pushBlocked: false })).toBe(false);
   });
 
+  it("renders a source-scope-ref requirement as a blocker naming the component+resource, linked to the source app (SS-9.1a)", () => {
+    const items = enablementChecklist(
+      [{ kind: "source-scope-ref", side: "source", resourceRef: "issues", sourceScopeKey: "name" }],
+      PAIR,
+    );
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    expect(item?.key).toBe("source-scope-ref:source:name");
+    // Names the selected component and its source resource so the operator knows what to confirm.
+    expect(item?.label).toContain("name");
+    expect(item?.label).toContain("issues");
+    expect(item?.label).toContain("sourceScopeRef");
+    // Deep-links to the source side's app, whose spec reaches the RB-3 binding panel.
+    expect(item?.bindingLink).toBe("/apps/app-gitea");
+  });
+
+  it("keeps a source-scope-ref among the hard blockers so enable stays gated (SS-9.1a)", () => {
+    const stillNeeds: EnablementRequirementDto[] = [
+      { kind: "source-scope-ref", side: "source", resourceRef: "issues", sourceScopeKey: "name" },
+    ];
+    expect(blockingRequirements(stillNeeds).map((requirement) => requirement.kind)).toEqual([
+      "source-scope-ref",
+    ]);
+    expect(canEnable({ stillNeeds, choice: "link-only", pushBlocked: false })).toBe(false);
+  });
+
   it("describes changeTimestampRef is NOT among the binding-ref blocker kinds (SU-5.2 structural)", () => {
     // The gate's binding-ref requirement enum never includes changeTimestampRef, so it can
     // never appear as a checklist blocker — it is a degradation, not a blocker (BE-2.4).

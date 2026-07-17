@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import type { ResourceBindingDto, UpdateResourceBindingRequest } from "@mediator/contracts";
+import type {
+  ResourceBindingDto,
+  ResourceBindingScopeConstantDto,
+  UpdateResourceBindingRequest,
+} from "@mediator/contracts";
 import type { Ir } from "@mediator/domain";
 import Card from "primevue/card";
 import Message from "primevue/message";
@@ -49,6 +53,18 @@ const targetOptionsByBinding = computed<Record<string, RefTargetOptions>>(() => 
 
 function optionsFor(bindingId: string): RefTargetOptions {
   return targetOptionsByBinding.value[bindingId] ?? { field: [], operation: [], parameter: [] };
+}
+
+/**
+ * The `constant` scope entries the SS-6 supply row renders. `record-derived` entries
+ * (SS-8) need the kind-choice UI of the separate SS-9 slice, so they are filtered out
+ * here rather than rendered by the constant-only {@link ScopeBindingRow}. Today every
+ * derived entry defaults to `constant` (SS-2), so this filters nothing in practice.
+ */
+function constantScopeBindings(binding: ResourceBindingDto): ResourceBindingScopeConstantDto[] {
+  return binding.scopeBindings.filter(
+    (scope): scope is ResourceBindingScopeConstantDto => scope.kind === "constant",
+  );
 }
 
 function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindingRequest }): void {
@@ -106,7 +122,7 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
 
           <!-- SS-6.2: scope path-parameter constants — values to supply, not refs to ratify. -->
           <section
-            v-if="binding.scopeBindings.length > 0"
+            v-if="constantScopeBindings(binding).length > 0"
             class="binding-card__scopes"
             :data-testid="`scope-bindings-${binding.resourceRef}`"
           >
@@ -117,7 +133,7 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
               confirmed (SS-5).
             </p>
             <ScopeBindingRow
-              v-for="scope in binding.scopeBindings"
+              v-for="scope in constantScopeBindings(binding)"
               :key="scope.parameterName"
               :binding-id="binding.id"
               :scope="scope"

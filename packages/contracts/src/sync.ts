@@ -77,12 +77,21 @@ export const enablementRequirementDtoSchema = z.discriminatedUnion("kind", [
     ]),
   }),
   z.object({ kind: z.literal("identity-lookup-path") }),
-  // SS-5.4 — an unconfirmed scope path-parameter binding (constant) on the named side.
+  // SS-5.4 / SS-9.1b — an unconfirmed scope path-parameter binding (constant, or a
+  // record-derived binding's target half) on the named side.
   z.object({
     kind: z.literal("scope-binding"),
     parameterName: z.string(),
     side: z.enum(["source", "target"]),
     resourceRef: z.string(),
+  }),
+  // SS-9.1a — the source `sourceScopeRef` a record-derived binding needs is unconfirmed,
+  // absent, or missing the selected `sourceScopeKey` component (source half).
+  z.object({
+    kind: z.literal("source-scope-ref"),
+    side: z.enum(["source", "target"]),
+    resourceRef: z.string(),
+    sourceScopeKey: z.string(),
   }),
 ]);
 export type EnablementRequirementDto = z.infer<typeof enablementRequirementDtoSchema>;

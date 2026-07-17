@@ -78,15 +78,14 @@ export function toResourceBindingDto(
   });
   const scopeBindings = (binding.scopePathBindings ?? []).map((entry): ResourceBindingScopeDto => {
     const confirmedAt = entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null;
-    // `record-derived` (SS-8) reports its `sourceScopeKey` (+ any value-preserving
-    // `transform`) and carries no constant literal (`value: ""`); `constant` (SS-3)
-    // reports its operator-authored literal. The flat DTO keeps `value` a string for
-    // both so the SS-6 panel renders unchanged (SS-9 adds kind-aware rendering).
+    // A kind-tagged discriminated DTO (SS-9): `record-derived` (SS-8) reports its
+    // `sourceScopeKey` (+ any value-preserving `transform`) and carries **no** constant
+    // literal; `constant` (SS-3) reports its operator-authored literal `value`. Built
+    // explicitly per member so a record-derived entry never leaks a misleading `value`.
     if (entry.kind === "record-derived") {
       return {
         parameterName: entry.parameterName,
         kind: "record-derived",
-        value: "",
         sourceScopeKey: entry.sourceScopeKey,
         ...(entry.transform !== undefined ? { transform: entry.transform } : {}),
         confirmedBy: entry.confirmedBy,

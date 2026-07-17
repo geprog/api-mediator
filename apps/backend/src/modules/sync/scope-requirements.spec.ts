@@ -12,6 +12,7 @@ import type {
   RegisteredApp,
   ResourceBinding,
   ScopePathBinding,
+  SourceScopeRef,
   SyncRule,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
@@ -76,6 +77,29 @@ function confirmedConstant(parameterName: string, value: string): ScopePathBindi
 }
 function unconfirmedConstant(parameterName: string): ScopePathBinding {
   return { kind: "constant", parameterName, value: "", confirmedBy: null, confirmedAt: null };
+}
+function confirmedRecordDerived(parameterName: string, sourceScopeKey: string): ScopePathBinding {
+  return {
+    kind: "record-derived",
+    parameterName,
+    sourceScopeKey,
+    confirmedBy: "op",
+    confirmedAt: T0,
+  };
+}
+function unconfirmedRecordDerived(parameterName: string, sourceScopeKey: string): ScopePathBinding {
+  return {
+    kind: "record-derived",
+    parameterName,
+    sourceScopeKey,
+    confirmedBy: null,
+    confirmedAt: null,
+  };
+}
+function confirmedSourceScopeRef(
+  components: readonly { key: string; fieldPath: string }[],
+): SourceScopeRef {
+  return { components: [...components], confirmedBy: "op", confirmedAt: T0 };
 }
 function binding(o: {
   resourceRef: string;
@@ -313,8 +337,8 @@ describe("computeRequiredScopeBindings — Gitea issues → Vikunja tasks", () =
     // Source: the repo-scoped poll + collection read → owner + repo (deduped).
     expect(required).toEqual(
       expect.arrayContaining([
-        { parameterName: "owner", side: "source", resourceRef: "src" },
-        { parameterName: "repo", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "owner", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "repo", side: "source", resourceRef: "src" },
       ]),
     );
     // SS-5.3: `POST /tasks/{id}` is id-only → NO target scope requirement.
@@ -337,9 +361,9 @@ describe("computeRequiredScopeBindings — Gitea issues → Vikunja tasks", () =
     // `PUT /projects/{id}/tasks` create has NO targetIdParamRef → its `{id}` is scope.
     expect(required).toEqual(
       expect.arrayContaining([
-        { parameterName: "owner", side: "source", resourceRef: "src" },
-        { parameterName: "repo", side: "source", resourceRef: "src" },
-        { parameterName: "id", side: "target", resourceRef: "tgt" },
+        { kind: "constant", parameterName: "owner", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "repo", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "id", side: "target", resourceRef: "tgt" },
       ]),
     );
     expect(required).toHaveLength(3);
@@ -421,12 +445,13 @@ describe("computeRequiredScopeBindings — Gitea issues → Vikunja tasks", () =
     expect(ignoring.filter((r) => r.side === "target")).toEqual([]);
     // `propagate` calls it → its `{project}` scope (its `{id}` is the record id) is required.
     expect(propagating).toContainEqual({
+      kind: "constant",
       parameterName: "project",
       side: "target",
       resourceRef: "tgt",
     });
     expect(propagating.filter((r) => r.side === "target")).toEqual([
-      { parameterName: "project", side: "target", resourceRef: "tgt" },
+      { kind: "constant", parameterName: "project", side: "target", resourceRef: "tgt" },
     ]);
   });
 });
@@ -471,8 +496,8 @@ describe("computeRequiredScopeBindings — backfill collection-read conditioning
     // repo-scoped collection read the backfill enumerates.
     expect(required).toEqual(
       expect.arrayContaining([
-        { parameterName: "owner", side: "source", resourceRef: "src" },
-        { parameterName: "repo", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "owner", side: "source", resourceRef: "src" },
+        { kind: "constant", parameterName: "repo", side: "source", resourceRef: "src" },
       ]),
     );
     expect(required).toHaveLength(2);
@@ -551,7 +576,9 @@ describe("computeRequiredScopeBindings — target single-record read", () => {
       widgetArtifacts({ updateOperationId: "updateWidgetPut" }),
       { backfillSkipped: false },
     );
-    expect(required).toEqual([{ parameterName: "tenant", side: "target", resourceRef: "tgt" }]);
+    expect(required).toEqual([
+      { kind: "constant", parameterName: "tenant", side: "target", resourceRef: "tgt" },
+    ]);
   });
 
   it("does NOT require the read's scope for a PATCH update with no drift check", () => {
@@ -570,7 +597,9 @@ describe("computeRequiredScopeBindings — target single-record read", () => {
       }),
       { backfillSkipped: false },
     );
-    expect(required).toEqual([{ parameterName: "tenant", side: "target", resourceRef: "tgt" }]);
+    expect(required).toEqual([
+      { kind: "constant", parameterName: "tenant", side: "target", resourceRef: "tgt" },
+    ]);
   });
 });
 
@@ -757,7 +786,9 @@ describe("computeRequiredScopeBindings — filtered-read target collection read"
     });
     // The scope comes solely from the filtered-read collection read; the id-only update
     // and the flat source contribute none.
-    expect(required).toEqual([{ parameterName: "board", side: "target", resourceRef: "tgt" }]);
+    expect(required).toEqual([
+      { kind: "constant", parameterName: "board", side: "target", resourceRef: "tgt" },
+    ]);
   });
 
   it("no divergence: the lookup read resolves `{…}`-free exactly when the gate raises no scope blocker", () => {
@@ -779,5 +810,137 @@ describe("computeRequiredScopeBindings — filtered-read target collection read"
     expect(decision.stillNeeds).toEqual([
       { kind: "scope-binding", parameterName: "board", side: "target", resourceRef: "tgt" },
     ]);
+  });
+});
+
+// ── SS-9 — record-derived scope-param classification (kind per parameter) ───────
+
+describe("computeRequiredScopeBindings — record-derived (SS-9)", () => {
+  function scopedArtifacts(o: {
+    operationMappings: readonly OperationMapping[];
+    sourceScope?: readonly ScopePathBinding[];
+    sourceScopeRef?: SourceScopeRef;
+    targetScope: readonly ScopePathBinding[];
+  }): RuleArtifacts {
+    return makeArtifacts({
+      rule: makeRule({ pollOperationRef: "src/listRepoIssues" }),
+      operationMappings: o.operationMappings,
+      sourceGroup: giteaIssues,
+      targetGroup: vikunjaTasks,
+      sourceBinding: stripUndefined({
+        ...sourceIssuesBinding(o.sourceScope ?? []),
+        sourceScopeRef: o.sourceScopeRef,
+      }),
+      targetBinding: targetTasksBinding(o.targetScope),
+    });
+  }
+
+  function enablementInputFor(artifacts: RuleArtifacts): EnablementInput {
+    return {
+      rule: artifacts.rule,
+      fieldMappings: artifacts.fieldMappings,
+      operationMappings: artifacts.operationMappings,
+      sourceBinding: artifacts.sourceBinding,
+      targetBinding: artifacts.targetBinding,
+      sourceCapabilities: artifacts.sourceApp.capabilities,
+      targetCapabilities: artifacts.targetApp.capabilities,
+      backfillSkipped: false,
+      requiredScopeBindings: computeRequiredScopeBindings(artifacts, { backfillSkipped: false }),
+    };
+  }
+
+  it("a mixed rule: constant source owner/repo + a record-derived target {id} emits BOTH kinds (SS-9)", () => {
+    // The Gitea→Vikunja create's project `{id}` is bound record-derived, selecting the
+    // source `sourceScopeRef` component `name`. The source owner/repo stay constant.
+    const required = computeRequiredScopeBindings(
+      scopedArtifacts({
+        operationMappings: [createTaskMapping, updateTaskMapping],
+        targetScope: [confirmedRecordDerived("id", "name")],
+      }),
+      { backfillSkipped: false },
+    );
+    expect(required).toContainEqual({
+      kind: "record-derived",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tgt",
+      sourceResourceRef: "src",
+      sourceScopeKey: "name",
+    });
+    expect(required).toContainEqual({
+      kind: "constant",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "src",
+    });
+    expect(required).toContainEqual({
+      kind: "constant",
+      parameterName: "repo",
+      side: "source",
+      resourceRef: "src",
+    });
+    expect(required).toHaveLength(3);
+  });
+
+  it("the record-derived requirement carries the entry's sourceScopeKey verbatim (even unconfirmed)", () => {
+    const required = computeRequiredScopeBindings(
+      scopedArtifacts({
+        operationMappings: [createTaskMapping, updateTaskMapping],
+        // An UNCONFIRMED record-derived entry still classifies as record-derived (the gate
+        // then blocks on its unconfirmed state); the selector is carried through.
+        targetScope: [unconfirmedRecordDerived("id", "owner")],
+      }),
+      { backfillSkipped: false },
+    );
+    expect(required).toContainEqual({
+      kind: "record-derived",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tgt",
+      sourceResourceRef: "src",
+      sourceScopeKey: "owner",
+    });
+  });
+
+  it("SS-5.3 still holds: an id-only update op surfaces no target requirement, even with a record-derived entry present", () => {
+    // Update-only rule calls only `POST /tasks/{id}` (id-only). The `{id}` there is the
+    // record id, not a scope, so the record-derived `id` entry is never surfaced.
+    const required = computeRequiredScopeBindings(
+      scopedArtifacts({
+        operationMappings: [updateTaskMapping],
+        targetScope: [confirmedRecordDerived("id", "name")],
+      }),
+      { backfillSkipped: false },
+    );
+    expect(required.filter((r) => r.side === "target")).toEqual([]);
+  });
+
+  it("gate flow: record-derived requirement + confirmed source component + confirmed target binding → enable (SS-9.1)", () => {
+    const artifacts = scopedArtifacts({
+      operationMappings: [createTaskMapping, updateTaskMapping],
+      sourceScope: [confirmedConstant("owner", "alice"), confirmedConstant("repo", "phoenix")],
+      sourceScopeRef: confirmedSourceScopeRef([{ key: "name", fieldPath: "repository.name" }]),
+      targetScope: [confirmedRecordDerived("id", "name")],
+    });
+    expect(evaluateEnablement(enablementInputFor(artifacts)).kind).toBe("enable");
+  });
+
+  it("gate flow: source sourceScopeRef missing the selected component → blocked with source-scope-ref (SS-9.1a)", () => {
+    const artifacts = scopedArtifacts({
+      operationMappings: [createTaskMapping, updateTaskMapping],
+      sourceScope: [confirmedConstant("owner", "alice"), confirmedConstant("repo", "phoenix")],
+      // Confirmed, but carries `owner` — not the `name` the record-derived `{id}` selects.
+      sourceScopeRef: confirmedSourceScopeRef([{ key: "owner", fieldPath: "repository.owner" }]),
+      targetScope: [confirmedRecordDerived("id", "name")],
+    });
+    const decision = evaluateEnablement(enablementInputFor(artifacts));
+    expect(decision.kind).toBe("blocked");
+    if (decision.kind !== "blocked") throw new Error("expected blocked");
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "source-scope-ref",
+      side: "source",
+      resourceRef: "src",
+      sourceScopeKey: "name",
+    });
   });
 });

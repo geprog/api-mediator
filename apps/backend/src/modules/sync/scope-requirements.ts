@@ -1,4 +1,10 @@
-import type { ConfirmableRef, IrOperation, IrResourceGroup } from "@mediator/domain";
+import type {
+  ConfirmableRef,
+  IrOperation,
+  IrResourceGroup,
+  ResourceBinding,
+  ScopeRecordDerivedBinding,
+} from "@mediator/domain";
 import {
   findMappedTargetOperation,
   resolveSingleRecordReadBinding,
@@ -6,19 +12,33 @@ import {
   scopeParamNamesOf,
   writeRecordIdPathParam,
 } from "@mediator/outbound";
-import type { ScopeBindingRequirement } from "@mediator/sync-engine";
+import type { EnablementSide, ScopeBindingRequirement } from "@mediator/sync-engine";
 
 import { buildTargetLookup } from "./context-builders.js";
 import { confirmedValue, findIdentityField, type RuleArtifacts } from "./resolution.js";
 
 /**
- * **SS-5 scope-requirement classification** (`docs/requirements/scoped-resource-sync.md`
- * SS-5.1/5.2; `docs/architecture/data-model.md` `ResourceBinding.scopePathBindings`) —
- * the IR-dependent half of the enablement gate, kept **out** of the pure gate so that
- * stays pure over already-loaded domain objects. It works out, for a rule's loaded
- * {@link RuleArtifacts}, which scope path parameters the operations the rule **actually
- * calls** require — the precomputed {@link ScopeBindingRequirement} list the gate then
- * checks against each side's confirmed `constant` bindings.
+ * **SS-5 / SS-9 scope-requirement classification** (`docs/requirements/
+ * scoped-resource-sync.md` SS-5.1/5.2, SS-9.1; `docs/architecture/data-model.md`
+ * `ResourceBinding.scopePathBindings` + `sourceScopeRef`) — the IR-dependent half of the
+ * enablement gate, kept **out** of the pure gate so that stays pure over already-loaded
+ * domain objects. It works out, for a rule's loaded {@link RuleArtifacts}, which scope
+ * path parameters the operations the rule **actually calls** require — the precomputed
+ * {@link ScopeBindingRequirement} list the gate then checks against each side's bindings.
+ *
+ * ## `constant` vs `record-derived` per parameter (SS-9)
+ *
+ * The record-id-vs-scope classification is unchanged; what a required scope parameter
+ * *needs* depends on its confirmed fill-source **kind** on the attributed side's
+ * `ResourceBinding.scopePathBindings`. A parameter with a `record-derived` entry (SS-8)
+ * emits a `record-derived` {@link ScopeBindingRequirement} carrying the entry's
+ * `sourceScopeKey` and the **source** resource's ref — so the gate checks the source
+ * `sourceScopeRef` component + the target binding are both confirmed (SS-9.1), attributed
+ * to the right sides (source `sourceScopeRef` on the source binding; the `record-derived`
+ * scope binding on the target binding). A parameter that is (still) `constant`-kind —
+ * including a derived-unconfirmed default — keeps its existing SS-5 `constant` requirement.
+ * A `record-derived` binding only matters for the operations that actually carry that
+ * scope param, exactly as `constant` does.
  *
  * ## The operations a rule actually calls (SS-5.1/5.2) and their record-id parameter
  *
@@ -62,7 +82,7 @@ export function computeRequiredScopeBindings(
   artifacts: RuleArtifacts,
   options: { readonly backfillSkipped: boolean },
 ): readonly ScopeBindingRequirement[] {
-  const collector = new ScopeRequirementCollector();
+  const collector = new ScopeRequirementCollector(artifacts);
   const sourceRef = artifacts.sourceResourceRef;
   const targetRef = artifacts.targetResourceRef;
 
@@ -189,20 +209,63 @@ function singleRecordReadIdParam(operation: IrOperation, idParamRef: string): st
   return parameter?.location === "path" ? idParamRef : undefined;
 }
 
-/** Deduplicates scope requirements by `(side, resourceRef, parameterName)`, preserving order. */
+/** The confirmed-or-not `record-derived` entry for `parameterName` on a binding, or `undefined`. */
+function findRecordDerivedScopeEntry(
+  binding: ResourceBinding,
+  parameterName: string,
+): ScopeRecordDerivedBinding | undefined {
+  return (binding.scopePathBindings ?? []).find(
+    (entry): entry is ScopeRecordDerivedBinding =>
+      entry.kind === "record-derived" && entry.parameterName === parameterName,
+  );
+}
+
+/**
+ * Deduplicates scope requirements by `(side, resourceRef, parameterName)`, preserving
+ * order. For each collected parameter it resolves the requirement **kind** from the
+ * attributed side's `ResourceBinding.scopePathBindings` (SS-9): a `record-derived` entry
+ * yields a `record-derived` requirement carrying the entry's `sourceScopeKey` + the polled
+ * source resource's ref (so the gate can check the source `sourceScopeRef`); anything else
+ * — including a derived-unconfirmed default `constant` — yields the SS-5 `constant`
+ * requirement unchanged.
+ */
 class ScopeRequirementCollector {
   readonly #byKey = new Map<string, ScopeBindingRequirement>();
+  readonly #sourceBinding: ResourceBinding;
+  readonly #targetBinding: ResourceBinding;
+  readonly #sourceResourceRef: string;
+
+  public constructor(artifacts: RuleArtifacts) {
+    this.#sourceBinding = artifacts.sourceBinding;
+    this.#targetBinding = artifacts.targetBinding;
+    this.#sourceResourceRef = artifacts.sourceResourceRef;
+  }
 
   public addAll(
-    side: ScopeBindingRequirement["side"],
+    side: EnablementSide,
     resourceRef: string,
     parameterNames: readonly string[],
   ): void {
+    const binding = side === "source" ? this.#sourceBinding : this.#targetBinding;
     for (const parameterName of parameterNames) {
       const key = JSON.stringify([side, resourceRef, parameterName]);
-      if (!this.#byKey.has(key)) {
-        this.#byKey.set(key, { parameterName, side, resourceRef });
+      if (this.#byKey.has(key)) {
+        continue;
       }
+      const recordDerived = findRecordDerivedScopeEntry(binding, parameterName);
+      this.#byKey.set(
+        key,
+        recordDerived !== undefined
+          ? {
+              kind: "record-derived",
+              parameterName,
+              side,
+              resourceRef,
+              sourceResourceRef: this.#sourceResourceRef,
+              sourceScopeKey: recordDerived.sourceScopeKey,
+            }
+          : { kind: "constant", parameterName, side, resourceRef },
+      );
     }
   }
 
