@@ -1,4 +1,4 @@
-import type { ApprovedMappingStatus, SyncRule } from "@mediator/domain";
+import type { ApprovedMappingStatus, SourceScopeRef, SyncRule } from "@mediator/domain";
 import type { JsonRecord } from "@mediator/transform";
 
 import type { ChangeKind, DetectedChange } from "../identity-resolution/types.js";
@@ -107,6 +107,15 @@ export interface PollPlan {
   readonly identitySourcePath: string;
   /** The stored delta cursor (delta mode only); `undefined` seeds from the beginning. */
   readonly cursor: string | undefined;
+  /**
+   * The **source** resource's confirmed `sourceScopeRef` (SS-7), when it has one — the
+   * keyed component set the Poller extracts each polled record's **captured scope** from
+   * (SS-8.2). `undefined` for a non-scoped / constant-only rule (no confirmed
+   * `sourceScopeRef`), in which case the Poller captures nothing (constant rules
+   * unaffected). Riding it on the plan needs **no** new persisted poll state — the
+   * per-rule `cursor`/snapshot is unchanged; capture is purely per-record and in-flight.
+   */
+  readonly sourceScopeRef?: SourceScopeRef | undefined;
 }
 
 /**
@@ -217,6 +226,12 @@ export function buildChangePayload(change: DetectedChange): Record<string, unkno
   // Omit (not `undefined`) on a delete — the record is gone; keep the jsonb clean.
   if (change.observedRecord !== undefined) {
     payload.observedRecord = change.observedRecord;
+  }
+  // SS-8.5 — the captured scope rides WITH the change through the ordering-queue payload
+  // (an in-flight attribute, not persisted sync state). Omitted for a non-scoped /
+  // constant-only rule, keeping the payload backward-compatible.
+  if (change.capturedScope !== undefined) {
+    payload.capturedScope = change.capturedScope;
   }
   return payload;
 }

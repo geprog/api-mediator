@@ -88,10 +88,14 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
       );
     }
 
+    // SS-8.3 — thread the change's captured scope so each `record-derived` target scope
+    // param is filled from it (by the binding's `sourceScopeKey`) alongside the constants;
+    // absent on a non-scoped rule and on a delete → constant-only fill (unchanged).
     const operations = resolveTargetOperations(
       artifacts.operationMappings,
       artifacts.targetGroup,
       artifacts.targetBinding,
+      change.capturedScope,
     );
     const targetReadBinding = resolveSingleRecordReadBinding(
       artifacts.targetGroup,

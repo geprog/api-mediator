@@ -27,35 +27,48 @@ import type { IrOperation, ScopePathBinding } from "@mediator/domain";
  */
 
 /**
- * Substitute the resource's confirmed `constant` scope bindings into a path template's
- * **scope** (non-record-id) path parameters, leaving the record-id parameter — named by
+ * Substitute the resource's confirmed scope bindings into a path template's **scope**
+ * (non-record-id) path parameters, leaving the record-id parameter — named by
  * `recordIdPathParamName` when the operation has one **in its path** — templated for the
  * downstream per-record id-fill from the `RecordLink`.
  *
- * Returns the filled path, or `undefined` when a scope path parameter has **no confirmed**
- * `constant` binding — never a fabricated value (SS-4.4; the module invariant *never
- * fabricate a binding from an unconfirmed ref*, defense-in-depth behind the SS-5 gate). A
- * path with no scope parameters (only the record id, or none) passes through unchanged.
+ * Each scope parameter is filled from **either** the resource's confirmed `constant`
+ * binding (SS-4) **or**, when the caller supplies a pre-resolved
+ * `recordDerivedValues[name]` (SS-8b — a value derived from the change's *captured
+ * scope* by a `record-derived` binding's `sourceScopeKey`, transform already applied),
+ * that value — one uniform fill over both kinds. A parameter's binding is `constant` XOR
+ * `record-derived` (one entry per parameter name), so the two sources never collide.
+ *
+ * Returns the filled path, or `undefined` when a scope path parameter has **neither** a
+ * confirmed `constant` binding **nor** a pre-resolved record-derived value — never a
+ * fabricated value (SS-4.4 / SS-8.3; the module invariant *never fabricate a binding from
+ * an unconfirmed ref or a missing captured component*, defense-in-depth behind the gate).
+ * A path with no scope parameters (only the record id, or none) passes through unchanged.
  *
  * The record-id parameter is matched **by name and only against the caller-supplied
  * `recordIdPathParamName`** — a scope parameter is never treated as the record id even
  * when it shares a bare name across a *different* operation (the caller keys the fill to
- * the operation's role, so `recordIdPathParamName` is that operation's own id parameter).
+ * the operation's role, so `recordIdPathParamName` is that operation's own id parameter);
+ * a record-derived value is likewise **never** substituted into the record-id parameter.
  */
 export function fillScopePathParameters(
   pathTemplate: string,
   scopePathBindings: readonly ScopePathBinding[],
   recordIdPathParamName: string | undefined,
+  recordDerivedValues?: ReadonlyMap<string, string>,
 ): string | undefined {
   let path = pathTemplate;
   for (const name of new Set(pathParameterNames(pathTemplate))) {
     if (name === recordIdPathParamName) {
-      // The record-id parameter — filled later from the `RecordLink`, never from a scope.
+      // The record-id parameter — filled later from the `RecordLink`, never from a scope
+      // (constant or record-derived): the record-id-vs-scope split holds (SS-4.2/SS-8.3).
       continue;
     }
-    const value = confirmedConstantValue(scopePathBindings, name);
+    // Prefer a confirmed `constant` literal; else a pre-resolved `record-derived` value.
+    const value = confirmedConstantValue(scopePathBindings, name) ?? recordDerivedValues?.get(name);
     if (value === undefined) {
-      // SS-4.4 — an unconfirmed / absent scope constant never fabricates a URL.
+      // SS-4.4 / SS-8.3 — an unconfirmed / absent scope binding, or a `record-derived`
+      // param whose captured component is missing, never fabricates a URL.
       return undefined;
     }
     path = path.split(`{${name}}`).join(encodeURIComponent(value));

@@ -105,6 +105,11 @@ export {
   scopeParamNamesOf,
 } from "./path-template.js";
 
+// The `record-derived` scope pre-resolution (SS-8b): turn a target's confirmed
+// `record-derived` scope bindings + a change's captured scope into the
+// `{ parameterName → value }` map the shared scope-fill substitutes alongside constants.
+export { resolveRecordDerivedScopeValues } from "./record-derived-scope.js";
+
 // The REST single-record target reader — Conflict Detection's SingleRecordTargetReader
 // seam (CF-5/CF-6), obeying OC-3 load discipline and returning the target's stored
 // representation verbatim so hashFieldValue matches the persisted baseline.

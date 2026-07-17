@@ -363,11 +363,17 @@ export class ConflictDetectionStage {
           "Conflict Detection needs a targetReadBinding to read the target record (read-before-write / PUT read-carry)",
         );
       }
-      cached = await this.#targetReader.readRecord({
-        targetAppId: change.targetAppId,
-        nativeId: targetNativeId(link, sourceSide),
-        binding,
-      });
+      cached = await this.#targetReader.readRecord(
+        stripUndefined({
+          targetAppId: change.targetAppId,
+          nativeId: targetNativeId(link, sourceSide),
+          binding,
+          // SS-8b — carry the captured scope so a scoped target read-carry / read-before-
+          // write fills its `record-derived` scope param from the value the source record
+          // carried (the shared value-space). Absent on an unscoped read.
+          capturedScope: change.capturedScope,
+        }),
+      );
       return cached;
     };
   }

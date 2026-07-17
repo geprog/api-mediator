@@ -4,7 +4,7 @@ import type {
   RecordLink,
   TargetDriftCheck,
 } from "@mediator/domain";
-import type { JsonRecord, PathRead } from "@mediator/transform";
+import type { CapturedScope, JsonRecord, PathRead } from "@mediator/transform";
 
 import type { DetectedChange } from "../identity-resolution/types.js";
 
@@ -115,6 +115,13 @@ export interface SingleRecordReadRequest {
   /** The target's native id (from the `RecordLink`'s target side). */
   readonly nativeId: string;
   readonly binding: SingleRecordReadBinding;
+  /**
+   * The change's **captured scope** (SS-8b) — fills a `record-derived` scope path
+   * parameter of a *scoped* target single-record read (e.g. a repo-scoped by-id read)
+   * from the value the source record carried, exactly as the write side fills it. Absent
+   * for an unscoped / constant-only read; the resolver then fills constants only.
+   */
+  readonly capturedScope?: CapturedScope | undefined;
 }
 
 /**
