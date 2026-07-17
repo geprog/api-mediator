@@ -236,6 +236,7 @@ export type {
   BindingRefRequirement,
   BindingRefUse,
   BlockedDecision,
+  ConstantScopeBindingRequirement,
   EnableDecision,
   EnablementDecision,
   EnablementDegradation,
@@ -248,7 +249,9 @@ export type {
   MatchFirstUnavailableDegradation,
   PollOperationRequirement,
   PropagatableOperationRequirement,
+  RecordDerivedScopeBindingRequirement,
   ScopeBindingRequirement,
   ScopeBindingUnconfirmedRequirement,
+  SourceScopeRefUnconfirmedRequirement,
   TargetOperationRequirement,
 } from "./enablement/types.js";

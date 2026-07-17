@@ -72,9 +72,9 @@ function hasUsableRoutedOp(ops: readonly OperationMapping[], action: "update" | 
  *
  * The `entry.kind === "constant"` narrow both selects the `constant` member (so
  * `entry.value` type-checks, mirroring the resolver's `confirmedConstantValue`) and
- * keeps this gate **constant-only**: a `record-derived` (SS-8) / `scope-link` entry does
- * not satisfy the SS-5 constant requirement — recognizing a `record-derived` binding as
- * a satisfied scope requirement is SS-9's gate delta, not this one.
+ * keeps this check **constant-only**: a `record-derived` (SS-8) / `scope-link` entry does
+ * not satisfy a `constant` requirement — a `record-derived` requirement is satisfied by
+ * {@link isScopeRecordDerivedConfirmed} + {@link isSourceScopeComponentConfirmed} instead.
  */
 function isScopeConstantConfirmed(binding: ResourceBinding, parameterName: string): boolean {
   return (binding.scopePathBindings ?? []).some(
@@ -84,6 +84,46 @@ function isScopeConstantConfirmed(binding: ResourceBinding, parameterName: strin
       entry.confirmedBy !== null &&
       entry.confirmedAt !== null &&
       entry.value.length > 0,
+  );
+}
+
+/**
+ * SS-9 — a resource's scope path parameter has a **confirmed `record-derived`** binding:
+ * an entry keyed by `parameterName` of that kind with both confirmation stamps set. The
+ * confirmation is the operator's shared-value-space assertion (SS-9.1b); the entry's
+ * `sourceScopeKey` is separately checked against the source `sourceScopeRef` by
+ * {@link isSourceScopeComponentConfirmed}. No value check (a `record-derived` entry carries
+ * no literal) and no value-space check (structural presence only — the mediator cannot
+ * verify equivalence; SS-8b's resolver fills the parameter from the record's captured scope).
+ */
+function isScopeRecordDerivedConfirmed(binding: ResourceBinding, parameterName: string): boolean {
+  return (binding.scopePathBindings ?? []).some(
+    (entry) =>
+      entry.kind === "record-derived" &&
+      entry.parameterName === parameterName &&
+      entry.confirmedBy !== null &&
+      entry.confirmedAt !== null,
+  );
+}
+
+/**
+ * SS-9.1a — the **source** resource's `sourceScopeRef` is confirmed and carries the
+ * scope component keyed `sourceScopeKey` that a `record-derived` binding selects. This is
+ * the source half of the record-derived structural-presence check: it always reads the
+ * polled **source** binding (`sourceScopeRef` is a source-side property — SS-7), and
+ * checks **presence** of the component only, never that its captured value matches the
+ * target's value-space (the operator asserted that by choosing `record-derived`).
+ */
+function isSourceScopeComponentConfirmed(
+  binding: ResourceBinding,
+  sourceScopeKey: string,
+): boolean {
+  const ref = binding.sourceScopeRef;
+  return (
+    ref !== undefined &&
+    ref.confirmedBy !== null &&
+    ref.confirmedAt !== null &&
+    ref.components.some((component) => component.key === sourceScopeKey)
   );
 }
 
@@ -265,23 +305,48 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
     degradations.push({ kind: "lww-observation-order", side: "target" });
   }
 
-  // ── SS-5: required scope path-parameter bindings (constant) ──────────────────
+  // ── SS-5 / SS-9: required scope path-parameter bindings ──────────────────────
   // A scoped rule can only enable once every scope path parameter of the operations it
-  // actually calls has a confirmed `constant` binding — checked on the NAMED side's
-  // `ResourceBinding` (SS-5.5: source-op params on the source binding, target-op params
-  // on the target). The required set is precomputed by the SA classifier from the IR (it
-  // matches what the SS-4 resolver fills); each unconfirmed one blocks and joins the
-  // BE-1/BE-2 requirements in `stillNeeds` (SS-5.4). An empty list is a no-op for a
-  // non-scoped rule (backward-compatible).
+  // actually calls is satisfied — checked on the NAMED side's `ResourceBinding` (SS-5.5:
+  // source-op params on the source binding, target-op params on the target). The required
+  // set (with each param's `constant`-vs-`record-derived` kind) is precomputed by the SA
+  // classifier from the IR + bindings; it matches what the SS-4/SS-8b resolver fills. Each
+  // unmet precondition blocks and joins the BE-1/BE-2 requirements in `stillNeeds`. An
+  // empty list is a no-op for a non-scoped rule (backward-compatible).
   for (const requirement of input.requiredScopeBindings) {
     const binding = requirement.side === "source" ? sourceBinding : targetBinding;
-    if (!isScopeConstantConfirmed(binding, requirement.parameterName)) {
-      stillNeeds.push({
-        kind: "scope-binding",
-        parameterName: requirement.parameterName,
-        side: requirement.side,
-        resourceRef: requirement.resourceRef,
-      });
+    if (requirement.kind === "constant") {
+      // SS-5 — a confirmed `constant` on the named side.
+      if (!isScopeConstantConfirmed(binding, requirement.parameterName)) {
+        stillNeeds.push({
+          kind: "scope-binding",
+          parameterName: requirement.parameterName,
+          side: requirement.side,
+          resourceRef: requirement.resourceRef,
+        });
+      }
+    } else {
+      // SS-9 — structural presence of BOTH halves (never value-space equivalence):
+      //  (b) the `record-derived` binding entry confirmed on the named (target) side, and
+      //  (a) the polled SOURCE resource's `sourceScopeRef` confirmed carrying the selected
+      //      component. The `sourceScopeRef` is always a source-side property (SS-7), so it
+      //      is read off `sourceBinding` regardless of the binding-entry side.
+      if (!isScopeRecordDerivedConfirmed(binding, requirement.parameterName)) {
+        stillNeeds.push({
+          kind: "scope-binding",
+          parameterName: requirement.parameterName,
+          side: requirement.side,
+          resourceRef: requirement.resourceRef,
+        });
+      }
+      if (!isSourceScopeComponentConfirmed(sourceBinding, requirement.sourceScopeKey)) {
+        stillNeeds.push({
+          kind: "source-scope-ref",
+          side: "source",
+          resourceRef: requirement.sourceResourceRef,
+          sourceScopeKey: requirement.sourceScopeKey,
+        });
+      }
     }
   }
 

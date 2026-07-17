@@ -1,7 +1,9 @@
 import type {
   RegisterAppResponse,
   ResourceBindingDto,
+  ResourceBindingScopeConstantDto,
   ResourceBindingScopeDto,
+  ResourceBindingScopeRecordDerivedDto,
   ResourceBindingsResponse,
   UpdateResourceBindingResponse,
 } from "@mediator/contracts";
@@ -260,6 +262,28 @@ function scopeEntry(binding: ResourceBindingDto, parameterName: string): Resourc
   return entry;
 }
 
+/** {@link scopeEntry}, narrowed to the `constant` DTO member (kind-tagged union, SS-9). */
+function constantScope(
+  binding: ResourceBindingDto,
+  parameterName: string,
+): ResourceBindingScopeConstantDto {
+  const entry = scopeEntry(binding, parameterName);
+  if (entry.kind !== "constant") throw new Error(`scope entry '${parameterName}' is not constant`);
+  return entry;
+}
+
+/** {@link scopeEntry}, narrowed to the `record-derived` DTO member (kind-tagged union, SS-9). */
+function recordDerivedScope(
+  binding: ResourceBindingDto,
+  parameterName: string,
+): ResourceBindingScopeRecordDerivedDto {
+  const entry = scopeEntry(binding, parameterName);
+  if (entry.kind !== "record-derived") {
+    throw new Error(`scope entry '${parameterName}' is not record-derived`);
+  }
+  return entry;
+}
+
 describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
   let server: TestServer;
   afterEach(async () => {
@@ -278,7 +302,7 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
     ]);
     expect(issues.scopeBindings.some((s) => s.parameterName === "index")).toBe(false);
 
-    const owner = scopeEntry(issues, "owner");
+    const owner = constantScope(issues, "owner");
     expect(owner.kind).toBe("constant");
     expect(owner.value).toBe(""); // no single-value hint → empty, awaiting supply
     expect(owner.confirmedBy).toBeNull();
@@ -296,7 +320,7 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    const owner = constantScope(response.json<UpdateResourceBindingResponse>(), "owner");
     expect(owner.value).toBe("alice");
     expect(owner.confirmedBy).toBe("operator");
     expect(owner.confirmedAt).not.toBeNull();
@@ -315,7 +339,7 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
     const updated = response.json<UpdateResourceBindingResponse>();
     expect(scopeEntry(updated, "owner").confirmedBy).toBe("operator");
     // The sibling scope entry is untouched.
-    const repo = scopeEntry(updated, "repo");
+    const repo = constantScope(updated, "repo");
     expect(repo.value).toBe("");
     expect(repo.confirmedBy).toBeNull();
     expect(repo.confirmedAt).toBeNull();
@@ -356,7 +380,7 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
       payload: { parameterName: "owner", value: "not-an-ir-field-42" },
     });
     expect(accepted.statusCode).toBe(200);
-    expect(scopeEntry(accepted.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
+    expect(constantScope(accepted.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
       "not-an-ir-field-42",
     );
   });
@@ -384,7 +408,7 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
       payload: { parameterName: "repo", value: "phoenix" },
     });
 
-    const repo = scopeEntry(response.json<UpdateResourceBindingResponse>(), "repo");
+    const repo = constantScope(response.json<UpdateResourceBindingResponse>(), "repo");
     expect(repo.confirmedBy).toBe("alice");
     expect(repo.value).toBe("phoenix");
   });
@@ -572,7 +596,8 @@ describe("PATCH /api/resource-bindings/:id — sourceScopeRef (SS-7)", () => {
     // …and no scope path-parameter binding (owner/repo stay unconfirmed constants).
     for (const scope of updated.scopeBindings) {
       expect(scope.confirmedBy).toBeNull();
-      expect(scope.value).toBe("");
+      expect(scope.kind).toBe("constant");
+      expect(scope.kind === "constant" ? scope.value : undefined).toBe("");
     }
   });
 
@@ -600,7 +625,7 @@ describe("PATCH /api/resource-bindings/:id — sourceScopeRef (SS-7)", () => {
       payload: { parameterName: "owner", value: "alice" },
     });
     expect(scopeResp.statusCode).toBe(200);
-    expect(scopeEntry(scopeResp.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
+    expect(constantScope(scopeResp.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
       "alice",
     );
   });
@@ -628,14 +653,14 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
     });
 
     expect(response.statusCode).toBe(200);
-    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    const owner = recordDerivedScope(response.json<UpdateResourceBindingResponse>(), "owner");
     expect(owner.kind).toBe("record-derived");
     expect(owner.sourceScopeKey).toBe("owner");
     expect(owner.transform).toStrictEqual({ kind: "rename" });
     expect(owner.confirmedBy).toBe("operator");
     expect(owner.confirmedAt).not.toBeNull();
-    // A record-derived entry carries no constant literal.
-    expect(owner.value).toBe("");
+    // A record-derived entry carries no constant literal (SS-9 kind-tagged DTO).
+    expect("value" in owner).toBe(false);
   });
 
   it("confirms record-derived without a transform (the key is simply absent)", async () => {
@@ -649,7 +674,7 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
     });
 
     expect(response.statusCode).toBe(200);
-    const owner = scopeEntry(response.json<UpdateResourceBindingResponse>(), "owner");
+    const owner = recordDerivedScope(response.json<UpdateResourceBindingResponse>(), "owner");
     expect(owner.kind).toBe("record-derived");
     expect(owner.sourceScopeKey).toBe("owner");
     expect(owner.transform).toBeUndefined();
@@ -667,7 +692,7 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
 
     const updated = response.json<UpdateResourceBindingResponse>();
     // The sibling scope entry stays an unconfirmed constant.
-    const repo = scopeEntry(updated, "repo");
+    const repo = constantScope(updated, "repo");
     expect(repo.kind).toBe("constant");
     expect(repo.value).toBe("");
     expect(repo.confirmedBy).toBeNull();
@@ -698,7 +723,7 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
       url: `/api/specs/${specId}/resource-bindings`,
     });
     const issues = issuesBinding(reread.json<ResourceBindingsResponse>().bindings);
-    const owner = scopeEntry(issues, "owner");
+    const owner = recordDerivedScope(issues, "owner");
     expect(owner.kind).toBe("record-derived");
     expect(owner.sourceScopeKey).toBe("owner");
     expect(owner.transform).toStrictEqual({ kind: "rename" });
@@ -769,7 +794,7 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
       payload: { parameterName: "repo", kind: "record-derived", sourceScopeKey: "name" },
     });
 
-    const repo = scopeEntry(response.json<UpdateResourceBindingResponse>(), "repo");
+    const repo = recordDerivedScope(response.json<UpdateResourceBindingResponse>(), "repo");
     expect(repo.confirmedBy).toBe("alice");
     expect(repo.sourceScopeKey).toBe("name");
   });

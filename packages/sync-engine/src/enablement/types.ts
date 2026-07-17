@@ -66,20 +66,23 @@ export interface EnablementInput {
    */
   readonly backfillSkipped: boolean;
   /**
-   * SS-5 — the scope path-parameter bindings the operations this rule actually calls
-   * require, **precomputed by the SA classifier** from the IR (`docs/requirements/
+   * SS-5 / SS-9 — the scope path-parameter bindings the operations this rule actually
+   * calls require, **precomputed by the SA classifier** from the IR (`docs/requirements/
    * scoped-resource-sync.md` SS-5.1/5.2): the source poll operation + backfill collection
    * read, the fetch-and-match target read when that is the lookup path, the target
    * create/update/delete for what the rule propagates, and the target single-record read
    * when the rule needs it (a PUT-shaped update's read-carry / `read-before-write`). Each
-   * entry names a **scope** (non-record-id) path parameter, the {@link EnablementSide}
-   * whose `ResourceBinding` must hold its confirmed `constant`, and that resource's ref;
-   * an operation whose only path parameter is the record id contributes none (SS-5.3).
+   * entry names a **scope** (non-record-id) path parameter and — via its
+   * {@link ScopeBindingRequirement} `kind` — how it is satisfied: a `constant` on the
+   * named {@link EnablementSide}'s `ResourceBinding` (SS-5), or `record-derived` structural
+   * presence (SS-9). An operation whose only path parameter is the record id contributes
+   * none (SS-5.3).
    *
    * Kept an **input** (not derived here) so the gate stays pure over already-loaded
-   * domain objects — the IR-dependent record-id-vs-scope classification lives in the SA
-   * layer and matches what the SS-4 resolver fills exactly. **Empty** for a non-scoped
-   * rule: the gate then adds no scope blocker (backward-compatible).
+   * domain objects — the IR-dependent record-id-vs-scope classification and the per-param
+   * `constant`-vs-`record-derived` kind resolution live in the SA layer and match what the
+   * SS-4/SS-8b resolver fills exactly. **Empty** for a non-scoped rule: the gate then adds
+   * no scope blocker (backward-compatible).
    */
   readonly requiredScopeBindings: readonly ScopeBindingRequirement[];
 }
@@ -90,22 +93,57 @@ export interface EnablementInput {
 export type EnablementSide = "source" | "target";
 
 /**
- * SS-5 — one **required scope path-parameter binding**: a scope (non-record-id) path
- * parameter of an operation the rule calls, attributed to the side whose
- * `ResourceBinding.scopePathBindings` must hold its confirmed `constant` (SS-5.5:
- * source-operation params on the source binding, target-operation params on the target).
- * The precomputed shape the SA classifier hands the gate in
- * {@link EnablementInput.requiredScopeBindings}; the gate checks each against the named
- * side's binding and, when unconfirmed, emits the matching
- * {@link ScopeBindingUnconfirmedRequirement} into `stillNeeds` (SS-5.4).
+ * SS-5 / SS-9 — one **required scope path-parameter binding**: a scope (non-record-id)
+ * path parameter of an operation the rule calls, attributed to the side whose
+ * `ResourceBinding` must satisfy it. A **discriminated union** over the parameter's
+ * confirmed fill-source `kind` (`ResourceBinding.scopePathBindings`), precomputed by the
+ * SA classifier and handed to the gate in {@link EnablementInput.requiredScopeBindings};
+ * the gate checks each against the already-loaded `ResourceBinding`s and, when a
+ * precondition is unmet, emits the matching `stillNeeds` requirement.
+ *
+ * - `constant` (SS-5) — satisfied by a confirmed `constant` binding on `side` (SS-5.5:
+ *   source-operation params on the source binding, target-operation params on the
+ *   target); an unmet one emits {@link ScopeBindingUnconfirmedRequirement}.
+ * - `record-derived` (SS-9) — satisfied by **structural presence** (SS-9.1): the
+ *   `record-derived` binding on `side` confirmed AND the polled **source** resource's
+ *   `sourceScopeRef` confirmed carrying the component keyed `sourceScopeKey`. The gate
+ *   checks presence only, **never** value-space equivalence (which the mediator cannot
+ *   verify — the operator asserted it by choosing `record-derived`); an unmet target
+ *   binding emits {@link ScopeBindingUnconfirmedRequirement}, an unmet/missing source
+ *   component {@link SourceScopeRefUnconfirmedRequirement}.
  */
-export interface ScopeBindingRequirement {
+export type ScopeBindingRequirement =
+  ConstantScopeBindingRequirement | RecordDerivedScopeBindingRequirement;
+
+/** SS-5 — a scope parameter filled by a confirmed `constant` binding on {@link ConstantScopeBindingRequirement.side}. */
+export interface ConstantScopeBindingRequirement {
+  readonly kind: "constant";
   /** The scope path parameter's name (as it appears in the operation's path template + the binding entry). */
   readonly parameterName: string;
   /** Which side's `ResourceBinding` must carry the confirmed `constant` (SS-5.5). */
   readonly side: EnablementSide;
   /** The `resourceRef` of the binding the parameter is checked against — the side's mapped resource. */
   readonly resourceRef: string;
+}
+
+/**
+ * SS-9 — a scope parameter filled by a confirmed `record-derived` binding. It is
+ * satisfied only by the structural presence of two confirmed pieces on the two sides:
+ * the `record-derived` binding entry (on `side`, the written target) and the polled
+ * source resource's `sourceScopeRef` component keyed `sourceScopeKey`.
+ */
+export interface RecordDerivedScopeBindingRequirement {
+  readonly kind: "record-derived";
+  /** The scope path parameter's name (as it appears in the operation's path template + the binding entry). */
+  readonly parameterName: string;
+  /** The side whose `ResourceBinding` carries the `record-derived` entry (the written target). */
+  readonly side: EnablementSide;
+  /** The `resourceRef` of the binding carrying the `record-derived` entry — the side's mapped resource. */
+  readonly resourceRef: string;
+  /** The polled **source** resource whose confirmed `sourceScopeRef` must carry the selected component. */
+  readonly sourceResourceRef: string;
+  /** The captured-scope component `key` the binding selects (SS-8 `sourceScopeKey`). */
+  readonly sourceScopeKey: string;
 }
 
 /**
@@ -142,7 +180,8 @@ export type EnablementRequirement =
   | TargetOperationRequirement
   | BindingRefRequirement
   | IdentityLookupPathRequirement
-  | ScopeBindingUnconfirmedRequirement;
+  | ScopeBindingUnconfirmedRequirement
+  | SourceScopeRefUnconfirmedRequirement;
 
 /**
  * BE-1.1 — the hard identity gate. A resource pair needs **exactly one** confirmed
@@ -215,16 +254,39 @@ export interface IdentityLookupPathRequirement {
 }
 
 /**
- * SS-5.4 — a required scope path-parameter binding is **unconfirmed** on the named side,
- * so a scoped `SyncRule` cannot go live (it would fail at runtime on a literal `{owner}`).
- * The discriminated `stillNeeds` member for a {@link ScopeBindingRequirement}: it names
- * the `parameterName`, the `side` whose `ResourceBinding.scopePathBindings` must hold its
- * confirmed `constant`, and that binding's `resourceRef` — so SU-1/SU-5 (SS-6) can route
- * the operator to the exact scope parameter to supply and confirm (RB-3). Composes with
- * the BE-1/BE-2 requirements above in the same list.
+ * SS-5.4 / SS-9.1 — a required scope path-parameter binding is **unconfirmed** on the
+ * named side, so a scoped `SyncRule` cannot go live (it would fail at runtime on a
+ * literal `{owner}`). The `stillNeeds` member emitted for the *binding-on-`side`* half of
+ * either a `constant` (SS-5) or a `record-derived` (SS-9) {@link ScopeBindingRequirement}:
+ * it names the `parameterName`, the `side` whose `ResourceBinding.scopePathBindings` must
+ * carry the confirmed entry, and that binding's `resourceRef` — so SU-1/SU-5 (SS-6/SS-9
+ * UI) can route the operator to the exact scope parameter to supply/confirm (RB-3).
+ * Composes with the BE-1/BE-2 requirements above in the same list. (A `record-derived`
+ * requirement's *other* half — the source `sourceScopeRef` component — is the separate
+ * {@link SourceScopeRefUnconfirmedRequirement}.)
  */
-export interface ScopeBindingUnconfirmedRequirement extends ScopeBindingRequirement {
+export interface ScopeBindingUnconfirmedRequirement {
   readonly kind: "scope-binding";
+  readonly parameterName: string;
+  readonly side: EnablementSide;
+  readonly resourceRef: string;
+}
+
+/**
+ * SS-9.1 — the **source** half of a `record-derived` scope requirement is unmet: the
+ * polled source resource's `sourceScopeRef` is unconfirmed, absent, or does not carry the
+ * component keyed `sourceScopeKey` that the `record-derived` binding selects. Distinct
+ * from {@link ScopeBindingUnconfirmedRequirement} (the target binding half) so SU-1/SU-5
+ * (SS-9 UI) can route the operator to confirm/correct the source `sourceScopeRef` (SS-7)
+ * rather than the target scope binding. `side` is always `"source"`; `resourceRef` names
+ * the source resource whose `sourceScopeRef` is missing the component. The gate checks
+ * **structural presence** of the component only — never value-space equivalence.
+ */
+export interface SourceScopeRefUnconfirmedRequirement {
+  readonly kind: "source-scope-ref";
+  readonly side: EnablementSide;
+  readonly resourceRef: string;
+  readonly sourceScopeKey: string;
 }
 
 // ── Degradations (non-blocking notes SU-1 states before the rule turns on) ────

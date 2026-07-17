@@ -1,4 +1,4 @@
-import type { ResourceBindingRefDto, ResourceBindingScopeDto } from "@mediator/contracts";
+import type { ResourceBindingRefDto, ResourceBindingScopeConstantDto } from "@mediator/contracts";
 import type { IrResourceGroup } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
@@ -110,7 +110,9 @@ describe("binding-model", () => {
   });
 });
 
-function scopeDto(overrides: Partial<ResourceBindingScopeDto>): ResourceBindingScopeDto {
+function scopeDto(
+  overrides: Partial<ResourceBindingScopeConstantDto>,
+): ResourceBindingScopeConstantDto {
   return {
     parameterName: "owner",
     kind: "constant",

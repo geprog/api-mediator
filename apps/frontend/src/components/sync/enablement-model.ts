@@ -129,11 +129,21 @@ export function describeRequirement(
         bindingLink: null,
       };
     case "scope-binding":
-      // SS-5.4 — a hard blocker; the full supply/confirm panel is SS-6. Deep-links to the
-      // side's app where the Phase-1 binding panel (RB-3) supplies the scope constant.
+      // SS-5.4 / SS-9.1b — a hard blocker; the full supply/confirm panel is SS-6/SS-9.
+      // Deep-links to the side's app where the Phase-1 binding panel (RB-3) supplies the
+      // scope constant (or, for a record-derived binding, the sourceScopeKey pick).
       return {
         key: `scope-binding:${requirement.side}:${requirement.parameterName}`,
-        label: `Supply and confirm the ${requirement.side} scope path-parameter '${requirement.parameterName}' (a constant) on ${requirement.resourceRef}.`,
+        label: `Supply and confirm the ${requirement.side} scope path-parameter '${requirement.parameterName}' on ${requirement.resourceRef}.`,
+        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+      };
+    case "source-scope-ref":
+      // SS-9.1a — a hard blocker: the source record's scope capture (sourceScopeRef) must
+      // be confirmed carrying the component a record-derived scope binding selects (SS-7).
+      // Deep-links to the source app where the Phase-1 binding panel (RB-3) confirms it.
+      return {
+        key: `source-scope-ref:${requirement.side}:${requirement.sourceScopeKey}`,
+        label: `Confirm the ${requirement.side} record scope capture (sourceScopeRef) carrying the component '${requirement.sourceScopeKey}' on ${requirement.resourceRef}.`,
         bindingLink: bindingLinkFor(requirement.side, resourcePair),
       };
   }

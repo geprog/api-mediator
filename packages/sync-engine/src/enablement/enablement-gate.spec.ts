@@ -6,12 +6,13 @@ import type {
   OperationMapping,
   ResourceBinding,
   ScopePathBinding,
+  SourceScopeRef,
   SyncRule,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import { evaluateEnablement } from "./enablement-gate.js";
-import type { EnablementDecision, EnablementInput } from "./types.js";
+import type { EnablementDecision, EnablementInput, ScopeBindingRequirement } from "./types.js";
 
 /**
  * Unit tests for the `SyncRule` enablement gate (BE-1 all 6 criteria, BE-2 all 5).
@@ -627,7 +628,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
   it("a required scope binding confirmed on the right side → not blocked (SS-5.1)", () => {
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
         sourceBinding: fullFetchSourceBinding({
           scopePathBindings: [confirmedConstant("owner", "alice")],
         }),
@@ -639,7 +642,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
   it("an unconfirmed required scope binding → blocked with the structured scope-binding requirement (SS-5.4)", () => {
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
         sourceBinding: fullFetchSourceBinding({
           scopePathBindings: [unconfirmedConstant("owner")],
         }),
@@ -657,7 +662,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
   it("an ABSENT scope entry (no binding at all) → blocked (SS-5.4)", () => {
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "repo", side: "target", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "repo", side: "target", resourceRef: "users" },
+        ],
         // targetBinding has no scopePathBindings at all.
       }),
     );
@@ -673,7 +680,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
   it("a confirmed-but-EMPTY-value constant does not satisfy the requirement (SS-1 confirmed = non-empty)", () => {
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
         sourceBinding: fullFetchSourceBinding({
           // Both stamps set but value empty — a malformed row the schema forbids; the gate
           // still refuses to treat it as confirmed (mirrors the SS-4 resolver guard).
@@ -703,7 +712,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
     // a TARGET one — so it must remain unsatisfied (sidedness is not cross-checked).
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "owner", side: "target", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "target", resourceRef: "users" },
+        ],
         sourceBinding: fullFetchSourceBinding({
           scopePathBindings: [confirmedConstant("owner", "alice")],
         }),
@@ -726,9 +737,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
     const decision = evaluateEnablement(
       validInput({
         requiredScopeBindings: [
-          { parameterName: "owner", side: "source", resourceRef: "users" },
-          { parameterName: "repo", side: "source", resourceRef: "users" },
-          { parameterName: "project", side: "target", resourceRef: "users" },
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+          { kind: "constant", parameterName: "repo", side: "source", resourceRef: "users" },
+          { kind: "constant", parameterName: "project", side: "target", resourceRef: "users" },
         ],
         sourceBinding: fullFetchSourceBinding({
           scopePathBindings: [confirmedConstant("owner", "alice"), unconfirmedConstant("repo")],
@@ -747,7 +758,9 @@ describe("SS-5 — scope path-parameter bindings", () => {
   it("composes with an existing BE-2 ref blocker (both appear in stillNeeds)", () => {
     const decision = evaluateEnablement(
       validInput({
-        requiredScopeBindings: [{ parameterName: "owner", side: "source", resourceRef: "users" }],
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
         sourceBinding: fullFetchSourceBinding({
           nativeIdRef: unconfirmed(fieldTarget("id")), // BE-2.1 blocker on the source
           scopePathBindings: [unconfirmedConstant("owner")], // SS-5.4 blocker on the source
@@ -767,5 +780,236 @@ describe("SS-5 — scope path-parameter bindings", () => {
       side: "source",
       resourceRef: "users",
     });
+  });
+});
+
+// ── SS-9 — required scope path-parameter bindings (record-derived) ──────────────
+
+describe("SS-9 — record-derived scope path-parameter bindings", () => {
+  /** A confirmed source `sourceScopeRef` over the given components (SS-7). */
+  function confirmedSourceScopeRef(
+    components: readonly { key: string; fieldPath: string }[],
+  ): SourceScopeRef {
+    return { components: [...components], confirmedBy: "op-alice", confirmedAt: T0 };
+  }
+  /** An unconfirmed source `sourceScopeRef` (present but not ratified). */
+  function unconfirmedSourceScopeRef(
+    components: readonly { key: string; fieldPath: string }[],
+  ): SourceScopeRef {
+    return { components: [...components], confirmedBy: null, confirmedAt: null };
+  }
+  function confirmedRecordDerived(parameterName: string, sourceScopeKey: string): ScopePathBinding {
+    return {
+      kind: "record-derived",
+      parameterName,
+      sourceScopeKey,
+      confirmedBy: "op",
+      confirmedAt: T0,
+    };
+  }
+  function unconfirmedRecordDerived(
+    parameterName: string,
+    sourceScopeKey: string,
+  ): ScopePathBinding {
+    return {
+      kind: "record-derived",
+      parameterName,
+      sourceScopeKey,
+      confirmedBy: null,
+      confirmedAt: null,
+    };
+  }
+
+  // The target's `{id}` (a project scope, e.g. Vikunja `PUT /projects/{id}/tasks`) bound
+  // `record-derived` selecting the source's captured `project` component.
+  const rd: ScopeBindingRequirement = {
+    kind: "record-derived",
+    parameterName: "id",
+    side: "target",
+    resourceRef: "users",
+    sourceResourceRef: "users",
+    sourceScopeKey: "project",
+  };
+
+  it("source component present+confirmed AND target binding confirmed → NOT blocked (SS-9.1)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [rd],
+        sourceBinding: fullFetchSourceBinding({
+          sourceScopeRef: confirmedSourceScopeRef([{ key: "project", fieldPath: "project_id" }]),
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [confirmedRecordDerived("id", "project")],
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("source sourceScopeRef UNCONFIRMED → blocked with the structured source-scope-ref requirement (SS-9.1a)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [rd],
+        sourceBinding: fullFetchSourceBinding({
+          sourceScopeRef: unconfirmedSourceScopeRef([{ key: "project", fieldPath: "project_id" }]),
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [confirmedRecordDerived("id", "project")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "source-scope-ref",
+      side: "source",
+      resourceRef: "users",
+      sourceScopeKey: "project",
+    });
+    // The target binding half is satisfied → no scope-binding requirement for it.
+    expect(decision.stillNeeds).not.toContainEqual(
+      expect.objectContaining({ kind: "scope-binding" }),
+    );
+  });
+
+  it("source sourceScopeRef confirmed but MISSING the sourceScopeKey component → blocked (SS-9.1a)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [rd],
+        sourceBinding: fullFetchSourceBinding({
+          // Confirmed, but carries `owner` — not the `project` the binding selects.
+          sourceScopeRef: confirmedSourceScopeRef([
+            { key: "owner", fieldPath: "repository.owner" },
+          ]),
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [confirmedRecordDerived("id", "project")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "source-scope-ref",
+      side: "source",
+      resourceRef: "users",
+      sourceScopeKey: "project",
+    });
+  });
+
+  it("target binding UNCONFIRMED → blocked with the scope-binding requirement (SS-9.1b)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [rd],
+        sourceBinding: fullFetchSourceBinding({
+          sourceScopeRef: confirmedSourceScopeRef([{ key: "project", fieldPath: "project_id" }]),
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [unconfirmedRecordDerived("id", "project")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "users",
+    });
+    // The source component half is satisfied → no source-scope-ref requirement.
+    expect(decision.stillNeeds).not.toContainEqual(
+      expect.objectContaining({ kind: "source-scope-ref" }),
+    );
+  });
+
+  it("BOTH halves unmet → lists both the scope-binding AND the source-scope-ref requirements", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [rd],
+        sourceBinding: fullFetchSourceBinding({}), // no sourceScopeRef at all
+        targetBinding: targetBinding({}), // no record-derived entry at all
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toEqual(
+      expect.arrayContaining([
+        { kind: "scope-binding", parameterName: "id", side: "target", resourceRef: "users" },
+        {
+          kind: "source-scope-ref",
+          side: "source",
+          resourceRef: "users",
+          sourceScopeKey: "project",
+        },
+      ]),
+    );
+  });
+
+  it("composes with a BE-2 ref blocker AND a constant scope blocker (all surface together)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [
+          rd,
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
+        sourceBinding: fullFetchSourceBinding({
+          nativeIdRef: unconfirmed(fieldTarget("id")), // BE-2.1 blocker
+          sourceScopeRef: unconfirmedSourceScopeRef([{ key: "project", fieldPath: "project_id" }]), // SS-9.1a
+          scopePathBindings: [
+            {
+              kind: "constant",
+              parameterName: "owner",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            }, // SS-5.4
+          ],
+        }),
+        targetBinding: targetBinding({
+          scopePathBindings: [confirmedRecordDerived("id", "project")],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "binding-ref",
+      ref: "nativeIdRef",
+      side: "source",
+      usedFor: "native-id",
+    });
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "source-scope-ref",
+      side: "source",
+      resourceRef: "users",
+      sourceScopeKey: "project",
+    });
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "users",
+    });
+  });
+
+  it("a constant-only rule is unaffected by the record-derived gate path (no regression)", () => {
+    // A source `sourceScopeRef` present but unconfirmed would block a record-derived rule;
+    // for a purely `constant` rule it is irrelevant — the constant alone decides.
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [
+          { kind: "constant", parameterName: "owner", side: "source", resourceRef: "users" },
+        ],
+        sourceBinding: fullFetchSourceBinding({
+          sourceScopeRef: unconfirmedSourceScopeRef([{ key: "project", fieldPath: "project_id" }]),
+          scopePathBindings: [
+            {
+              kind: "constant",
+              parameterName: "owner",
+              value: "alice",
+              confirmedBy: "op",
+              confirmedAt: T0,
+            },
+          ],
+        }),
+      }),
+    );
+    expectEnable(decision);
   });
 });
