@@ -16,6 +16,8 @@ import {
 } from "../support/landscape/apps-api.js";
 import {
   ensureScenario1Landscape,
+  GITEA_OWNER,
+  GITEA_REPO,
   readLandscapeTokens,
   teardownScenario1Landscape,
   type LandscapeBringUp,
@@ -37,7 +39,11 @@ import { SyncRulePage } from "../support/pages/sync-rule.page.js";
  * the `SyncScaffold`). It proves the Sync Engine's core promises end to end:
  *
  *  - **SU-6.1** both peer-peer rules (issues↔tasks, title = identity) enable through the
- *    SU-1 gate UI with `link-only` backfill, then poll.
+ *    SU-1 gate UI with `link-only` backfill, then poll. The Gitea `issues` source poll is
+ *    **scoped** — `GET /repos/{owner}/{repo}/issues` — so the Layer-1 scope gate (SS-5)
+ *    blocks enablement until `owner`/`repo` are confirmed; the journey confirms them (the
+ *    real bootstrapped `alice`/`phoenix`) through the SS-3 scope-patch API, then the SS-4
+ *    resolver substitutes them so the poll hits the REAL scoped endpoint.
  *  - **SU-6.2** a Gitea issue edit → the Gitea→Vikunja poll → the corresponding Vikunja
  *    **task is updated via the real Vikunja API**.
  *  - **SU-6.3** the Vikunja→Gitea poll recognizes the mediator's own write as an **echo**
@@ -111,6 +117,20 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     return body.outcome.enqueuedCount ?? 0;
   }
 
+  /** Supply + confirm one scope path-parameter `constant` on a binding via the SS-3 scope-patch API. */
+  async function confirmScope(
+    request: APIRequestContext,
+    bindingId: string,
+    parameterName: string,
+    value: string,
+  ): Promise<void> {
+    const response = await request.patch(`${BACKEND_ORIGIN}/api/resource-bindings/${bindingId}`, {
+      headers: { authorization: basicAuthHeader(OPERATOR) },
+      data: { parameterName, value },
+    });
+    expect(response.status(), `scope-patch ${parameterName} → ${await response.text()}`).toBe(200);
+  }
+
   test("SU-6.1–6.4: a real Gitea→Vikunja round propagates once and does NOT echo back", async ({
     page,
     login,
@@ -136,16 +156,56 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     await vikunja.setTaskDescription(task.id, BASELINE_BODY);
     const initialTaskCount = (await vikunja.listTasks()).length;
 
-    // ── SU-6.1: enable BOTH rules through the SU-1 gate UI, link-only backfill ────
+    // ── SU-6.1 (Layer 1 scope gate): the SCOPED Gitea rule is BLOCKED until owner/repo
+    //    are confirmed — the Gitea source poll hits `/repos/{owner}/{repo}/issues`, whose
+    //    `{owner}`/`{repo}` are scope path params (SS-5). Opening the panel bounces to
+    //    /login; signing in returns to it. ─────────────────────────────────────────────
+    await syncRule.open(active.ruleG2VId);
+    await login.loginAs(OPERATOR);
+    await expect(syncRule.panel).toBeVisible();
+    // SU-1 surfaces each unconfirmed source scope path parameter as a gate blocker.
+    await expect(syncRule.checklistItem("scope-binding:source:owner")).toBeVisible();
+    await expect(syncRule.checklistItem("scope-binding:source:repo")).toBeVisible();
+    // Even with a backfill mode chosen, enable stays disabled while the scope is unconfirmed.
+    await syncRule.backfillLinkOnly.check();
+    await expect(syncRule.enableButton).toBeDisabled();
+
+    // The server enforces it: enabling now is 422 blocked with the scope-binding requirement.
+    const blocked = await request.post(
+      `${BACKEND_ORIGIN}/api/sync-rules/${active.ruleG2VId}/enable`,
+      {
+        headers: { authorization: basicAuthHeader(OPERATOR) },
+        data: { action: "backfill", backfillMode: "link-only" },
+      },
+    );
+    expect(blocked.status()).toBe(422);
+    const blockedBody = (await blocked.json()) as {
+      outcome: string;
+      stillNeeds: { kind: string; parameterName?: string; side?: string }[];
+    };
+    expect(blockedBody.outcome).toBe("blocked");
+    expect(
+      blockedBody.stillNeeds.some(
+        (need) => need.kind === "scope-binding" && need.parameterName === "owner",
+      ),
+    ).toBe(true);
+
+    // Confirm the scope constants (the real bootstrapped repo owner/name) through the SS-3
+    // scope-patch API — one PATCH per parameter, against the shared Gitea issues binding.
+    await confirmScope(request, active.giteaIssuesBindingId, "owner", GITEA_OWNER);
+    await confirmScope(request, active.giteaIssuesBindingId, "repo", GITEA_REPO);
+
+    // ── SU-6.1: with the scope confirmed, enable BOTH rules through the SU-1 gate UI,
+    //    link-only backfill (G2V polls Gitea as source, V2G looks it up as target — the
+    //    same confirmed binding satisfies both). ──────────────────────────────────────
     for (const ruleId of [active.ruleG2VId, active.ruleV2GId]) {
-      // Opening the protected panel bounces to /login; signing in returns to it. The
-      // in-memory SPA session is dropped by the next full navigation, so each rule
+      // The in-memory SPA session is dropped by the next full navigation, so each rule
       // re-authenticates (that also re-exercises the OA-1 guard).
       await syncRule.open(ruleId);
       await login.loginAs(OPERATOR);
       await expect(syncRule.panel).toBeVisible();
       await expect(syncRule.status).toHaveText("disabled");
-      // The gate is satisfied for this pair — the checklist is empty and enable is offered.
+      // The gate is now satisfied for this pair — the checklist is empty and enable is offered.
       await expect(syncRule.checklistReady).toBeVisible();
       await syncRule.enableLinkOnly();
       await expect(syncRule.enableOutcome).toContainText("Enabled");
