@@ -241,13 +241,54 @@ function scopeFixture(overrides: { confirmed?: boolean }): ResourceBindingsRespo
 }
 
 /** Mounts the panel and authenticates the given role (the scope section is role-gated). */
-function mountPanel(role: SessionRole) {
+function mountPanel(
+  role: SessionRole,
+  extraProps: { sourceScopeKeyOptions?: readonly string[] } = {},
+) {
   const wrapper = mount(BindingPanel, {
-    props: { specId: SPEC_ID, ir },
+    props: { specId: SPEC_ID, ir, ...extraProps },
     global: testGlobalOptions(),
   });
   useAuthStore().$patch({ state: { status: "authenticated", identity: role, role } });
   return wrapper;
+}
+
+/** A bindings response whose `tasks` resource carries a single `record-derived` scope entry. */
+function recordDerivedScopeFixture(overrides: {
+  confirmed?: boolean;
+  sourceScopeKey?: string;
+}): ResourceBindingsResponse {
+  const confirmed = overrides.confirmed === true;
+  const sourceScopeKey = overrides.sourceScopeKey ?? (confirmed ? "project" : "");
+  return {
+    bindings: [
+      {
+        id: BINDING_ID,
+        apiSpecId: SPEC_ID,
+        resourceRef: "tasks",
+        refs: [],
+        scopeBindings: [
+          {
+            parameterName: "id",
+            kind: "record-derived",
+            sourceScopeKey,
+            confirmedBy: confirmed ? "operator@example.com" : null,
+            confirmedAt: confirmed ? "2026-07-10T00:00:00.000Z" : null,
+          },
+        ],
+        sourceScopeRef: null,
+      },
+    ],
+  };
+}
+
+/** Reads a v-model-bound `<input>`'s value without an `as` cast (narrow via `instanceof`). */
+function inputValue(wrapper: ReturnType<typeof mountPanel>, testId: string): string {
+  const element = wrapper.get(`[data-testid="${testId}"]`).element;
+  if (!(element instanceof HTMLInputElement)) {
+    throw new Error(`[data-testid="${testId}"] is not an <input>`);
+  }
+  return element.value;
 }
 
 describe("BindingPanel — SS-6 scope-binding supply", () => {
@@ -316,5 +357,135 @@ describe("BindingPanel — SS-6 scope-binding supply", () => {
     expect(wrapper.find('[data-testid="scope-confirm-owner"]').exists()).toBe(false);
     // The confirmed constant is operator config, shown as entered (SS-6.5) — never a secret.
     expect(wrapper.get('[data-testid="scope-readonly-owner"]').text()).toContain("alice");
+  });
+});
+
+describe("BindingPanel — SS-9 record-derived kind choice", () => {
+  it("renders a record-derived entry per its DTO kind, surfacing its sourceScopeKey (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({ confirmed: true }));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    // The kind tag reflects the discriminated DTO member.
+    expect(wrapper.get('[data-testid="scope-kind-id"]').text()).toContain("record-derived");
+    // Its sourceScopeKey is seeded into the record-derived input (no constant value input).
+    expect(wrapper.find('[data-testid="scope-input-id"]').exists()).toBe(false);
+    expect(inputValue(wrapper, "scope-sourcekey-input-id")).toBe("project");
+  });
+
+  it("offers the kind selector: constant + record-derived selectable, scope-link disabled (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-kind-select-id"]').exists()).toBe(true);
+    expect(
+      wrapper.get('[data-testid="scope-kind-option-id-constant"]').attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      wrapper.get('[data-testid="scope-kind-option-id-record-derived"]').attributes("disabled"),
+    ).toBeUndefined();
+    // scope-link is a Layer-3 fill source: shown, greyed, and labeled not-yet-available.
+    const scopeLink = wrapper.get('[data-testid="scope-kind-option-id-scope-link"]');
+    expect(scopeLink.attributes("disabled")).toBeDefined();
+    expect(scopeLink.text()).toContain("Layer 3");
+  });
+
+  it("switching to record-derived + a sourceScopeKey confirms the record-derived scope patch (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(scopeFixture({}));
+    updateBindingMock.mockResolvedValue(firstBinding(scopeFixture({ confirmed: true })));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-owner"]').setValue("record-derived");
+    // No rule context → the free-text sourceScopeKey fallback.
+    await wrapper.get('[data-testid="scope-sourcekey-input-owner"]').setValue("name");
+    await wrapper.get('[data-testid="scope-confirm-owner"]').trigger("click");
+    await flushPromises();
+
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "owner",
+      kind: "record-derived",
+      sourceScopeKey: "name",
+    });
+  });
+
+  it("switching to constant + a value confirms the unchanged constant scope patch (SS-9.2 / SS-6 no-regression)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({}));
+    updateBindingMock.mockResolvedValue(firstBinding(scopeFixture({ confirmed: true })));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-id"]').setValue("constant");
+    await wrapper.get('[data-testid="scope-input-id"]').setValue("alice");
+    await wrapper.get('[data-testid="scope-confirm-id"]').trigger("click");
+    await flushPromises();
+
+    // The constant patch carries no `kind` — the SS-3 wire shape is unchanged.
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "id",
+      value: "alice",
+    });
+  });
+
+  it("disables supply+confirm while the sourceScopeKey is empty (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({ sourceScopeKey: "" }));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="scope-confirm-id"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('[data-testid="scope-sourcekey-input-id"]').setValue("project");
+    expect(wrapper.get('[data-testid="scope-confirm-id"]').attributes("disabled")).toBeUndefined();
+  });
+
+  it("offers a sourceScopeKey pick list when the source components are known (rule context) (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({ sourceScopeKey: "" }));
+    updateBindingMock.mockResolvedValue(
+      firstBinding(recordDerivedScopeFixture({ confirmed: true })),
+    );
+    const wrapper = mountPanel("operator", { sourceScopeKeyOptions: ["owner", "name"] });
+    await flushPromises();
+
+    // Pick list, not free text.
+    expect(wrapper.find('[data-testid="scope-sourcekey-select-id"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="scope-sourcekey-input-id"]').exists()).toBe(false);
+    const optionTexts = wrapper
+      .findAll('[data-testid="scope-sourcekey-select-id"] option')
+      .map((option) => option.text());
+    expect(optionTexts).toContain("owner");
+    expect(optionTexts).toContain("name");
+
+    await wrapper.get('[data-testid="scope-sourcekey-select-id"]').setValue("name");
+    await wrapper.get('[data-testid="scope-confirm-id"]').trigger("click");
+    await flushPromises();
+
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "id",
+      kind: "record-derived",
+      sourceScopeKey: "name",
+    });
+  });
+
+  it("falls back to a free-text sourceScopeKey input without rule context (SS-9.2)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-sourcekey-input-id"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="scope-sourcekey-select-id"]').exists()).toBe(false);
+  });
+
+  it("renders a record-derived entry read-only for a viewer — no selector/inputs/confirm (SS-9.3)", async () => {
+    getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({ confirmed: true }));
+    const wrapper = mountPanel("viewer");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-kind-select-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-sourcekey-input-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-sourcekey-select-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-confirm-id"]').exists()).toBe(false);
+    // Confirmed state shown; the sourceScopeKey is operator config, never a credential/live value.
+    expect(wrapper.get('[data-testid="scope-state-id"]').text()).toContain("confirmed");
+    expect(wrapper.get('[data-testid="scope-readonly-id"]').text()).toContain("project");
   });
 });

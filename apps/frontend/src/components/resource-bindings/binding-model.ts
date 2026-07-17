@@ -61,6 +61,52 @@ export function canSupplyScope(value: string): boolean {
   return value.trim().length > 0;
 }
 
+/**
+ * A scope binding's fill-source kind (SS-9.2), mirroring the domain/DTO discriminant:
+ * `constant` (an operator literal), `record-derived` (filled per record from the source
+ * resource's captured scope), or `scope-link` (Layer 3 — resolved through a `ScopeLink`).
+ */
+export type ScopeBindingKind = "constant" | "record-derived" | "scope-link";
+
+/**
+ * The kinds an operator can actually confirm a scope binding **into** in Layer 2 —
+ * `scope-link` is a Layer-3 fill source and is offered only as a disabled option
+ * ({@link SCOPE_KIND_OPTIONS}).
+ */
+export type SelectableScopeBindingKind = "constant" | "record-derived";
+
+/** One kind-selector option (SS-9.2): the kind, a glossary-exact label, and whether it is selectable. */
+export interface ScopeKindOption {
+  readonly kind: ScopeBindingKind;
+  readonly label: string;
+  /** `scope-link` is disabled — a Layer-3 fill source not built yet (SS-9.2). */
+  readonly disabled: boolean;
+}
+
+/**
+ * The three fill-source kinds the SS-9.2 kind selector presents. `constant` and
+ * `record-derived` are selectable now; `scope-link` is shown **disabled** and labeled
+ * as Layer-3/not-yet-available so the operator sees the full choice without being able
+ * to pick an unbuilt kind. Labels keep the glossary term verbatim.
+ */
+export const SCOPE_KIND_OPTIONS: readonly ScopeKindOption[] = [
+  { kind: "constant", label: "constant", disabled: false },
+  { kind: "record-derived", label: "record-derived", disabled: false },
+  { kind: "scope-link", label: "scope-link (Layer 3 — not yet available)", disabled: true },
+];
+
+/**
+ * Whether a `record-derived` scope binding may be supplied + confirmed (SS-9.2): a
+ * non-blank `sourceScopeKey` must be selected/entered. The server 400s an empty key
+ * (SS-8), so the confirm affordance stays disabled until one is chosen — mirroring
+ * {@link canSupplyScope} for the constant value. This only decides whether the confirm
+ * action is offered; the per-rule check that the key names a real source component is
+ * the SS-9 enablement gate's job, not the client's.
+ */
+export function canSupplyScopeKey(sourceScopeKey: string): boolean {
+  return sourceScopeKey.trim().length > 0;
+}
+
 /** Human labels for the six ref kinds. */
 export const REF_KIND_LABELS: Record<ResourceBindingRefKind, string> = {
   nativeIdRef: "Native id",
