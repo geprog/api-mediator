@@ -18,6 +18,7 @@ export {
   type ResourceBindingRefRow,
   type ResourceBindingRow,
   type ScopePathBindingPatch,
+  type SourceScopeRefPatch,
 } from "./resource-binding.js";
 export {
   mapCredentialMetadataRow,

@@ -54,9 +54,29 @@ export const resourceBindingScopeDtoSchema = z.object({
 export type ResourceBindingScopeDto = z.infer<typeof resourceBindingScopeDtoSchema>;
 
 /**
+ * One resource's **`sourceScopeRef`** on the wire (SS-7): the record-scope-capture
+ * ref's confirmable component set. `components` is the `{ key, fieldPath }` set the
+ * Poller would capture each record's scope through; `confirmedBy`/`confirmedAt`
+ * report its single confirmed/unconfirmed state (`confirmedAt: null` while
+ * unconfirmed). The whole DTO is **null** when the resource carries no container
+ * field (the domain **absent** ref) — so SS-9's UI can tell absent apart from a
+ * present-unconfirmed ref. Field paths are IR pointers, never live payload.
+ */
+export const resourceBindingSourceScopeRefDtoSchema = z.object({
+  components: z.array(z.object({ key: z.string(), fieldPath: z.string() })),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: isoDateTimeSchema.nullable(),
+});
+export type ResourceBindingSourceScopeRefDto = z.infer<
+  typeof resourceBindingSourceScopeRefDtoSchema
+>;
+
+/**
  * One resource's binding on the wire: its identity, all six operational refs
- * (RB-3 criterion 1), and its scope path-parameter bindings (SS-3 criterion 6).
- * `scopeBindings` is empty for a resource with no non-record-id path parameter.
+ * (RB-3 criterion 1), its scope path-parameter bindings (SS-3 criterion 6), and
+ * its record-scope-capture ref (SS-7). `scopeBindings` is empty for a resource with
+ * no non-record-id path parameter; `sourceScopeRef` is **null** for a resource that
+ * carries no container field.
  */
 export const resourceBindingDtoSchema = z.object({
   id: z.string(),
@@ -64,6 +84,7 @@ export const resourceBindingDtoSchema = z.object({
   resourceRef: z.string(),
   refs: z.array(resourceBindingRefDtoSchema),
   scopeBindings: z.array(resourceBindingScopeDtoSchema),
+  sourceScopeRef: resourceBindingSourceScopeRefDtoSchema.nullable(),
 });
 export type ResourceBindingDto = z.infer<typeof resourceBindingDtoSchema>;
 
@@ -112,13 +133,44 @@ export const updateScopeBindingRequestSchema = z
 export type UpdateScopeBindingRequest = z.infer<typeof updateScopeBindingRequestSchema>;
 
 /**
- * `PATCH /api/resource-bindings/:id` request: **either** an operational-ref patch
- * (RB-2) **or** a scope-binding patch (SS-3), distinguished by which key it
- * carries (`refKind` vs `parameterName`). One PATCH confirms exactly one binding.
+ * The **`sourceScopeRef`** patch of the same action (SS-7): confirm/correct the
+ * whole record-scope-capture ref, addressed by carrying a `components` set — a
+ * *third* patch shape, disambiguated from the ref patch (`refKind`) and the scope
+ * patch (`parameterName`) purely by which key it carries. Unlike those two,
+ * `sourceScopeRef` is **one** ref whose value is the component set, so the operator
+ * supplies/adjusts the **full** set (add / remove / rename components, set each
+ * `fieldPath`) and it is confirmed as a whole (SS-7.2). Each component's `fieldPath`
+ * is validated against the resource's **response** schema server-side (a real field
+ * path — as RB-2 validates a ref target); an empty set is rejected there (an absent
+ * `sourceScopeRef`, not a confirmed-empty one). `.strict()` keeps the three patch
+ * shapes mutually exclusive — a payload mixing `components` with `refKind`/
+ * `parameterName` is rejected.
+ */
+export const sourceScopeComponentPatchSchema = z
+  .object({
+    key: z.string().min(1),
+    fieldPath: z.string().min(1),
+  })
+  .strict();
+export type SourceScopeComponentPatch = z.infer<typeof sourceScopeComponentPatchSchema>;
+
+export const updateSourceScopeRefRequestSchema = z
+  .object({
+    components: z.array(sourceScopeComponentPatchSchema),
+  })
+  .strict();
+export type UpdateSourceScopeRefRequest = z.infer<typeof updateSourceScopeRefRequestSchema>;
+
+/**
+ * `PATCH /api/resource-bindings/:id` request: an operational-ref patch (RB-2), a
+ * scope-binding patch (SS-3), **or** a `sourceScopeRef` patch (SS-7), distinguished
+ * by which key it carries (`refKind` / `parameterName` / `components`). One PATCH
+ * confirms exactly one binding target.
  */
 export const updateResourceBindingRequestSchema = z.union([
   updateResourceBindingRefRequestSchema,
   updateScopeBindingRequestSchema,
+  updateSourceScopeRefRequestSchema,
 ]);
 export type UpdateResourceBindingRequest = z.infer<typeof updateResourceBindingRequestSchema>;
 

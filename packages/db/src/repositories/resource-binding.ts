@@ -11,6 +11,7 @@ import {
   type ResourceBindingRefPatch,
   type ResourceBindingRefRow,
   type ScopePathBindingPatch,
+  type SourceScopeRefPatch,
 } from "../mappers/resource-binding.js";
 import { RESOURCE_BINDING_REF_KINDS, resourceBinding, resourceBindingRef } from "../schema.js";
 
@@ -142,6 +143,38 @@ export class ResourceBindingRepository {
         .set({ scopePathBindings: nextScopeBindings })
         .where(eq(resourceBinding.id, id));
     }
+    return this.getById(id);
+  }
+
+  /**
+   * Confirm/correct the whole `sourceScopeRef` (SS-7). Unlike the six normalized
+   * refs and the per-parameter scope bindings, `sourceScopeRef` is **one** ref
+   * whose value is the component set, so this replaces the whole `source_scope_ref`
+   * `jsonb` column (component set + its single confirmation, `confirmedAt` as
+   * ISO-8601) — leaving every operational `resource_binding_ref` row and the
+   * `scope_path_bindings` collection untouched. The service validates each
+   * component's `fieldPath` against the response schema before calling this.
+   *
+   * Returns the updated binding, or `undefined` if no binding with `id` exists.
+   */
+  public async updateSourceScopeRef(
+    id: string,
+    patch: SourceScopeRefPatch,
+  ): Promise<ResourceBinding | undefined> {
+    const [row] = await this.db.select().from(resourceBinding).where(eq(resourceBinding.id, id));
+    if (row === undefined) {
+      return undefined;
+    }
+    await this.db
+      .update(resourceBinding)
+      .set({
+        sourceScopeRef: {
+          components: [...patch.components],
+          confirmedBy: patch.confirmedBy,
+          confirmedAt: patch.confirmedAt === null ? null : patch.confirmedAt.toISOString(),
+        },
+      })
+      .where(eq(resourceBinding.id, id));
     return this.getById(id);
   }
 

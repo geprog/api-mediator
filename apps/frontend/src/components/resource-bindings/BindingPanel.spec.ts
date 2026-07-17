@@ -114,6 +114,7 @@ function bindingsFixture(overrides: { collectionConfirmed?: boolean }): Resource
           },
         ],
         scopeBindings: [],
+        sourceScopeRef: null,
       },
     ],
   };
@@ -233,6 +234,7 @@ function scopeFixture(overrides: { confirmed?: boolean }): ResourceBindingsRespo
             confirmedAt: confirmed ? "2026-07-10T00:00:00.000Z" : null,
           },
         ],
+        sourceScopeRef: null,
       },
     ],
   };

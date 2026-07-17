@@ -5,6 +5,7 @@ import type {
   Database,
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
+  SourceScopeRefPatch,
 } from "@mediator/db";
 import {
   ApiSpecRepository,
@@ -78,6 +79,10 @@ export interface BindingTxRepo {
   updateScopePathBinding(
     id: string,
     patch: ScopePathBindingPatch,
+  ): Promise<ResourceBinding | undefined>;
+  updateSourceScopeRef(
+    id: string,
+    patch: SourceScopeRefPatch,
   ): Promise<ResourceBinding | undefined>;
 }
 

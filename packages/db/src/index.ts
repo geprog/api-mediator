@@ -136,6 +136,7 @@ export {
   type RecordLinkRow,
   type ResourceBindingRefPatch,
   type ScopePathBindingPatch,
+  type SourceScopeRefPatch,
   type SyncFieldStateInsert,
   type SyncFieldStateRow,
 } from "./mappers/index.js";

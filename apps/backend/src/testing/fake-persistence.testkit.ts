@@ -6,6 +6,7 @@ import type {
   CredentialMetadata,
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
+  SourceScopeRefPatch,
 } from "@mediator/db";
 import type {
   ApiSpec,
@@ -182,6 +183,27 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
         : entry,
     );
     const updated: ResourceBinding = { ...existing, scopePathBindings: nextScope };
+    this.store.bindings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+
+  public updateSourceScopeRef(
+    id: string,
+    patch: SourceScopeRefPatch,
+  ): Promise<ResourceBinding | undefined> {
+    const existing = this.store.bindings.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    // Mirror ResourceBindingRepository.updateSourceScopeRef exactly: replace the
+    // whole `sourceScopeRef` (SS-7 confirms one ref whose value is the component
+    // set), leaving the operational refs and scope-path bindings untouched.
+    const updated: ResourceBinding = {
+      ...existing,
+      sourceScopeRef: {
+        components: patch.components.map((component) => ({ ...component })),
+        confirmedBy: patch.confirmedBy,
+        confirmedAt: patch.confirmedAt,
+      },
+    };
     this.store.bindings.set(id, updated);
     return Promise.resolve(updated);
   }

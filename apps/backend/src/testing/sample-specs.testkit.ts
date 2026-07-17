@@ -128,6 +128,82 @@ export function scopedProviderSpecDocument(): Record<string, unknown> {
   };
 }
 
+/**
+ * A Gitea-shaped scoped provider whose `issues` **records self-carry their
+ * container**: each `Issue` response carries `repository → RepositoryMeta { owner,
+ * name }`, so `buildIr`'s SS-7 derivation guesses an unconfirmed `sourceScopeRef`
+ * with components `repository.owner` (key `owner`) and `repository.name` (key
+ * `name`). Used by the SS-7 confirm/correct route tests (the `fieldPath`s
+ * `repository.owner`/`repository.name` are real response field paths; `title` is a
+ * top-level field; `does.not.exist` is not).
+ */
+export function scopedSourceProviderSpecDocument(): Record<string, unknown> {
+  const ownerParam = { name: "owner", in: "path", required: true, schema: { type: "string" } };
+  const repoParam = { name: "repo", in: "path", required: true, schema: { type: "string" } };
+  return {
+    openapi: "3.0.0",
+    info: { title: "Sample Scoped Source Provider", version: "1.0.0" },
+    paths: {
+      "/repos/{owner}/{repo}/issues": {
+        get: {
+          operationId: "listIssues",
+          tags: ["issue"],
+          parameters: [ownerParam, repoParam],
+          responses: {
+            "200": {
+              description: "ok",
+              content: {
+                "application/json": {
+                  schema: { type: "array", items: { $ref: "#/components/schemas/Issue" } },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/repos/{owner}/{repo}/issues/{index}": {
+        get: {
+          operationId: "getIssue",
+          tags: ["issue"],
+          parameters: [
+            ownerParam,
+            repoParam,
+            { name: "index", in: "path", required: true, schema: { type: "integer" } },
+          ],
+          responses: {
+            "200": {
+              description: "ok",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: {
+        Issue: {
+          type: "object",
+          properties: {
+            id: { type: "integer" },
+            title: { type: "string" },
+            updated: { type: "string" },
+            repository: { $ref: "#/components/schemas/RepositoryMeta" },
+          },
+          required: ["id"],
+        },
+        RepositoryMeta: {
+          type: "object",
+          properties: {
+            owner: { type: "string" },
+            name: { type: "string" },
+            full_name: { type: "string" },
+          },
+        },
+      },
+    },
+  };
+}
+
 /** A document that is not a recognizable OpenAPI spec — `buildIr` rejects it. */
 export function malformedDocument(): Record<string, unknown> {
   return { not: "an-openapi-document" };

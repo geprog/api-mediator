@@ -148,6 +148,82 @@ export const scopePathBindingSchema = z
   });
 export type ScopePathBinding = z.infer<typeof scopePathBindingSchema>;
 
+// ── sourceScopeRef (record scope capture) ────────────────────────────────────
+
+/**
+ * One **scope component** of a {@link SourceScopeRef} (`docs/glossary.md`
+ * *sourceScopeRef (record scope capture)*): one field of a resource's record
+ * representation that carries part of its **container identity**.
+ *
+ * - `key` — a stable component name (defaulting at derivation to the `fieldPath`'s
+ *   leaf segment, operator-correctable), the key under which the captured value
+ *   appears in the record's **captured scope** (Gitea `{ owner, name }`, Vikunja
+ *   `{ project }`).
+ * - `fieldPath` — an IR field path into the resource's **response** schema
+ *   (`repository.owner`, `project_id`); validated against that schema at confirm.
+ *
+ * Distinct from a `record-derived` `scopePathBindings` entry's `sourceScopeKey`
+ * (SS-8), which *selects* one already-captured component to fill a *target* scope
+ * parameter rather than *defining* the capture.
+ */
+export const scopeComponentSchema = z.object({
+  key: z.string().min(1),
+  fieldPath: z.string().min(1),
+});
+export type ScopeComponent = z.infer<typeof scopeComponentSchema>;
+
+/**
+ * `sourceScopeRef` — the `ResourceBinding` ref naming which field(s) of a
+ * resource's record carry its **container identity**, so the Poller captures each
+ * record's scope from the record it already fetched (`docs/architecture/data-model.md`
+ * `ResourceBinding.sourceScopeRef`; SS-7). A **source-side** property of a
+ * resource that can act as a scoped sync source.
+ *
+ * Modeled as **one confirmable ref whose value is the component set** — a single
+ * `confirmedBy`/`confirmedAt` pair over the whole {@link ScopeComponent} set, not
+ * a per-component confirmation. The confirmed-pair invariant (both null while
+ * unconfirmed, both set together on confirmation — mirroring
+ * {@link confirmableRefSchema}) is enforced by the refinement below, and component
+ * `key`s must be unique (they key the `{ key → value }` captured-scope map, so a
+ * duplicate would collide).
+ *
+ * **Absent** (the top-level ref omitted from the binding) when the resource's
+ * records carry no container field — record-derived scope is then unavailable and
+ * a `constant`/`scope-link` `scopePathBindings` entry is the only option (SS-7.3).
+ * When present it names **at least one** component. Derived-unconfirmed at
+ * ingestion and used nowhere until confirmed (SS-7.4).
+ */
+export const sourceScopeRefSchema = z
+  .object({
+    components: z.array(scopeComponentSchema).min(1),
+    confirmedBy: z.string().nullable(),
+    confirmedAt: z.date().nullable(),
+  })
+  .superRefine((ref, ctx) => {
+    const byIsNull = ref.confirmedBy === null;
+    const atIsNull = ref.confirmedAt === null;
+    if (byIsNull !== atIsNull) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "confirmedBy and confirmedAt must both be null (unconfirmed) or both be set (confirmed)",
+        path: [byIsNull ? "confirmedBy" : "confirmedAt"],
+      });
+    }
+    const seen = new Set<string>();
+    ref.components.forEach((component, index) => {
+      if (seen.has(component.key)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `duplicate scope component key '${component.key}'`,
+          path: ["components", index, "key"],
+        });
+      }
+      seen.add(component.key);
+    });
+  });
+export type SourceScopeRef = z.infer<typeof sourceScopeRefSchema>;
+
 /**
  * One resource's operational bindings. Each ref is independently optional and
  * independently confirmable — confirming one never implies another (RB-2
@@ -172,6 +248,10 @@ export const resourceBindingSchema = z.object({
   deltaCursorRef: confirmableRefSchema.optional(),
   deltaDeletionRef: confirmableRefSchema.optional(),
   changeTimestampRef: confirmableRefSchema.optional(),
+  // The record-scope-capture ref (SS-7): absent when records carry no container
+  // field. Unlike the six `ConfirmableRef`s above, its "value" is a component set
+  // rather than a single IR pointer, so it has its own schema.
+  sourceScopeRef: sourceScopeRefSchema.optional(),
   scopePathBindings: z.array(scopePathBindingSchema).optional(),
 });
 export type ResourceBinding = z.infer<typeof resourceBindingSchema>;

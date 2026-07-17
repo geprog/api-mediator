@@ -1,0 +1,1 @@
+ALTER TABLE "resource_binding" ADD COLUMN "source_scope_ref" jsonb;

@@ -80,12 +80,27 @@ export function toResourceBindingDto(
     confirmedBy: entry.confirmedBy,
     confirmedAt: entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null,
   }));
+  // `sourceScopeRef` (SS-7): null when absent (no container field), else the
+  // component set + its single confirmed/unconfirmed state (SS-9's UI consumes it).
+  const source = binding.sourceScopeRef;
+  const sourceScopeRef =
+    source === undefined
+      ? null
+      : {
+          components: source.components.map((component) => ({
+            key: component.key,
+            fieldPath: component.fieldPath,
+          })),
+          confirmedBy: source.confirmedBy,
+          confirmedAt: source.confirmedAt !== null ? source.confirmedAt.toISOString() : null,
+        };
   return {
     id: binding.id,
     apiSpecId: binding.apiSpecId,
     resourceRef: binding.resourceRef,
     refs,
     scopeBindings,
+    sourceScopeRef,
   };
 }
 
