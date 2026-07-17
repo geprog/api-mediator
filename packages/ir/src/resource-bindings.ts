@@ -10,7 +10,9 @@ import type {
   IrRefTarget,
   IrResourceGroup,
   ResourceBinding,
+  ScopeComponent,
   ScopePathBinding,
+  SourceScopeRef,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 
@@ -146,8 +148,141 @@ function deriveBinding(
     changeTimestampRef,
     deltaCursorRef,
     deltaDeletionRef,
+    sourceScopeRef: deriveSourceScopeRef(group, representationFields),
     scopePathBindings: deriveScopePathBindings(group),
   });
+}
+
+// ── sourceScopeRef derivation (SS-7) ─────────────────────────────────────────
+
+// Field names that, as a top-level record field, plausibly name a **container**
+// the record lives in. Implementation-defined and deliberately conservative (a
+// wrong/missing guess is operator-correctable at confirm): a name outside this set
+// is never guessed as scope, so `assignee`/`user`/`milestone` object refs are not
+// mistaken for containers. Compared case-insensitively.
+const CONTAINER_NOUN_NAMES = [
+  "repository",
+  "repo",
+  "project",
+  "workspace",
+  "tenant",
+  "namespace",
+  "org",
+  "organization",
+  "container",
+  "group",
+  "board",
+  "folder",
+  "space",
+  "parent",
+];
+
+// The sub-fields of a nested container object that identify the container (Gitea
+// `RepositoryMeta` → `owner` + `name`). Curated + conservative: a container's own
+// record-id (`id`) and composite names (`full_name`) are deliberately excluded, so
+// a two-part container yields exactly its two identity parts. Iterated in this
+// order so the derived component order is stable (`owner` then `name`).
+const CONTAINER_IDENTITY_PART_NAMES = ["owner", "name", "namespace", "slug", "identifier", "key"];
+
+/**
+ * Heuristically guess the resource's **`sourceScopeRef`** (SS-7) — the field(s) of
+ * its record that carry its container identity — **unconfirmed**, or `undefined`
+ * (absent) when no container field is detected (SS-7.3). Two conservative signals,
+ * checked in order:
+ *
+ * 1. **A nested container object** — a top-level record field whose *name* is a
+ *    container noun ({@link CONTAINER_NOUN_NAMES}) and whose *type* names an object
+ *    schema exposing owner/name-like identity fields
+ *    ({@link CONTAINER_IDENTITY_PART_NAMES}). Each identity sub-field becomes one
+ *    component with `fieldPath = <field>.<sub>` (Gitea `Issue.repository` →
+ *    `repository.owner` + `repository.name`).
+ * 2. **A `<container>_id` scalar** — a top-level scalar field named
+ *    `<containerNoun>_id` / `<containerNoun>Id` becomes a single component with
+ *    `fieldPath = <field>` (Vikunja `Task.project_id` → one component).
+ *
+ * Each component's `key` defaults to the `fieldPath`'s leaf segment with a trailing
+ * `_id`/`Id` stripped, so a nested part keeps its own name (`owner`) and a
+ * `<container>_id` scalar keys on the container noun (`project` from `project_id`)
+ * — operator-correctable at confirm. Every derived ref is **unconfirmed**
+ * (`confirmedBy`/`confirmedAt` null) and used nowhere until confirmed (SS-7.4); the
+ * heuristic never fabricates a *confirmed* ref.
+ */
+function deriveSourceScopeRef(
+  group: IrResourceGroup,
+  representationFields: readonly IrField[],
+): SourceScopeRef | undefined {
+  const components =
+    nestedContainerComponents(group, representationFields) ??
+    scalarContainerComponents(group, representationFields);
+  if (components === undefined || components.length === 0) {
+    return undefined;
+  }
+  return { components, confirmedBy: null, confirmedAt: null };
+}
+
+/** Signal 1: a nested container object exposing owner/name-like identity fields. */
+function nestedContainerComponents(
+  group: IrResourceGroup,
+  fields: readonly IrField[],
+): ScopeComponent[] | undefined {
+  for (const field of fields) {
+    if (!CONTAINER_NOUN_NAMES.includes(field.name.toLowerCase())) continue;
+    // A container is a single object, not a list; and its type must name a schema
+    // (a scalar/unknown type has no nested identity fields to read).
+    if (field.type.endsWith("[]")) continue;
+    const subFieldNames = schemaFieldNames(group, field.type);
+    if (subFieldNames === undefined) continue;
+    const parts = CONTAINER_IDENTITY_PART_NAMES.filter((name) => subFieldNames.includes(name));
+    if (parts.length === 0) continue;
+    return parts.map((part) => scopeComponent(`${field.name}.${part}`));
+  }
+  return undefined;
+}
+
+/** Signal 2: a `<container>_id` scalar field (single-component container). */
+function scalarContainerComponents(
+  group: IrResourceGroup,
+  fields: readonly IrField[],
+): ScopeComponent[] | undefined {
+  for (const field of fields) {
+    if (idFieldContainerNoun(field.name) === undefined) continue;
+    // A container-id is a scalar, never a nested object ref (that is signal 1).
+    if (schemaFieldNames(group, field.type) !== undefined) continue;
+    return [scopeComponent(field.name)];
+  }
+  return undefined;
+}
+
+/** The top-level field names of a schema the group knows (primary or cross-ref). */
+function schemaFieldNames(group: IrResourceGroup, type: string): string[] | undefined {
+  if (type.endsWith("[]")) return undefined;
+  const named = group.schemas.find((schema) => schema.name === type);
+  if (named !== undefined) return named.fields.map((schemaField) => schemaField.name);
+  const summary = group.crossResourceRefs.find((ref) => ref.name === type);
+  if (summary !== undefined) return summary.fields;
+  return undefined;
+}
+
+/** The container noun of a `<noun>_id`/`<noun>Id` field name, if it is one. */
+function idFieldContainerNoun(name: string): string | undefined {
+  const stripped = stripIdSuffix(name);
+  if (stripped === name) return undefined;
+  const noun = stripped.toLowerCase();
+  return CONTAINER_NOUN_NAMES.includes(noun) ? noun : undefined;
+}
+
+/** A field/leaf name with a trailing id-suffix (`_id`/`_ID`/camel `Id`) removed. */
+function stripIdSuffix(name: string): string {
+  if (name.length > 3 && (name.endsWith("_id") || name.endsWith("_ID"))) return name.slice(0, -3);
+  if (name.length > 2 && /[a-z]Id$/.test(name)) return name.slice(0, -2);
+  return name;
+}
+
+/** A `{ key, fieldPath }` component: `key` = leaf segment with any id-suffix stripped. */
+function scopeComponent(fieldPath: string): ScopeComponent {
+  const leaf = fieldPath.split(".").pop() ?? fieldPath;
+  const stripped = stripIdSuffix(leaf);
+  return { key: stripped.length > 0 ? stripped : leaf, fieldPath };
 }
 
 // ── scopePathBindings derivation (SS-2) ──────────────────────────────────────

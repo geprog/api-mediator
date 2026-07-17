@@ -20,6 +20,7 @@ function parentRow(overrides: Partial<ResourceBindingRow> = {}): ResourceBinding
     apiSpecId: "spec-1",
     resourceRef: "issues",
     scopePathBindings: [],
+    sourceScopeRef: null,
     ...overrides,
   };
 }
@@ -139,6 +140,8 @@ describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
       apiSpecId: "spec-1",
       resourceRef: "issues",
       scopePathBindings: [],
+      // Absent domain `sourceScopeRef` → NULL column (SS-7).
+      sourceScopeRef: null,
     });
 
     const refInserts = toResourceBindingRefInserts(binding);
@@ -190,6 +193,60 @@ describe("toResourceBindingInsert / toResourceBindingRefInserts", () => {
         confirmedAt: confirmedAt.toISOString(),
       },
     ]);
+  });
+
+  it("serializes a confirmed sourceScopeRef into the parent insert, Date confirmedAt as ISO (SS-7)", () => {
+    const insert = toResourceBindingInsert({
+      ...binding,
+      sourceScopeRef: {
+        components: [
+          { key: "owner", fieldPath: "repository.owner" },
+          { key: "name", fieldPath: "repository.name" },
+        ],
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      },
+    });
+    expect(insert.sourceScopeRef).toStrictEqual({
+      components: [
+        { key: "owner", fieldPath: "repository.owner" },
+        { key: "name", fieldPath: "repository.name" },
+      ],
+      confirmedBy: "operator@example.test",
+      confirmedAt: confirmedAt.toISOString(),
+    });
+  });
+
+  it("serializes an absent sourceScopeRef as NULL (SS-7.3)", () => {
+    expect(toResourceBindingInsert(binding).sourceScopeRef).toBeNull();
+  });
+
+  it("round-trips a confirmed sourceScopeRef through the row form (ISO confirmedAt back to a Date)", () => {
+    const insert = toResourceBindingInsert({
+      ...binding,
+      sourceScopeRef: {
+        components: [{ key: "project", fieldPath: "project_id" }],
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      },
+    });
+    // A NULL column maps to absent; a present row maps back with a real Date.
+    const reloaded = mapResourceBinding(
+      parentRow({ sourceScopeRef: insert.sourceScopeRef ?? null }),
+      [],
+    );
+    expect(reloaded.sourceScopeRef).toStrictEqual({
+      components: [{ key: "project", fieldPath: "project_id" }],
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(reloaded.sourceScopeRef?.confirmedAt).toBeInstanceOf(Date);
+  });
+
+  it("maps a NULL source_scope_ref column to an absent domain ref (SS-7.3)", () => {
+    const reloaded = mapResourceBinding(parentRow({ sourceScopeRef: null }), []);
+    expect(reloaded.sourceScopeRef).toBeUndefined();
+    expect("sourceScopeRef" in reloaded).toBe(false);
   });
 });
 

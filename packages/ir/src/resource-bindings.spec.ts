@@ -406,3 +406,59 @@ describe("deriveResourceBindings — deltaDeletionRef (RB-1 crit 6)", () => {
     expect(withoutDelta.deltaDeletionRef).toBeUndefined();
   });
 });
+
+describe("deriveResourceBindings — sourceScopeRef (SS-7)", () => {
+  it("guesses a multi-component sourceScopeRef from a nested container object (Gitea Issue.repository)", () => {
+    const binding = bindingFor(
+      deriveResourceBindings(giteaIr, capabilities(), "spec-gitea"),
+      "issues",
+    );
+
+    // Gitea `Issue` carries `repository → RepositoryMeta { owner, name, full_name, id }`;
+    // owner + name are the container identity (composite `full_name`/`id` excluded).
+    expect(binding.sourceScopeRef?.components).toStrictEqual([
+      { key: "owner", fieldPath: "repository.owner" },
+      { key: "name", fieldPath: "repository.name" },
+    ]);
+    // Unconfirmed — used nowhere until an operator confirms it (SS-7.4).
+    expect(binding.sourceScopeRef?.confirmedBy).toBeNull();
+    expect(binding.sourceScopeRef?.confirmedAt).toBeNull();
+  });
+
+  it("guesses a single-component sourceScopeRef from a <container>_id scalar (Vikunja Task.project_id)", () => {
+    const binding = bindingFor(
+      deriveResourceBindings(vikunjaIr, capabilities(), "spec-vikunja"),
+      "tasks",
+    );
+
+    // Vikunja `Task` carries `project_id` (a scalar); the component keys on the
+    // container noun (`project`), the id-suffix stripped from the leaf segment.
+    expect(binding.sourceScopeRef?.components).toStrictEqual([
+      { key: "project", fieldPath: "project_id" },
+    ]);
+    expect(binding.sourceScopeRef?.confirmedBy).toBeNull();
+    expect(binding.sourceScopeRef?.confirmedAt).toBeNull();
+  });
+
+  it("is absent for a resource whose records carry no container field (SS-7.3)", async () => {
+    // A widget record with only `id` + `title` — no container-noun object field and
+    // no `<container>_id` scalar → record-derived scope is unavailable.
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["page"], fields: ["title"] }));
+    const binding = bindingFor(
+      deriveResourceBindings(ir, capabilities(), "spec-widgets"),
+      "widgets",
+    );
+    expect(binding.sourceScopeRef).toBeUndefined();
+    expect("sourceScopeRef" in binding).toBe(false);
+  });
+
+  it("does not mistake a non-container `<noun>_id` scalar for scope", async () => {
+    // `author_id` is an id field but `author` is not a container noun → no guess.
+    const ir = await buildIr(widgetsSpec({ collectionParams: ["page"], fields: ["author_id"] }));
+    const binding = bindingFor(
+      deriveResourceBindings(ir, capabilities(), "spec-widgets"),
+      "widgets",
+    );
+    expect(binding.sourceScopeRef).toBeUndefined();
+  });
+});

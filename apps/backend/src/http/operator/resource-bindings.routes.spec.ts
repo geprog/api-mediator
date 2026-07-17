@@ -17,6 +17,7 @@ import { buildTestServer, type TestServer } from "../../testing/fake-persistence
 import {
   providerSpecDocument,
   scopedProviderSpecDocument,
+  scopedSourceProviderSpecDocument,
 } from "../../testing/sample-specs.testkit.js";
 
 const CAPS_WITH_TIMESTAMPS = {
@@ -398,5 +399,209 @@ describe("PATCH /api/resource-bindings/:id — scope constant (SS-3)", () => {
       payload: { refKind: "nativeIdRef", parameterName: "owner", value: "alice" },
     });
     expect(response.statusCode).toBe(400);
+  });
+});
+
+/**
+ * Registers the source-scoped provider (its `issues` records self-carry their
+ * container via `repository.owner`/`repository.name`), so the derived `issues`
+ * binding carries an unconfirmed `sourceScopeRef` — the SS-7 confirm/correct
+ * surface.
+ */
+async function registerSourceScopedAndGetBindings(server: TestServer): Promise<{
+  specId: string;
+  bindings: ResourceBindingDto[];
+}> {
+  const registration = await injectAs(server.app, TEST_OPERATOR, {
+    method: "POST",
+    url: "/api/apps",
+    payload: {
+      name: "Gitea",
+      baseUrl: "https://gitea.example",
+      capabilities: CAPS_WITH_TIMESTAMPS,
+      specs: [{ role: "PROVIDER", document: scopedSourceProviderSpecDocument() }],
+    },
+  });
+  const specId = registration.json<RegisterAppResponse>().specs[0]?.id ?? "";
+  const bindingsResponse = await injectAs(server.app, TEST_OPERATOR, {
+    method: "GET",
+    url: `/api/specs/${specId}/resource-bindings`,
+  });
+  return { specId, bindings: bindingsResponse.json<ResourceBindingsResponse>().bindings };
+}
+
+describe("PATCH /api/resource-bindings/:id — sourceScopeRef (SS-7)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  it("GET reports the derived sourceScopeRef state — components + unconfirmed (SS-7.1)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+    const issues = issuesBinding(bindings);
+
+    expect(issues.sourceScopeRef).not.toBeNull();
+    expect(issues.sourceScopeRef?.components).toStrictEqual([
+      { key: "owner", fieldPath: "repository.owner" },
+      { key: "name", fieldPath: "repository.name" },
+    ]);
+    expect(issues.sourceScopeRef?.confirmedBy).toBeNull();
+    expect(issues.sourceScopeRef?.confirmedAt).toBeNull();
+  });
+
+  it("reports sourceScopeRef = null for a resource with no container field (SS-7.3)", async () => {
+    server = buildTestServer();
+    // The plain provider's `issues` records carry no container field.
+    const { bindings } = await registerAndGetBindings(server);
+    const issues = bindings.find((binding) => binding.resourceRef === "issues");
+    expect(issues?.sourceScopeRef).toBeNull();
+  });
+
+  it("confirms/corrects sourceScopeRef: sets the component set + stamps confirmation (SS-7.2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    // Correct: rename `name`'s component key to `slug`, keep both field paths.
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        components: [
+          { key: "owner", fieldPath: "repository.owner" },
+          { key: "slug", fieldPath: "repository.name" },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const updated = response.json<UpdateResourceBindingResponse>();
+    expect(updated.sourceScopeRef?.components).toStrictEqual([
+      { key: "owner", fieldPath: "repository.owner" },
+      { key: "slug", fieldPath: "repository.name" },
+    ]);
+    expect(updated.sourceScopeRef?.confirmedBy).toBe("operator");
+    expect(updated.sourceScopeRef?.confirmedAt).not.toBeNull();
+  });
+
+  it("attributes confirmedBy to the authenticated operator identity (OA-3)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR_ALICE, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { components: [{ key: "owner", fieldPath: "repository.owner" }] },
+    });
+    expect(response.json<UpdateResourceBindingResponse>().sourceScopeRef?.confirmedBy).toBe(
+      "alice",
+    );
+  });
+
+  it("rejects a component fieldPath that is not in the response schema (SS-7.2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        components: [
+          { key: "owner", fieldPath: "repository.owner" },
+          { key: "ghost", fieldPath: "repository.does_not_exist" },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects an empty component set (absent, not confirmed-empty — SS-7.3)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { components: [] },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects duplicate component keys", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: {
+        components: [
+          { key: "owner", fieldPath: "repository.owner" },
+          { key: "owner", fieldPath: "repository.name" },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("forbids a viewer from confirming sourceScopeRef (OA-2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_VIEWER, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { components: [{ key: "owner", fieldPath: "repository.owner" }] },
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("leaves operational refs and scope bindings untouched (no RB-2 / SS-3 regression)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { components: [{ key: "owner", fieldPath: "repository.owner" }] },
+    });
+
+    const updated = response.json<UpdateResourceBindingResponse>();
+    // A sourceScopeRef confirm touches no operational ref…
+    expect(updated.refs.find((ref) => ref.kind === "nativeIdRef")?.confirmedBy).toBeNull();
+    // …and no scope path-parameter binding (owner/repo stay unconfirmed constants).
+    for (const scope of updated.scopeBindings) {
+      expect(scope.confirmedBy).toBeNull();
+      expect(scope.value).toBe("");
+    }
+  });
+
+  it("still accepts a ref patch and a scope patch after adding the sourceScopeRef branch", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerSourceScopedAndGetBindings(server);
+    const id = bindingId(bindings);
+
+    // RB-2 ref patch still works.
+    const refResp = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${id}`,
+      payload: { refKind: "nativeIdRef" },
+    });
+    expect(refResp.statusCode).toBe(200);
+    expect(
+      refResp.json<UpdateResourceBindingResponse>().refs.find((r) => r.kind === "nativeIdRef")
+        ?.confirmedBy,
+    ).toBe("operator");
+
+    // SS-3 scope patch still works.
+    const scopeResp = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${id}`,
+      payload: { parameterName: "owner", value: "alice" },
+    });
+    expect(scopeResp.statusCode).toBe(200);
+    expect(scopeEntry(scopeResp.json<UpdateResourceBindingResponse>(), "owner").value).toBe(
+      "alice",
+    );
   });
 });

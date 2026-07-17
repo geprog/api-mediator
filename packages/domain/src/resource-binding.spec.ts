@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { type ResourceBinding, resourceBindingSchema, scopePathBindingSchema } from "./index.js";
+import {
+  type ResourceBinding,
+  resourceBindingSchema,
+  scopePathBindingSchema,
+  sourceScopeRefSchema,
+} from "./index.js";
 
 /** A derived, still-unconfirmed binding for the Gitea `issues` resource. */
 function derivedIssuesBinding(): ResourceBinding {
@@ -195,5 +200,101 @@ describe("scopePathBindingSchema — constant kind (SS-1 crit 2-4)", () => {
       confirmedAt: null,
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("sourceScopeRef schema (SS-7)", () => {
+  it("round-trips a confirmed multi-component ref (Gitea owner + name)", () => {
+    const confirmedAt = new Date("2026-07-16T09:30:00.000Z");
+    const parsed = sourceScopeRefSchema.parse({
+      components: [
+        { key: "owner", fieldPath: "repository.owner" },
+        { key: "name", fieldPath: "repository.name" },
+      ],
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(parsed.components).toStrictEqual([
+      { key: "owner", fieldPath: "repository.owner" },
+      { key: "name", fieldPath: "repository.name" },
+    ]);
+    expect(parsed.confirmedBy).toBe("operator@example.test");
+    expect(parsed.confirmedAt).toStrictEqual(confirmedAt);
+  });
+
+  it("accepts a derived unconfirmed ref (single component, both null)", () => {
+    const parsed = sourceScopeRefSchema.parse({
+      components: [{ key: "project", fieldPath: "project_id" }],
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(parsed.confirmedBy).toBeNull();
+    expect(parsed.confirmedAt).toBeNull();
+  });
+
+  it("carries as an absent (optional) ref on a binding — absence is not undefined", () => {
+    const binding: ResourceBinding = resourceBindingSchema.parse({
+      id: "rb-1",
+      apiSpecId: "spec-1",
+      resourceRef: "tasks",
+    });
+    expect(binding.sourceScopeRef).toBeUndefined();
+    expect("sourceScopeRef" in binding).toBe(false);
+  });
+
+  it("enforces the confirmed-pair invariant: rejects confirmedBy set while confirmedAt null", () => {
+    const result = sourceScopeRefSchema.safeParse({
+      components: [{ key: "project", fieldPath: "project_id" }],
+      confirmedBy: "operator@example.test",
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("enforces the confirmed-pair invariant: rejects confirmedAt set while confirmedBy null", () => {
+    const result = sourceScopeRefSchema.safeParse({
+      components: [{ key: "project", fieldPath: "project_id" }],
+      confirmedBy: null,
+      confirmedAt: new Date("2026-07-16T09:30:00.000Z"),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an empty component set (an absent ref is not a confirmed-empty one)", () => {
+    const result = sourceScopeRefSchema.safeParse({
+      components: [],
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects duplicate component keys (they key the captured-scope map)", () => {
+    const result = sourceScopeRefSchema.safeParse({
+      components: [
+        { key: "owner", fieldPath: "repository.owner" },
+        { key: "owner", fieldPath: "repository.name" },
+      ],
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an empty key or empty fieldPath", () => {
+    expect(
+      sourceScopeRefSchema.safeParse({
+        components: [{ key: "", fieldPath: "repository.owner" }],
+        confirmedBy: null,
+        confirmedAt: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      sourceScopeRefSchema.safeParse({
+        components: [{ key: "owner", fieldPath: "" }],
+        confirmedBy: null,
+        confirmedAt: null,
+      }).success,
+    ).toBe(false);
   });
 });

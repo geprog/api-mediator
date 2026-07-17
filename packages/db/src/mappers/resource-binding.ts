@@ -2,7 +2,9 @@ import {
   type ConfirmableRef,
   type IrRefTarget,
   type ResourceBinding,
+  type ScopeComponent,
   type ScopePathBinding,
+  type SourceScopeRef,
   stripUndefined,
 } from "@mediator/domain";
 
@@ -10,6 +12,7 @@ import {
   RESOURCE_BINDING_REF_KINDS,
   type ResourceBindingRefKind,
   type ScopePathBindingRow,
+  type SourceScopeRefRow,
   resourceBinding,
   resourceBindingRef,
 } from "../schema.js";
@@ -56,6 +59,22 @@ export interface ScopePathBindingPatch {
 }
 
 /**
+ * Confirm/correct the whole `sourceScopeRef` for
+ * {@link ResourceBindingRepository.updateSourceScopeRef} (SS-7). Unlike the six
+ * refs and the per-parameter scope bindings, `sourceScopeRef` is **one** ref whose
+ * value is the component set, so this replaces the whole `source_scope_ref`
+ * `jsonb` column (the operator supplies/adjusts the full component set — add /
+ * remove / rename components, set each `fieldPath`) and stamps its single
+ * confirmation. `components` must be validated (each `fieldPath` a real response
+ * field path) by the service before it reaches here.
+ */
+export interface SourceScopeRefPatch {
+  readonly components: readonly ScopeComponent[];
+  readonly confirmedBy: string | null;
+  readonly confirmedAt: Date | null;
+}
+
+/**
  * Parent row + its child ref rows → domain `ResourceBinding`. A ref with no
  * child row is an **absent** key ({@link stripUndefined}), distinct from a
  * present-unconfirmed ref (a row with NULL `confirmed_*`). `confirmed_at` comes
@@ -85,6 +104,12 @@ export function mapResourceBinding(
     changeTimestampRef: refs.changeTimestampRef,
     // Always present (the column is NOT NULL, empty for a param-free resource).
     scopePathBindings: bindingRow.scopePathBindings.map(fromScopePathBindingRow),
+    // A NULL column is the **absent** ref key ({@link stripUndefined}); a present
+    // row round-trips its ISO `confirmedAt` back to a `Date`.
+    sourceScopeRef:
+      bindingRow.sourceScopeRef === null
+        ? undefined
+        : fromSourceScopeRefRow(bindingRow.sourceScopeRef),
   });
 }
 
@@ -95,6 +120,31 @@ export function toResourceBindingInsert(binding: ResourceBinding): ResourceBindi
     apiSpecId: binding.apiSpecId,
     resourceRef: binding.resourceRef,
     scopePathBindings: (binding.scopePathBindings ?? []).map(toScopePathBindingRow),
+    // Absent domain ref → NULL column; present → its `jsonb` row form.
+    sourceScopeRef:
+      binding.sourceScopeRef === undefined ? null : toSourceScopeRefRow(binding.sourceScopeRef),
+  };
+}
+
+/**
+ * Domain `SourceScopeRef` → its `jsonb` row form (SS-7). `confirmedAt` is the only
+ * field `jsonb` cannot hold (a `Date`), so it becomes an ISO-8601 string (or
+ * `null`); `components` and `confirmedBy` are already JSON-safe.
+ */
+function toSourceScopeRefRow(ref: SourceScopeRef): SourceScopeRefRow {
+  return {
+    components: ref.components,
+    confirmedBy: ref.confirmedBy,
+    confirmedAt: ref.confirmedAt === null ? null : ref.confirmedAt.toISOString(),
+  };
+}
+
+/** A `jsonb` row → domain `SourceScopeRef`: the ISO `confirmedAt` back to a `Date`. */
+function fromSourceScopeRefRow(row: SourceScopeRefRow): SourceScopeRef {
+  return {
+    components: row.components,
+    confirmedBy: row.confirmedBy,
+    confirmedAt: row.confirmedAt === null ? null : new Date(row.confirmedAt),
   };
 }
 

@@ -19,6 +19,11 @@ export type { TransformErrorKind } from "./errors.js";
 export { readPath, setPath, pathSegments } from "./json.js";
 export type { JsonValue, JsonPrimitive, JsonRecord, PathRead } from "./json.js";
 
+// Captured-scope extraction (SS-7): read a source record's scope via its
+// resource's `sourceScopeRef`. The tested helper only — SS-8 wires it in.
+export { extractCapturedScope } from "./captured-scope.js";
+export type { CapturedScope } from "./captured-scope.js";
+
 // The executor: apply field mappings, and account for the fields they touch.
 export { applyFieldMapping, applyFieldMappings, collectTouchedFields } from "./executor.js";
 export type {

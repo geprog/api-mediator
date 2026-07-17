@@ -54,6 +54,7 @@ import type {
   RegisteredAppStatus,
   ResourceBinding,
   ScopePathBinding,
+  SourceScopeRef,
   ReviewState,
   ShortlistResult,
   SyncFieldStateSide,
@@ -148,6 +149,21 @@ export type ScopePathBindingRow = ScopePathBinding extends infer Binding
     ? { [K in keyof Binding]: [Binding[K]] extends [Date | null] ? string | null : Binding[K] }
     : never
   : never;
+
+/**
+ * The `jsonb`-persisted form of a `SourceScopeRef` (`source_scope_ref` column,
+ * SS-7). Like {@link ScopePathBindingRow}, the only field `jsonb` cannot hold is
+ * the `Date` `confirmedAt`, stored as an ISO-8601 **string** (or `null`) and
+ * converted back to a `Date` by the resource-binding mapper; `components`
+ * (`{ key, fieldPath }[]`) and `confirmedBy` are JSON-safe. Pinned to the domain
+ * `SourceScopeRef` so a domain rename breaks the build here. The whole column is
+ * **nullable**: a NULL column is the domain **absent** `sourceScopeRef` key.
+ */
+export type SourceScopeRefRow = {
+  [K in keyof SourceScopeRef]: [SourceScopeRef[K]] extends [Date | null]
+    ? string | null
+    : SourceScopeRef[K];
+};
 
 // ── Phase-2 mapping enums (pinned to @mediator/domain unions) ─────────────────
 
@@ -423,6 +439,9 @@ export const apiSpec = pgTable(
  * is an open-ended per-parameter set of a discriminated union (SS-1/SS-2), not
  * the fixed six ref kinds — the same `jsonb` treatment as the refs' `value`.
  * `NOT NULL DEFAULT '[]'` so existing rows migrate to an empty collection.
+ * `source_scope_ref` (SS-7) is a nullable `jsonb` for the same open-ended reason
+ * (a component set); NULL is the domain **absent** ref, so existing rows migrate
+ * to NULL.
  */
 export const resourceBinding = pgTable(
   "resource_binding",
@@ -436,6 +455,12 @@ export const resourceBinding = pgTable(
       .$type<ScopePathBindingRow[]>()
       .notNull()
       .default([]),
+    // `sourceScopeRef` (SS-7): a whole confirmable ref whose value is the scope
+    // component set. `jsonb` (like `scope_path_bindings`) because it is an
+    // open-ended component list, not one of the six normalized ref kinds.
+    // NULLABLE (no default) — a NULL column is the domain **absent** ref (records
+    // carry no container field); existing rows migrate to NULL.
+    sourceScopeRef: jsonb("source_scope_ref").$type<SourceScopeRefRow>(),
   },
   (table) => [index("resource_binding_api_spec_id_idx").on(table.apiSpecId)],
 );

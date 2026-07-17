@@ -3,12 +3,14 @@ import type {
   UpdateResourceBindingRefRequest,
   UpdateResourceBindingRequest,
   UpdateScopeBindingRequest,
+  UpdateSourceScopeRefRequest,
 } from "@mediator/contracts";
 import type { ResourceBindingRefPatch } from "@mediator/db";
 import {
   assertNever,
   type ApiSpec,
   type AppCapabilities,
+  type IrField,
   type IrRefTarget,
   type IrResourceGroup,
   type ResourceBinding,
@@ -67,16 +69,18 @@ export interface ResourceBindingServiceDeps {
 
 /**
  * Confirm or correct a single `ResourceBinding` binding. The PATCH request is a
- * discriminated union of two per-target patch shapes, each confirmed **in
+ * discriminated union of three per-target patch shapes, each confirmed **in
  * isolation** — confirming one never touches another:
  *
  * - an **operational-ref** patch (`refKind`) — one of the six refs (RB-2, crit 3);
  * - a **scope-binding** patch (`parameterName`) — one scope path-parameter
- *   `constant` (SS-3, crit 2).
+ *   `constant` (SS-3, crit 2);
+ * - a **`sourceScopeRef`** patch (`components`) — the whole record-scope-capture
+ *   ref, confirmed as one (SS-7, crit 2).
  *
  * Runs inside one transaction so the read (binding → spec → app), validation, and
- * write are atomic. `app.capabilities` is loaded for both shapes: the ref path
- * needs it for the applicability check, and both return it in {@link ConfirmResult}
+ * write are atomic. `app.capabilities` is loaded for every shape: the ref path
+ * needs it for the applicability check, and all return it in {@link ConfirmResult}
  * for the DTO.
  */
 export class ResourceBindingService implements BindingConfirmer {
@@ -105,19 +109,22 @@ export class ResourceBindingService implements BindingConfirmer {
         throw new NotFoundError(`RegisteredApp ${spec.appId} not found.`);
       }
 
-      // `parameterName` addresses a scope binding (SS-3); `refKind` an operational
-      // ref (RB-2). The two patch shapes are mutually exclusive by construction.
+      // The three patch shapes are mutually exclusive by construction:
+      // `parameterName` addresses a scope binding (SS-3), `components` the whole
+      // `sourceScopeRef` (SS-7), and `refKind` an operational ref (RB-2).
       const updated =
         "parameterName" in request
           ? await this.#confirmScopeBinding(stores, binding, request, operatorIdentity)
-          : await this.#confirmRef(
-              stores,
-              binding,
-              spec,
-              app.capabilities,
-              request,
-              operatorIdentity,
-            );
+          : "components" in request
+            ? await this.#confirmSourceScopeRef(stores, binding, spec, request, operatorIdentity)
+            : await this.#confirmRef(
+                stores,
+                binding,
+                spec,
+                app.capabilities,
+                request,
+                operatorIdentity,
+              );
 
       return { binding: updated, capabilities: app.capabilities };
     });
@@ -223,6 +230,72 @@ export class ResourceBindingService implements BindingConfirmer {
     }
     return updated;
   }
+
+  /**
+   * Confirm/correct the whole `sourceScopeRef` (SS-7). The operator supplies the
+   * full component set (add / remove / rename components, set each `fieldPath`) and
+   * it is stamped `confirmedBy`/`confirmedAt` in one action (crit 2). Validations:
+   *
+   * - **crit 3 (absent, not confirmed-empty)** — an empty component set is
+   *   rejected: an absent `sourceScopeRef` is modeled by the ref not existing, so a
+   *   *confirmed* one must name at least one component.
+   * - **crit 2 (real field path)** — each component's `fieldPath` must resolve
+   *   against the resource's **response** schema ({@link responseFieldPathExists}),
+   *   as RB-2 validates a ref target; an absent path is rejected. Duplicate
+   *   component keys are rejected (they key the captured-scope map).
+   *
+   * The repository replaces the whole `source_scope_ref` column, so the operational
+   * refs and the scope-path bindings are untouched.
+   */
+  async #confirmSourceScopeRef(
+    stores: TxStores,
+    binding: ResourceBinding,
+    spec: ApiSpec,
+    request: UpdateSourceScopeRefRequest,
+    operatorIdentity: string,
+  ): Promise<ResourceBinding> {
+    // SS-7 crit 3: an empty set is an absent ref, not a confirmable one.
+    if (request.components.length === 0) {
+      throw new BadRequestError("A sourceScopeRef must name at least one scope component.", [
+        { path: "components", message: "supply at least one { key, fieldPath } component" },
+      ]);
+    }
+
+    // Component keys are the captured-scope map keys — they must be unique.
+    const keys = new Set<string>();
+    for (const component of request.components) {
+      if (keys.has(component.key)) {
+        throw new BadRequestError(`Duplicate scope component key '${component.key}'.`, [
+          { path: "components", message: `duplicate component key '${component.key}'` },
+        ]);
+      }
+      keys.add(component.key);
+    }
+
+    // SS-7 crit 2: every fieldPath must be a real path into the response schema.
+    const group = spec.parsedIR.find((candidate) => candidate.resourceRef === binding.resourceRef);
+    for (const component of request.components) {
+      if (group === undefined || !responseFieldPathExists(group, component.fieldPath)) {
+        throw new BadRequestError(
+          `Scope component fieldPath '${component.fieldPath}' is not a field path of this resource's response schema.`,
+          [{ path: "components", message: "fieldPath not found in the resource response schema" }],
+        );
+      }
+    }
+
+    const updated = await stores.resourceBindings.updateSourceScopeRef(binding.id, {
+      components: request.components.map((component) => ({
+        key: component.key,
+        fieldPath: component.fieldPath,
+      })),
+      confirmedBy: operatorIdentity,
+      confirmedAt: new Date(),
+    });
+    if (updated === undefined) {
+      throw new NotFoundError(`ResourceBinding ${binding.id} not found.`);
+    }
+    return updated;
+  }
 }
 
 /**
@@ -259,4 +332,71 @@ function collectGroupFieldNames(group: IrResourceGroup): Set<string> {
     for (const field of operation.responseSchema?.fields ?? []) names.add(field.name);
   }
   return names;
+}
+
+/**
+ * Whether `fieldPath` is a real field path into the resource's **response** schema
+ * (SS-7 crit 2) — a `sourceScopeRef` component's `fieldPath` reads a source record's
+ * scope, so it must resolve against what the resource returns. A dotted path
+ * (`repository.owner`) descends through the response representation's typed fields:
+ * each non-leaf segment must name a field whose type resolves to a schema the group
+ * knows, and the leaf must be a field of the schema reached. A flat path
+ * (`project_id`) need only be a top-level response field. Field detail beyond a
+ * cross-resource summary is unavailable (the IR flattens top-level only), so a path
+ * that would need to descend *past* a summary-only schema resolves to false —
+ * conservative, and operator-correctable.
+ */
+function responseFieldPathExists(group: IrResourceGroup, fieldPath: string): boolean {
+  const segments = fieldPath.split(".").filter((segment) => segment.length > 0);
+  if (segments.length === 0) return false;
+
+  let currentFields: readonly IrField[] | undefined = responseRepresentationFields(group);
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment === undefined || currentFields === undefined) return false;
+    const field = currentFields.find((candidate) => candidate.name === segment);
+    if (field === undefined) return false;
+    if (i === segments.length - 1) return true;
+    // A non-leaf segment must descend into a named object schema.
+    currentFields = groupSchemaFields(group, field.type);
+  }
+  return false;
+}
+
+/** The response representation's top-level fields (union across response schemas). */
+function responseRepresentationFields(group: IrResourceGroup): IrField[] {
+  const byName = new Map<string, IrField>();
+  for (const operation of group.operations) {
+    for (const field of operation.responseSchema?.fields ?? []) {
+      if (!byName.has(field.name)) byName.set(field.name, field);
+    }
+  }
+  // Fall back to the group's primary schemas when no operation declares a response
+  // body (defensive — the scenario resources always carry a read response).
+  if (byName.size === 0) {
+    for (const schema of group.schemas) {
+      for (const field of schema.fields) if (!byName.has(field.name)) byName.set(field.name, field);
+    }
+  }
+  return [...byName.values()];
+}
+
+/**
+ * The typed fields of a schema the group knows by name (a primary schema, which
+ * carries field types), else `undefined` — a cross-resource **summary** carries no
+ * types, so a path cannot descend through it (only its top-level names are known,
+ * which suffices for a *leaf*, handled by {@link responseFieldPathExists}). A leaf
+ * whose parent is a summary schema is validated against the summary's names.
+ */
+function groupSchemaFields(group: IrResourceGroup, type: string): IrField[] | undefined {
+  if (type.endsWith("[]")) return undefined;
+  const named = group.schemas.find((schema) => schema.name === type);
+  if (named !== undefined) return named.fields;
+  const summary = group.crossResourceRefs.find((ref) => ref.name === type);
+  if (summary !== undefined) {
+    // Summaries carry only names; synthesize name-only fields so a leaf resolves,
+    // while a further descent (needing types) falls through to `undefined`.
+    return summary.fields.map((name) => ({ name, type: "unknown", required: false }));
+  }
+  return undefined;
 }
