@@ -138,9 +138,17 @@ export interface ScopeDiscoveryReadinessDeps {
 
 /**
  * The repo-backed {@link ScopeDiscoveryReadiness}: a pair needs discovery when its
- * `ScopeCorrespondence` is **confirmed** and no **active** `ScopeLink` exists under it yet
- * (no pass has successfully established one). An archived-only correspondence still counts
- * as "no active links".
+ * `ScopeCorrespondence` is **confirmed** and it has **no `ScopeLink`s at all** under it
+ * yet (active *or* archived).
+ *
+ * Excluding **archived** links is the coupling with MF-1 (SS-11.6): an archived link is an
+ * **operator override** (the operator severed it), so a pair whose links are all archived
+ * must NOT be re-triggered — otherwise the sweep would fight the operator, re-parking /
+ * re-enumerating a container they took manual control of. A pair with **active** links has
+ * converged. Only a pair with **zero** links is a genuinely lost / never-run pass and
+ * re-triggers — including a both-enumerable pair that completed but established zero links
+ * (a duplicate target identity value), whose repeated ambiguous parks are now deduped
+ * (MF-2 fix #1), so the re-enumeration no longer thrashes the audit log.
  */
 export class RepoScopeDiscoveryReadiness implements ScopeDiscoveryReadiness {
   readonly #deps: ScopeDiscoveryReadinessDeps;
@@ -159,7 +167,7 @@ export class RepoScopeDiscoveryReadiness implements ScopeDiscoveryReadiness {
       return false;
     }
     const links = await this.#deps.links.listByCorrespondence(correspondence.id);
-    return !links.some((link) => link.status === "active");
+    return links.length === 0;
   }
 }
 

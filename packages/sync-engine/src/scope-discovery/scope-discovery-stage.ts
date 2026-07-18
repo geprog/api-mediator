@@ -17,6 +17,7 @@ import { formatAmbiguousContainerDetails } from "./details.js";
 import type {
   AmbiguousContainerMatch,
   CapturedSourceScope,
+  ContainerParkReader,
   ContainerResolutionOutcome,
   DiscoveryPassResult,
   ScopeContainerCandidate,
@@ -53,6 +54,13 @@ export interface ScopeDiscoveryStageDeps {
   readonly links: ScopeLinkStore;
   /** The `SyncEvent`/`AuditLog` append port — discovery executions are ordinary events (SS-11.8). */
   readonly events: SyncEventRecorder;
+  /**
+   * Dedups a container park across sweeps (SS-11.7): reuse an existing open park's event
+   * id instead of minting a new `failure` event every pass. Optional — defaults to a no-op
+   * that always mints (single-pass engine tests keep parking as before); the backend wires
+   * the real audit-backed reader.
+   */
+  readonly parkReader?: ContainerParkReader;
 }
 
 export interface ScopeDiscoveryStageOptions {
@@ -93,6 +101,7 @@ const DEFAULT_ACTOR = "system";
 export class ScopeDiscoveryStage {
   readonly #links: ScopeLinkStore;
   readonly #events: SyncEventRecorder;
+  readonly #parkReader: ContainerParkReader;
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => StageTraceContext | null;
@@ -101,6 +110,7 @@ export class ScopeDiscoveryStage {
   public constructor(deps: ScopeDiscoveryStageDeps, options: ScopeDiscoveryStageOptions = {}) {
     this.#links = deps.links;
     this.#events = deps.events;
+    this.#parkReader = deps.parkReader ?? NO_DEDUP_PARK_READER;
     this.#clock = options.clock ?? ((): Date => new Date());
     this.#newId = options.newId ?? ((): string => randomUUID());
     this.#readTraceContext = options.readTraceContext ?? ((): null => null);
@@ -148,6 +158,7 @@ export class ScopeDiscoveryStage {
     const ambiguous: AmbiguousContainerMatch[] = [];
     const conflicts: ScopeLink[] = [];
     const unresolved: ScopeKey[] = [];
+    const overridden: ScopeKey[] = [];
     let alreadyLinked = 0;
 
     for (const source of params.sourceCandidates) {
@@ -157,6 +168,14 @@ export class ScopeDiscoveryStage {
       });
       if (existing !== undefined) {
         alreadyLinked += 1;
+        continue;
+      }
+      // SS-11.6 operator override: the operator severed (archived) this container's link,
+      // so automatic identity-match discovery must NOT auto-re-link it (a manual re-link
+      // reactivates it). Skip it entirely — no establish, no park (the proactive sweep
+      // does not re-park an operator-controlled container; a real record parks on-demand).
+      if (await this.#isOverridden(correspondence.resourcePairRef, source)) {
+        overridden.push(source.scopeKey);
         continue;
       }
 
@@ -169,7 +188,7 @@ export class ScopeDiscoveryStage {
       }
       if (matches.length > 1) {
         // RL-4, one level up: an ambiguous container match is NEVER auto-linked.
-        const match = await this.#parkAmbiguous(correspondence, source, matches);
+        const match = await this.#parkContainer(correspondence, source, matches);
         ambiguous.push(match);
         continue;
       }
@@ -191,11 +210,13 @@ export class ScopeDiscoveryStage {
         alreadyLinked += 1;
       } else {
         conflicts.push(outcome.existing);
-        await this.#recordConflict(correspondence, source, outcome.existing);
+        // A conflict (the target is already linked to a different source) parks the source
+        // container for manual attention — deduped like an ambiguous park.
+        await this.#parkContainer(correspondence, source, []);
       }
     }
 
-    return { established, alreadyLinked, ambiguous, conflicts, unresolved };
+    return { established, alreadyLinked, ambiguous, conflicts, unresolved, overridden };
   }
 
   /**
@@ -216,17 +237,23 @@ export class ScopeDiscoveryStage {
     if (existing !== undefined) {
       return { kind: "resolved", link: existing, establishedNow: false };
     }
+    // SS-11.6 operator override: never auto-re-link a container the operator severed. A
+    // record for it still can't route, so it parks (deduped) — never a guessed container.
+    if (await this.#isOverridden(correspondence.resourcePairRef, source)) {
+      await this.#parkContainer(correspondence, source, []);
+      return { kind: "unresolvable" };
+    }
 
     const matches = params.targetCandidates.filter(
       (candidate) => candidate.identitySignature === source.identitySignature,
     );
     if (matches.length === 0) {
       // Parked as unresolvable — recorded, surfaced, never a guessed container (SS-11.5).
-      await this.#parkAmbiguous(correspondence, source, []);
+      await this.#parkContainer(correspondence, source, []);
       return { kind: "unresolvable" };
     }
     if (matches.length > 1) {
-      const match = await this.#parkAmbiguous(correspondence, source, matches);
+      const match = await this.#parkContainer(correspondence, source, matches);
       return {
         kind: "ambiguous",
         candidateNativeIds: match.candidateNativeIds,
@@ -248,7 +275,7 @@ export class ScopeDiscoveryStage {
     if (outcome.kind === "conflict") {
       // A conflicting link (the target is already linked to a different source) is not a
       // guess we make — park and refuse (SS-11.5).
-      await this.#recordConflict(correspondence, source, outcome.existing);
+      await this.#parkContainer(correspondence, source, []);
       return { kind: "unresolvable" };
     }
     // outcome is `created` | `exists` here (the conflict branch returned above); both
@@ -295,16 +322,44 @@ export class ScopeDiscoveryStage {
   }
 
   /**
-   * Record an ambiguous / unresolvable container match as a `failure` `SyncEvent` (SS-11.2/
-   * 11.5) — the container analog of RL-4. `candidates` empty encodes an unresolvable
-   * (no-match) park; >1 encodes an ambiguous one. Zero link, zero write side effects.
+   * Whether a source container is an **operator override** (SS-11.6): an **archived**
+   * `ScopeLink` covers it (the operator severed its link). Automatic identity-match
+   * discovery must not auto-re-link it — only a manual re-link reactivates it.
    */
-  async #parkAmbiguous(
+  async #isOverridden(
+    resourcePairRef: string,
+    source: { readonly appId: string; readonly scopeKey: ScopeKey },
+  ): Promise<boolean> {
+    const archived = await this.#links.findArchivedByScopeKey(resourcePairRef, {
+      appId: source.appId,
+      scopeKey: source.scopeKey,
+    });
+    return archived !== undefined;
+  }
+
+  /**
+   * Park an ambiguous / unresolvable / conflicting container as a `failure` `SyncEvent`
+   * (SS-11.2/11.5) — the container analog of RL-4. `candidates` empty encodes an
+   * unresolvable (no-match / conflict) park; >1 encodes an ambiguous one. **Deduped across
+   * sweeps** (SS-11.7): if an **open** park for this `(pair, source scope key)` already
+   * exists, its event id is reused and **no new event is minted** — so a still-unresolved
+   * container accumulates ONE open park entry, not N per sweep (bounded audit growth).
+   * Zero link, zero write side effects.
+   */
+  async #parkContainer(
     correspondence: ScopeCorrespondence,
     source: { readonly appId: string; readonly scopeKey: ScopeKey },
     candidates: readonly ScopeContainerCandidate[],
   ): Promise<AmbiguousContainerMatch> {
     const candidateNativeIds = candidates.map((candidate) => candidate.nativeId ?? "");
+    const existing = await this.#parkReader.findOpenContainerPark(
+      correspondence.resourcePairRef,
+      source.scopeKey,
+    );
+    if (existing !== undefined) {
+      // Dedup: reuse the already-open park entry; mint no new `failure` event.
+      return { sourceScopeKey: source.scopeKey, candidateNativeIds, syncEventId: existing };
+    }
     const syncEventId = this.#newId();
     await this.#events.record(
       this.#buildEvent({
@@ -320,21 +375,6 @@ export class ScopeDiscoveryStage {
       }),
     );
     return { sourceScopeKey: source.scopeKey, candidateNativeIds, syncEventId };
-  }
-
-  /** Record an establish `conflict` (a container already linked to a *different* counterpart). */
-  async #recordConflict(
-    correspondence: ScopeCorrespondence,
-    source: { readonly appId: string },
-    existing: ScopeLink,
-  ): Promise<void> {
-    await this.#events.record(
-      this.#buildEvent({
-        status: "failure",
-        originAppId: source.appId,
-        details: `scope link conflict for pair ${correspondence.resourcePairRef}: a container is already linked to a different counterpart (existing link ${existing.id})`,
-      }),
-    );
   }
 
   #buildEvent(fields: {
@@ -365,3 +405,8 @@ function requireFirst(candidates: readonly ScopeContainerCandidate[]): ScopeCont
   }
   return first;
 }
+
+/** The default no-dedup reader: always mints a fresh park event (single-pass behavior). */
+const NO_DEDUP_PARK_READER: ContainerParkReader = {
+  findOpenContainerPark: (): Promise<string | undefined> => Promise.resolve(undefined),
+};

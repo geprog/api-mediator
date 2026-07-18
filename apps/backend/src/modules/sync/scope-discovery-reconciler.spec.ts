@@ -125,10 +125,13 @@ describe("RepoScopeDiscoveryReadiness", () => {
     });
   }
 
-  it("needs discovery when the correspondence is confirmed and has no active links", async () => {
+  it("needs discovery only when confirmed and there are NO links at all (a lost/never-run pass)", async () => {
     expect(await readiness(correspondence(true), []).needsDiscovery(PAIR)).toBe(true);
+  });
+
+  it("does NOT re-trigger an operator-severed (all-archived) pair — respects the override (MF-1 coupling)", async () => {
     expect(await readiness(correspondence(true), [link("archived")]).needsDiscovery(PAIR)).toBe(
-      true,
+      false,
     );
   });
 

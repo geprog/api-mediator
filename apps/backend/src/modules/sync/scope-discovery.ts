@@ -1,5 +1,6 @@
 import type {
   ApiSpec,
+  AuditLogEntry,
   RegisteredApp,
   ResourceBinding,
   ScopeContainerRef,
@@ -8,13 +9,15 @@ import type {
   SourceScopeRef,
 } from "@mediator/domain";
 import type { EstablishScopeLinkResult, ScopeLinkStore } from "@mediator/db";
-import type {
-  ContainerResolutionOutcome,
-  DiscoveryPassResult,
-  ScopeContainerCandidate,
-  ScopeDiscoveryStage,
-  TargetIdentityLookup,
-  TargetReadBinding,
+import {
+  parseAmbiguousContainerDetails,
+  type ContainerParkReader,
+  type ContainerResolutionOutcome,
+  type DiscoveryPassResult,
+  type ScopeContainerCandidate,
+  type ScopeDiscoveryStage,
+  type TargetIdentityLookup,
+  type TargetReadBinding,
 } from "@mediator/sync-engine";
 import { extractCapturedScope, type CapturedScope, type JsonRecord } from "@mediator/transform";
 
@@ -492,4 +495,80 @@ function leafSegment(path: string): string {
   const segments = path.split(".");
   const leaf = segments[segments.length - 1];
   return leaf !== undefined && leaf.length > 0 ? leaf : path;
+}
+
+// ── Container-park dedup reader (SS-11.7) ──────────────────────────────────────
+
+/** The narrow `failure`-event read the {@link RepoContainerParkReader} needs. */
+export interface ContainerParkAuditReader {
+  querySyncEvents(query: {
+    readonly status: "failure";
+    readonly limit: number;
+  }): Promise<AuditLogEntry[]>;
+}
+
+/**
+ * The repo-backed {@link ContainerParkReader}: dedups a container park across sweeps
+ * (SS-11.7) by finding an **open** (still-unresolved) container-park `failure` `SyncEvent`
+ * for a `(pair, source scope key)`. "Open" = the parsed park event's source scope has no
+ * **active** `ScopeLink` covering it yet — the same drop-resolved rule the operator queue
+ * uses. Returns the existing event id (reuse it, mint nothing) or `undefined` (mint fresh).
+ * Bounded by a `limit` scan of recent failures.
+ */
+export class RepoContainerParkReader implements ContainerParkReader {
+  readonly #audit: ContainerParkAuditReader;
+  readonly #links: Pick<ScopeLinkStore, "lookupByScopeKey">;
+  readonly #limit: number;
+
+  public constructor(
+    audit: ContainerParkAuditReader,
+    links: Pick<ScopeLinkStore, "lookupByScopeKey">,
+    options: { readonly limit?: number } = {},
+  ) {
+    this.#audit = audit;
+    this.#links = links;
+    this.#limit = options.limit ?? DEFAULT_PARK_DEDUP_SCAN;
+  }
+
+  public async findOpenContainerPark(
+    resourcePairRef: string,
+    sourceScopeKey: ScopeKey,
+  ): Promise<string | undefined> {
+    const events = await this.#audit.querySyncEvents({ status: "failure", limit: this.#limit });
+    for (const event of events) {
+      if (event.details === undefined) {
+        continue;
+      }
+      const parsed = parseAmbiguousContainerDetails(event.details);
+      if (
+        parsed === undefined ||
+        parsed.resourcePairRef !== resourcePairRef ||
+        !scopeKeysEqual(parsed.sourceScopeKey, sourceScopeKey)
+      ) {
+        continue;
+      }
+      // Still OPEN only while no active link covers the container (else it was resolved and
+      // a fresh park is warranted for a re-parked container).
+      const active = await this.#links.lookupByScopeKey(resourcePairRef, {
+        appId: parsed.sourceAppId,
+        scopeKey: parsed.sourceScopeKey,
+      });
+      if (active === undefined) {
+        return event.id;
+      }
+    }
+    return undefined;
+  }
+}
+
+/** The default bounded scan for the park-dedup reader (recent failures only). */
+const DEFAULT_PARK_DEDUP_SCAN = 500;
+
+/** Two scope-key maps are equal iff they carry the same components with the same values. */
+function scopeKeysEqual(a: ScopeKey, b: ScopeKey): boolean {
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) {
+    return false;
+  }
+  return aKeys.every((key) => Object.prototype.hasOwnProperty.call(b, key) && a[key] === b[key]);
 }

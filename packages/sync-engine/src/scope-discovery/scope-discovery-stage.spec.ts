@@ -9,7 +9,7 @@ import {
 } from "./details.js";
 import { FakeScopeLinkStore } from "./fakes.js";
 import { ScopeDiscoveryStage } from "./scope-discovery-stage.js";
-import type { ScopeContainerCandidate } from "./types.js";
+import type { ContainerParkReader, ScopeContainerCandidate } from "./types.js";
 import { FakeSyncEventRecorder } from "../identity-resolution/fakes.js";
 
 /**
@@ -54,7 +54,7 @@ function targetCandidate(
 }
 
 /** A stage with deterministic id/clock so events/links are assertable. */
-function makeStage(): {
+function makeStage(parkReader?: ContainerParkReader): {
   stage: ScopeDiscoveryStage;
   links: FakeScopeLinkStore;
   events: FakeSyncEventRecorder;
@@ -63,7 +63,7 @@ function makeStage(): {
   const events = new FakeSyncEventRecorder();
   let counter = 0;
   const stage = new ScopeDiscoveryStage(
-    { links, events },
+    { links, events, ...(parkReader !== undefined ? { parkReader } : {}) },
     { clock: (): Date => T0, newId: (): string => `id-${String((counter += 1))}` },
   );
   return { stage, links, events };
@@ -193,7 +193,7 @@ describe("SS-11.1 establishConstant", () => {
 });
 
 describe("SS-11.6 linkManually / unlink", () => {
-  it("establishes a manual link and severs it", async () => {
+  it("establishes a manual link and severs it (archive-not-delete)", async () => {
     const { stage, links } = makeStage();
     const result = await stage.linkManually({
       correspondence: correspondence(),
@@ -206,8 +206,10 @@ describe("SS-11.6 linkManually / unlink", () => {
     const id = result.kind === "created" ? result.link.id : "";
     expect(links.all()[0]?.establishedBy).toBe("manual");
 
+    // Sever ARCHIVES (never deletes): the row survives, flipped to archived.
     expect(await stage.unlink(id)).toBe(true);
-    expect(links.all()).toHaveLength(0);
+    expect(links.all()).toHaveLength(1);
+    expect(links.all()[0]?.status).toBe("archived");
     // Severing an unknown id is a false no-op.
     expect(await stage.unlink("nope")).toBe(false);
   });
@@ -370,5 +372,129 @@ describe("SS-11.4 resolveContainer (on-demand inline) / SS-11.5 park", () => {
     expect(
       parseAmbiguousContainerDetails(failure?.details ?? "")?.candidateNativeIds,
     ).toStrictEqual([]);
+  });
+});
+
+describe("SS-11.6 operator override — a severed (archived) container is not auto-re-linked", () => {
+  it("establishByIdentityMatch skips a source container the operator severed (no re-link, no park)", async () => {
+    const { stage, links, events } = makeStage();
+    // Establish then sever (archive) a link for the source container.
+    const established = await stage.linkManually({
+      correspondence: correspondence(),
+      sourceAppId: SOURCE_APP,
+      sourceScopeKey: { owner: "alice", name: "phoenix" },
+      targetAppId: TARGET_APP,
+      targetScopeKey: { id: "42" },
+    });
+    await stage.unlink(established.kind === "created" ? established.link.id : "");
+
+    // A sweep re-matches the same source to the same target — but the archive is an override.
+    const result = await stage.establishByIdentityMatch({
+      correspondence: correspondence(),
+      sourceCandidates: [sourceCandidate({ owner: "alice", name: "phoenix" }, "phoenix", "repo-1")],
+      targetCandidates: [targetCandidate({ id: "42" }, "phoenix", "42")],
+    });
+    expect(result.overridden).toStrictEqual([{ owner: "alice", name: "phoenix" }]);
+    expect(result.established).toHaveLength(0);
+    // No NEW active link (only the archived one remains) and no park event minted.
+    expect(links.all().filter((l) => l.status === "active")).toHaveLength(0);
+    expect(events.all().some((e) => e.status === "failure")).toBe(false);
+  });
+
+  it("resolveContainer parks (does not re-link) a record for a severed container", async () => {
+    const { stage, links } = makeStage();
+    const established = await stage.linkManually({
+      correspondence: correspondence(),
+      sourceAppId: SOURCE_APP,
+      sourceScopeKey: { owner: "alice", name: "phoenix" },
+      targetAppId: TARGET_APP,
+      targetScopeKey: { id: "42" },
+    });
+    await stage.unlink(established.kind === "created" ? established.link.id : "");
+
+    const outcome = await stage.resolveContainer({
+      correspondence: correspondence(),
+      source: {
+        appId: SOURCE_APP,
+        scopeKey: { owner: "alice", name: "phoenix" },
+        identitySignature: "phoenix",
+      },
+      targetCandidates: [targetCandidate({ id: "42" }, "phoenix", "42")],
+    });
+    expect(outcome.kind).toBe("unresolvable"); // never auto-re-linked
+    expect(links.all().filter((l) => l.status === "active")).toHaveLength(0);
+  });
+
+  it("a manual re-link overrides the override — a fresh active link is created", async () => {
+    const { stage, links } = makeStage();
+    const established = await stage.linkManually({
+      correspondence: correspondence(),
+      sourceAppId: SOURCE_APP,
+      sourceScopeKey: { owner: "alice", name: "phoenix" },
+      targetAppId: TARGET_APP,
+      targetScopeKey: { id: "42" },
+    });
+    await stage.unlink(established.kind === "created" ? established.link.id : "");
+
+    const relink = await stage.linkManually({
+      correspondence: correspondence(),
+      sourceAppId: SOURCE_APP,
+      sourceScopeKey: { owner: "alice", name: "phoenix" },
+      targetAppId: TARGET_APP,
+      targetScopeKey: { id: "99" },
+    });
+    expect(relink.kind).toBe("created");
+    expect(links.all().filter((l) => l.status === "active")).toHaveLength(1);
+  });
+});
+
+describe("SS-11.7 park dedup — one open park entry per (pair, scope key), not N per sweep", () => {
+  /** A park reader that reports a given (pair, scope key) as already open. */
+  function openParkReader(eventId: string, forScopeKey: ScopeKey): ContainerParkReader {
+    return {
+      findOpenContainerPark: (resourcePairRef, scopeKey): Promise<string | undefined> =>
+        Promise.resolve(
+          resourcePairRef === PAIR && JSON.stringify(scopeKey) === JSON.stringify(forScopeKey)
+            ? eventId
+            : undefined,
+        ),
+    };
+  }
+
+  it("reuses an existing open park's event id and mints NO new failure event", async () => {
+    const scopeKey = { owner: "alice", name: "dup" };
+    const { stage, events } = makeStage(openParkReader("existing-event", scopeKey));
+
+    const outcome = await stage.resolveContainer({
+      correspondence: correspondence(),
+      source: { appId: SOURCE_APP, scopeKey, identitySignature: "dup" },
+      targetCandidates: [
+        targetCandidate({ id: "42" }, "dup", "42"),
+        targetCandidate({ id: "43" }, "dup", "43"),
+      ],
+    });
+    expect(outcome.kind).toBe("ambiguous");
+    expect(outcome.kind === "ambiguous" && outcome.syncEventId).toBe("existing-event");
+    // Deduped: no new `failure` SyncEvent was recorded.
+    expect(events.all()).toHaveLength(0);
+  });
+
+  it("still mints a fresh park event when none is open for the key", async () => {
+    const { stage, events } = makeStage(
+      openParkReader("existing-event", { owner: "x", name: "y" }),
+    );
+    await stage.resolveContainer({
+      correspondence: correspondence(),
+      source: {
+        appId: SOURCE_APP,
+        scopeKey: { owner: "alice", name: "dup" },
+        identitySignature: "dup",
+      },
+      targetCandidates: [
+        targetCandidate({ id: "42" }, "dup", "42"),
+        targetCandidate({ id: "43" }, "dup", "43"),
+      ],
+    });
+    expect(events.all().filter((e) => e.status === "failure")).toHaveLength(1);
   });
 });

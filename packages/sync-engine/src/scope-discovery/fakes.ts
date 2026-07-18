@@ -19,10 +19,11 @@ export class FakeScopeLinkStore implements ScopeLinkStore {
   readonly #links: ScopeLink[] = [];
 
   public establish(link: ScopeLink): Promise<EstablishScopeLinkResult> {
-    const onA = this.#findActive(link.resourcePairRef, {
-      appId: link.appAId,
-      scopeKey: link.appAScopeKey,
-    });
+    const onA = this.#findByStatus(
+      link.resourcePairRef,
+      { appId: link.appAId, scopeKey: link.appAScopeKey },
+      "active",
+    );
     if (onA !== undefined) {
       const same =
         onA.appBId === link.appBId && scopeKeysEqual(onA.appBScopeKey, link.appBScopeKey);
@@ -30,10 +31,11 @@ export class FakeScopeLinkStore implements ScopeLinkStore {
         same ? { kind: "exists", link: clone(onA) } : { kind: "conflict", existing: clone(onA) },
       );
     }
-    const onB = this.#findActive(link.resourcePairRef, {
-      appId: link.appBId,
-      scopeKey: link.appBScopeKey,
-    });
+    const onB = this.#findByStatus(
+      link.resourcePairRef,
+      { appId: link.appBId, scopeKey: link.appBScopeKey },
+      "active",
+    );
     if (onB !== undefined) {
       return Promise.resolve({ kind: "conflict", existing: clone(onB) });
     }
@@ -45,16 +47,27 @@ export class FakeScopeLinkStore implements ScopeLinkStore {
     resourcePairRef: string,
     side: ScopeLinkSideRef,
   ): Promise<ScopeLink | undefined> {
-    const found = this.#findActive(resourcePairRef, side);
+    const found = this.#findByStatus(resourcePairRef, side, "active");
+    return Promise.resolve(found === undefined ? undefined : clone(found));
+  }
+
+  public findArchivedByScopeKey(
+    resourcePairRef: string,
+    side: ScopeLinkSideRef,
+  ): Promise<ScopeLink | undefined> {
+    const found = this.#findByStatus(resourcePairRef, side, "archived");
     return Promise.resolve(found === undefined ? undefined : clone(found));
   }
 
   public sever(id: string): Promise<boolean> {
-    const index = this.#links.findIndex((link) => link.id === id);
-    if (index < 0) {
+    // Archive, never delete (mirrors the real repo): flip an ACTIVE row to archived so a
+    // `RecordLink.scopeRef` pointing at it still resolves via getById, and it drops out of
+    // the active lookup. An unknown / already-archived id is a false no-op.
+    const link = this.#links.find((entry) => entry.id === id && entry.status === "active");
+    if (link === undefined) {
       return Promise.resolve(false);
     }
-    this.#links.splice(index, 1);
+    link.status = "archived";
     return Promise.resolve(true);
   }
 
@@ -74,10 +87,14 @@ export class FakeScopeLinkStore implements ScopeLinkStore {
     return this.#links.map(clone);
   }
 
-  #findActive(resourcePairRef: string, side: ScopeLinkSideRef): ScopeLink | undefined {
+  #findByStatus(
+    resourcePairRef: string,
+    side: ScopeLinkSideRef,
+    status: "active" | "archived",
+  ): ScopeLink | undefined {
     return this.#links.find(
       (link) =>
-        link.status === "active" &&
+        link.status === status &&
         link.resourcePairRef === resourcePairRef &&
         ((link.appAId === side.appId && scopeKeysEqual(link.appAScopeKey, side.scopeKey)) ||
           (link.appBId === side.appId && scopeKeysEqual(link.appBScopeKey, side.scopeKey))),

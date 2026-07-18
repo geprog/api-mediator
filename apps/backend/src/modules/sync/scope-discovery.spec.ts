@@ -1,5 +1,6 @@
 import type {
   ApiSpec,
+  AuditLogEntry,
   IrResourceGroup,
   RegisteredApp,
   ResourceBinding,
@@ -10,6 +11,7 @@ import { stripUndefined } from "@mediator/domain";
 import {
   FakeScopeLinkStore,
   FakeSyncEventRecorder,
+  formatAmbiguousContainerDetails,
   ScopeDiscoveryStage,
   type MatchedTargetRecord,
   type TargetFetchResult,
@@ -19,8 +21,10 @@ import type { CapturedScope } from "@mediator/transform";
 import { describe, expect, it } from "vitest";
 
 import {
+  RepoContainerParkReader,
   RepoScopeContainerEnumerator,
   ScopeDiscoveryService,
+  type ContainerParkAuditReader,
   type EnumeratedContainers,
   type ScopeContainerEnumerator,
 } from "./scope-discovery.js";
@@ -283,8 +287,12 @@ describe("SS-11.1 / SS-11.6 establish / link / unlink", () => {
         : "";
     expect(links.all().find((l) => l.id === linkId)?.establishedBy).toBe("manual");
 
+    // Unlink ARCHIVES (never deletes): both rows survive; the manual one is archived, the
+    // constant one stays active.
     expect(await service.unlinkContainer(linkId)).toBe(true);
-    expect(links.all()).toHaveLength(1);
+    expect(links.all()).toHaveLength(2);
+    expect(links.all().find((l) => l.id === linkId)?.status).toBe("archived");
+    expect(links.all().filter((l) => l.status === "active")).toHaveLength(1);
   });
 
   it("reports not-scoped when the pair has no ScopeCorrespondence", async () => {
@@ -417,5 +425,76 @@ describe("RepoScopeContainerEnumerator", () => {
     const { lookup } = containerRepos({ complete: true, records: [] });
     const enumerator = new RepoScopeContainerEnumerator(emptyRepos(), lookup);
     expect(await enumerator.enumerate(ref)).toBeUndefined();
+  });
+});
+
+// ── RepoContainerParkReader (SS-11.7 park dedup source of truth) ──────────────
+
+describe("RepoContainerParkReader", () => {
+  const SCOPE = { owner: "alice", name: "dup" };
+
+  function parkEvent(id: string, scopeKey: Record<string, string>): AuditLogEntry {
+    return {
+      id,
+      type: "sync-execution",
+      actor: "system",
+      status: "failure",
+      timestamp: T0,
+      details: formatAmbiguousContainerDetails({
+        resourcePairRef: PAIR,
+        sourceAppId: SOURCE_APP,
+        sourceScopeKey: scopeKey,
+        candidateNativeIds: ["42", "43"],
+      }),
+    };
+  }
+
+  function auditReturning(events: readonly AuditLogEntry[]): ContainerParkAuditReader {
+    return { querySyncEvents: (): Promise<AuditLogEntry[]> => Promise.resolve([...events]) };
+  }
+
+  it("returns the open park's event id for a matching (pair, scope key) with no covering active link", async () => {
+    const reader = new RepoContainerParkReader(
+      auditReturning([parkEvent("evt-1", SCOPE)]),
+      new FakeScopeLinkStore(),
+    );
+    expect(await reader.findOpenContainerPark(PAIR, SCOPE)).toBe("evt-1");
+    // A different scope key / pair does not match.
+    expect(await reader.findOpenContainerPark(PAIR, { owner: "x", name: "y" })).toBeUndefined();
+  });
+
+  it("treats a park as RESOLVED (not open) once an active ScopeLink covers its scope", async () => {
+    const links = new FakeScopeLinkStore();
+    // An active link now covers the source container the park was recorded for.
+    await links.establish({
+      id: "link-1",
+      scopeCorrespondenceId: "corr-1",
+      appAId: SOURCE_APP,
+      appAScopeKey: SCOPE,
+      appBId: TARGET_APP,
+      appBScopeKey: { id: "42" },
+      resourcePairRef: PAIR,
+      establishedBy: "manual",
+      status: "active",
+      createdAt: T0,
+    });
+    const reader = new RepoContainerParkReader(auditReturning([parkEvent("evt-1", SCOPE)]), links);
+    expect(await reader.findOpenContainerPark(PAIR, SCOPE)).toBeUndefined();
+  });
+
+  it("ignores non-container-park failure events", async () => {
+    const nonContainer: AuditLogEntry = {
+      id: "evt-x",
+      type: "sync-execution",
+      actor: "system",
+      status: "failure",
+      timestamp: T0,
+      details: "ambiguous identity match: 2 candidates [a, b]",
+    };
+    const reader = new RepoContainerParkReader(
+      auditReturning([nonContainer]),
+      new FakeScopeLinkStore(),
+    );
+    expect(await reader.findOpenContainerPark(PAIR, SCOPE)).toBeUndefined();
   });
 });

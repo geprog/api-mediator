@@ -67,6 +67,23 @@ export interface AmbiguousContainerMatch {
 }
 
 /**
+ * Reads whether an **open** (still-unresolved) container-park `failure` `SyncEvent`
+ * already exists for a `(pair, source scope key)` — the dedup gate that stops the sweep
+ * minting a **new** `failure` event every pass for the same still-ambiguous /
+ * still-unresolvable container (unbounded audit-log growth + self-pollution of the parked
+ * queue). Returns the existing open park's `syncEventId` to reuse, or `undefined` when
+ * none exists (then a fresh event is minted). Implemented by the backend over the audit
+ * log + the active-link store; a no-op default (always `undefined`) keeps single-pass
+ * engine tests parking as before.
+ */
+export interface ContainerParkReader {
+  findOpenContainerPark(
+    resourcePairRef: string,
+    sourceScopeKey: ScopeKey,
+  ): Promise<string | undefined>;
+}
+
+/**
  * The summary of an enablement / harvest discovery pass (SS-11.2/11.3): the links
  * newly established, how many source scopes were already linked (idempotent skip),
  * the ambiguous matches parked for manual linking, any establish `conflict`s (a
@@ -79,4 +96,10 @@ export interface DiscoveryPassResult {
   readonly ambiguous: readonly AmbiguousContainerMatch[];
   readonly conflicts: readonly ScopeLink[];
   readonly unresolved: readonly ScopeKey[];
+  /**
+   * Source scopes **skipped as an operator override** (SS-11.6): the operator severed
+   * (archived) this container's link, so automatic identity-match discovery does not
+   * auto-re-link it — a manual re-link is required to reactivate it.
+   */
+  readonly overridden: readonly ScopeKey[];
 }

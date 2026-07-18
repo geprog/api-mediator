@@ -73,7 +73,11 @@ import { resolveEnableRuleInput } from "./enable-resolver.js";
 import { RepoPollPlanResolver } from "./poll-plan-resolver.js";
 import { RepoSyncPipelineContextLoader } from "./pipeline-context-loader.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos } from "./resolution.js";
-import { RepoScopeContainerEnumerator, ScopeDiscoveryService } from "./scope-discovery.js";
+import {
+  RepoContainerParkReader,
+  RepoScopeContainerEnumerator,
+  ScopeDiscoveryService,
+} from "./scope-discovery.js";
 import {
   InMemoryScopeDiscoveryInFlightRegistry,
   RepoScopeDiscoveryReadiness,
@@ -313,6 +317,9 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   const scopeDiscoveryStage = new ScopeDiscoveryStage({
     links: scopeLinks,
     events: syncEventStore,
+    // SS-11.7 — dedup a container park across sweeps (reuse an open park's event id rather
+    // than minting a new `failure` event every pass).
+    parkReader: new RepoContainerParkReader(auditLog, scopeLinks),
   });
   const scopeDiscovery = new ScopeDiscoveryService({
     stage: scopeDiscoveryStage,

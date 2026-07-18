@@ -57,11 +57,26 @@ export interface ScopeLinkStore {
    */
   lookupByScopeKey(resourcePairRef: string, side: ScopeLinkSideRef): Promise<ScopeLink | undefined>;
   /**
-   * Sever a link by removing it (SS-11.6 manual **unlink**) — a hard delete, mirroring
-   * `RecordLinkStore.unlink`. Distinct from {@link ScopeLinkRepository.archiveByCorrespondence}
-   * (a lifecycle cascade that keeps the row so a `RecordLink.scopeRef` still resolves):
-   * a manual unlink is an operator correcting a *wrong* link, not a container leaving the
-   * landscape. Returns `true` when a row was removed, `false` when the id was unknown.
+   * The **archived** link for a container, addressed by (app, scope-key) on either side —
+   * an **operator-severed** link (SS-11.6) or a lifecycle-cascade archive (SS-10.5). Used
+   * by discovery to detect an **operator override**: automatic identity-match discovery
+   * must NOT auto-re-link a container the operator has severed (`ScopeDiscoveryStage`
+   * gates auto-establish on this). Returns 0 or 1.
+   */
+  findArchivedByScopeKey(
+    resourcePairRef: string,
+    side: ScopeLinkSideRef,
+  ): Promise<ScopeLink | undefined>;
+  /**
+   * Sever a link (SS-11.6 manual **unlink**) — set `status = 'archived'`, **never delete**.
+   * A `ScopeLink` is pointed at by many `RecordLink.scopeRef = { kind: "scope-link",
+   * scopeLinkId }` rows (a plain jsonb column, **no FK**), so a physical delete would
+   * silently orphan them and break the SS-10.5 / SS-12.3 guarantee that a delete/audit
+   * still resolves its frozen container key. Archiving keeps the row resolvable by
+   * {@link getById} while dropping it out of {@link lookupByScopeKey} (active-only), so a
+   * corrected re-link creates a fresh **active** link. The archived row is also the
+   * operator-override signal ({@link findArchivedByScopeKey}). Returns `true` when it
+   * flipped an active row to archived, `false` when the id was unknown / already archived.
    */
   sever(id: string): Promise<boolean>;
   /** Every link established under one `ScopeCorrespondence`, whatever its status. */
@@ -128,17 +143,19 @@ export class ScopeLinkRepository implements ScopeLinkStore {
   }
 
   /**
-   * Sever a link (SS-11.6 manual unlink) — a hard delete. A `RecordLink.scopeRef`
-   * pointing at it would no longer resolve, which is the intended semantics of a manual
-   * correction (the operator is undoing a *wrong* link before records route through it);
-   * the archive-not-delete rule (SS-10.5) is reserved for the lifecycle cascade.
+   * Sever a link (SS-11.6 manual unlink) — **archive it, never delete** (see the port
+   * doc): flip an **active** row to `archived` so a `RecordLink.scopeRef` pointing at it
+   * still resolves its frozen key via {@link getById} for a final delete/audit, while it
+   * drops out of the active {@link lookupByScopeKey} (a corrected re-link then creates a
+   * fresh active link). Returns whether an active row was flipped.
    */
   public async sever(id: string): Promise<boolean> {
-    const removed = await this.db
-      .delete(scopeLink)
-      .where(eq(scopeLink.id, id))
+    const archived = await this.db
+      .update(scopeLink)
+      .set({ status: "archived" })
+      .where(and(eq(scopeLink.id, id), eq(scopeLink.status, "active")))
       .returning({ id: scopeLink.id });
-    return removed.length > 0;
+    return archived.length > 0;
   }
 
   /** One link by id (observability / tests / re-reading after a mutation). */
@@ -166,6 +183,27 @@ export class ScopeLinkRepository implements ScopeLinkStore {
     resourcePairRef: string,
     side: ScopeLinkSideRef,
   ): Promise<ScopeLink | undefined> {
+    return this.#lookupByStatus(resourcePairRef, side, "active");
+  }
+
+  /**
+   * The **archived** link for a container (an operator-severed link, SS-11.6, or a
+   * lifecycle-cascade archive, SS-10.5). Discovery reads this to respect an operator
+   * override — never auto-re-link a container the operator severed. Returns 0 or 1.
+   */
+  public async findArchivedByScopeKey(
+    resourcePairRef: string,
+    side: ScopeLinkSideRef,
+  ): Promise<ScopeLink | undefined> {
+    return this.#lookupByStatus(resourcePairRef, side, "archived");
+  }
+
+  /** Resolve the link for a container by (app, scope-key) on either side at a given status. */
+  async #lookupByStatus(
+    resourcePairRef: string,
+    side: ScopeLinkSideRef,
+    status: "active" | "archived",
+  ): Promise<ScopeLink | undefined> {
     const keyJson = JSON.stringify(side.scopeKey);
     const [row] = await this.db
       .select()
@@ -173,7 +211,7 @@ export class ScopeLinkRepository implements ScopeLinkStore {
       .where(
         and(
           eq(scopeLink.resourcePairRef, resourcePairRef),
-          eq(scopeLink.status, "active"),
+          eq(scopeLink.status, status),
           or(
             and(
               eq(scopeLink.appAId, side.appId),

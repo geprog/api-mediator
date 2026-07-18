@@ -181,7 +181,7 @@ suite("Scope-link establish/sever (SS-11) integration (requires Postgres)", () =
     expect(await db.select().from(scopeLink)).toHaveLength(1);
   });
 
-  it("SS-11.6: sever hard-deletes a link (distinct from archive)", async () => {
+  it("SS-11.6: sever ARCHIVES a link (never deletes) — it still resolves via getById, drops out of active lookup, and becomes the operator-override signal", async () => {
     const correspondenceRepo = new ScopeCorrespondenceRepository(db);
     const linkRepo = new ScopeLinkRepository(db);
     const correspondence = makeCorrespondence();
@@ -195,9 +195,64 @@ suite("Scope-link establish/sever (SS-11) integration (requires Postgres)", () =
     await linkRepo.establish(link);
 
     expect(await linkRepo.sever(link.id)).toBe(true);
-    expect(await linkRepo.getById(link.id)).toBeUndefined();
-    expect(await db.select().from(scopeLink)).toHaveLength(0);
+
+    // The row survives, archived — never deleted (so a RecordLink.scopeRef still resolves).
+    expect(await db.select().from(scopeLink)).toHaveLength(1);
+    expect((await linkRepo.getById(link.id))?.status).toBe("archived");
+
+    // It drops out of the ACTIVE lookup (a corrected re-link creates a fresh active link)…
+    expect(
+      await linkRepo.lookupByScopeKey(PAIR, {
+        appId: SOURCE_APP,
+        scopeKey: { owner: "alice", name: "phoenix" },
+      }),
+    ).toBeUndefined();
+    // …but resolves via findArchivedByScopeKey — the operator-override signal.
+    expect(
+      (
+        await linkRepo.findArchivedByScopeKey(PAIR, {
+          appId: TARGET_APP,
+          scopeKey: { id: "42" },
+        })
+      )?.id,
+    ).toBe(link.id);
+
+    // Severing an already-archived id is a false no-op (only an active row is severable).
+    expect(await linkRepo.sever(link.id)).toBe(false);
     // Severing an unknown id is a false no-op.
     expect(await linkRepo.sever(randomUUID())).toBe(false);
+  });
+
+  it("SS-11.6: a corrected re-link after sever creates a fresh active link (archived + active coexist)", async () => {
+    const correspondenceRepo = new ScopeCorrespondenceRepository(db);
+    const linkRepo = new ScopeLinkRepository(db);
+    const correspondence = makeCorrespondence();
+    await correspondenceRepo.create(correspondence);
+
+    const wrong = canonicalLink(
+      correspondence.id,
+      { owner: "alice", name: "phoenix" },
+      { id: "42" },
+    );
+    await linkRepo.establish(wrong);
+    await linkRepo.sever(wrong.id);
+
+    // A fresh establish for the same source container (now to the corrected target) — the
+    // archived link no longer blocks it (lookup is active-only), so a new active row lands.
+    const corrected = canonicalLink(
+      correspondence.id,
+      { owner: "alice", name: "phoenix" },
+      { id: "99" },
+    );
+    expect((await linkRepo.establish(corrected)).kind).toBe("created");
+    expect(await db.select().from(scopeLink)).toHaveLength(2); // archived + fresh active
+    expect(
+      (
+        await linkRepo.lookupByScopeKey(PAIR, {
+          appId: SOURCE_APP,
+          scopeKey: { owner: "alice", name: "phoenix" },
+        })
+      )?.appBScopeKey,
+    ).toStrictEqual({ id: "99" });
   });
 });

@@ -124,6 +124,7 @@ export { FakeScopeLinkStore } from "./scope-discovery/fakes.js";
 export type {
   AmbiguousContainerMatch,
   CapturedSourceScope,
+  ContainerParkReader,
   ContainerResolutionOutcome,
   DiscoveryPassResult,
   ScopeContainerCandidate,
