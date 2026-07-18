@@ -176,16 +176,48 @@ export const scopeRecordDerivedBindingSchema = z.object({
 export type ScopeRecordDerivedBinding = z.infer<typeof scopeRecordDerivedBindingSchema>;
 
 /**
+ * The **`scope-link`** scope path-parameter binding (SS-12, Layer 3):
+ * `{ kind: "scope-link", parameterName, scopeKeyRef, confirmedBy, confirmedAt }`. The
+ * value-spaces are **arbitrary** (a Gitea repo name vs a Vikunja project id), so the
+ * parameter is filled from the record's resolved `ScopeLink` — the target-side
+ * container key — rather than from the record's captured scope
+ * (`docs/architecture/data-model.md` `ResourceBinding.scopePathBindings`).
+ *
+ * - `scopeKeyRef` selects **which** target container key the resolved `ScopeLink`
+ *   supplies — the component of that side's `ScopeLink.appXScopeKey` map this
+ *   parameter reads. Validated here only as a **required, non-empty string** (so a
+ *   confirmed entry always carries one); resolving it against a live `ScopeLink` is
+ *   the SS-12 resolver's job, not this per-binding shape.
+ *
+ * Carries the same `confirmedBy`/`confirmedAt` pair — and so the same confirmed-pair
+ * invariant, enforced for every member by {@link scopePathBindingSchema} below — as
+ * the `constant` and `record-derived` members. It slots into the existing
+ * discriminated union beside them **without reshaping the collection** (SS-12
+ * criterion 1).
+ */
+export const scopeScopeLinkBindingSchema = z.object({
+  kind: z.literal("scope-link"),
+  parameterName: z.string(),
+  scopeKeyRef: z.string().min(1),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: z.date().nullable(),
+});
+export type ScopeScopeLinkBinding = z.infer<typeof scopeScopeLinkBindingSchema>;
+
+/**
  * The `scopePathBindings` entry union. Modeled as a `z.discriminatedUnion` over
- * `kind` so `record-derived` (SS-8) slots in beside `constant` (SS-1) without
- * reshaping; `scope-link` (Layer 3) will slot in the same way. The confirmed-pair
- * invariant — `confirmedBy`/`confirmedAt` are **both null while unconfirmed and both
- * set together on confirmation** (SS-1 criterion 4, mirroring
- * {@link confirmableRefSchema}) — is enforced here for every kind, since all kinds
- * carry the same confirmation pair.
+ * `kind` so `record-derived` (SS-8) and `scope-link` (SS-12) slot in beside
+ * `constant` (SS-1) without reshaping. The confirmed-pair invariant —
+ * `confirmedBy`/`confirmedAt` are **both null while unconfirmed and both set together
+ * on confirmation** (SS-1 criterion 4, mirroring {@link confirmableRefSchema}) — is
+ * enforced here for every kind, since all kinds carry the same confirmation pair.
  */
 export const scopePathBindingSchema = z
-  .discriminatedUnion("kind", [scopeConstantBindingSchema, scopeRecordDerivedBindingSchema])
+  .discriminatedUnion("kind", [
+    scopeConstantBindingSchema,
+    scopeRecordDerivedBindingSchema,
+    scopeScopeLinkBindingSchema,
+  ])
   .superRefine((binding, ctx) => {
     const byIsNull = binding.confirmedBy === null;
     const atIsNull = binding.confirmedAt === null;

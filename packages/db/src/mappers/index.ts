@@ -90,6 +90,18 @@ export {
   type RecordLinkRow,
 } from "./record-link.js";
 export {
+  mapScopeCorrespondenceRow,
+  toScopeCorrespondenceInsert,
+  type ScopeCorrespondenceInsert,
+  type ScopeCorrespondenceRow,
+} from "./scope-correspondence.js";
+export {
+  mapScopeLinkRow,
+  toScopeLinkInsert,
+  type ScopeLinkInsert,
+  type ScopeLinkRow,
+} from "./scope-link.js";
+export {
   mapSyncFieldStateRow,
   toSyncFieldStateInsert,
   type SyncFieldStateInsert,

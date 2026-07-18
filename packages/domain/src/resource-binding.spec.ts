@@ -192,11 +192,10 @@ describe("scopePathBindingSchema — constant kind (SS-1 crit 2-4)", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects an entry with an unknown kind (union is constant | record-derived — no scope-link yet, Layer 3)", () => {
+  it("rejects an entry with an unknown kind (union is constant | record-derived | scope-link)", () => {
     const result = scopePathBindingSchema.safeParse({
-      kind: "scope-link",
+      kind: "mystery",
       parameterName: "owner",
-      scopeKeyRef: "repo",
       confirmedBy: null,
       confirmedAt: null,
     });
@@ -369,5 +368,81 @@ describe("sourceScopeRef schema (SS-7)", () => {
         confirmedAt: null,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("scopePathBindingSchema — scope-link kind (SS-12 crit 1, added in SS-10)", () => {
+  const confirmedAt = new Date("2026-07-17T12:00:00.000Z");
+
+  it("accepts a derived, unconfirmed scope-link entry, round-tripping its fields", () => {
+    const parsed = scopePathBindingSchema.parse({
+      kind: "scope-link",
+      parameterName: "id",
+      scopeKeyRef: "id",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(parsed).toStrictEqual({
+      kind: "scope-link",
+      parameterName: "id",
+      scopeKeyRef: "id",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+  });
+
+  it("accepts a confirmed scope-link entry carrying the operator identity", () => {
+    const parsed = scopePathBindingSchema.parse({
+      kind: "scope-link",
+      parameterName: "id",
+      scopeKeyRef: "project",
+      confirmedBy: "operator@example.test",
+      confirmedAt,
+    });
+    expect(parsed.kind).toBe("scope-link");
+    expect(parsed.confirmedAt).toStrictEqual(confirmedAt);
+  });
+
+  it("rejects a scope-link entry with an empty scopeKeyRef", () => {
+    const result = scopePathBindingSchema.safeParse({
+      kind: "scope-link",
+      parameterName: "id",
+      scopeKeyRef: "",
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("enforces the confirmed-pair invariant on the scope-link member (by set, at null)", () => {
+    const result = scopePathBindingSchema.safeParse({
+      kind: "scope-link",
+      parameterName: "id",
+      scopeKeyRef: "id",
+      confirmedBy: "operator@example.test",
+      confirmedAt: null,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("no L1/L2 regression: constant + record-derived members still validate alongside scope-link", () => {
+    expect(
+      scopePathBindingSchema.safeParse({
+        kind: "constant",
+        parameterName: "owner",
+        value: "alice",
+        confirmedBy: "operator@example.test",
+        confirmedAt,
+      }).success,
+    ).toBe(true);
+    expect(
+      scopePathBindingSchema.safeParse({
+        kind: "record-derived",
+        parameterName: "id",
+        sourceScopeKey: "project",
+        confirmedBy: null,
+        confirmedAt: null,
+      }).success,
+    ).toBe(true);
   });
 });

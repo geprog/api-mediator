@@ -26,6 +26,8 @@ import {
   recordLinkStatusSchema,
   registeredAppStatusSchema,
   reviewStateSchema,
+  scopeLinkEstablishedBySchema,
+  scopeLinkStatusSchema,
   syncFieldStateSideSchema,
   syncFieldStateStatusSchema,
   syncRuleStatusSchema,
@@ -65,6 +67,8 @@ import {
   recordLinkTombstoneReasonEnum,
   registeredAppStatusEnum,
   reviewStateEnum,
+  scopeLinkEstablishedByEnum,
+  scopeLinkStatusEnum,
   syncFieldStateSideEnum,
   syncFieldStateStatusEnum,
   syncRuleStatusEnum,
@@ -157,6 +161,12 @@ describe("pg enum ↔ domain parity", () => {
       parkedConflictResolutionChoiceEnum.enumValues,
       parkedConflictResolutionChoiceSchema.options,
     ],
+    [
+      "scope_link_established_by",
+      scopeLinkEstablishedByEnum.enumValues,
+      scopeLinkEstablishedBySchema.options,
+    ],
+    ["scope_link_status", scopeLinkStatusEnum.enumValues, scopeLinkStatusSchema.options],
   ];
 
   it.each(cases)("%s lists exactly the domain values", (_name, pgValues, domainValues) => {

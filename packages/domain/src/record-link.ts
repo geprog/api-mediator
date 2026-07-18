@@ -47,6 +47,37 @@ export const recordLinkEstablishingQueueKeySchema = z.discriminatedUnion("kind",
 ]);
 export type RecordLinkEstablishingQueueKey = z.infer<typeof recordLinkEstablishingQueueKeySchema>;
 
+// ── scopeRef (scoped-rule container routing, SS-10) ───────────────────────────
+
+/**
+ * The record's persisted **container**, captured at link establishment
+ * (`docs/architecture/data-model.md` `RecordLink.scopeRef`; SS-10 criterion 4).
+ * Present **only** on a link under a **scoped** rule — **absent** on a non-scoped
+ * rule's links. It lets an operation carrying no live source record — a propagated
+ * **delete**, and any no-captured-scope read (`targetDriftCheck = read-before-write`
+ * / a PUT read-carry) — still fill its target scope path parameters from stored
+ * state instead of re-deriving them from a source record that is gone. For a
+ * *linked* record this is the authoritative scope source (a linked update/delete
+ * routes by `scopeRef`, never by a captured scope, which is used only on the
+ * pre-link create path).
+ *
+ * A discriminated union over the two fill mechanisms:
+ *
+ * - `scope-link` — `{ kind: "scope-link", scopeLinkId }`: the arbitrary-value-space
+ *   (L3) case. The target container key is read from the referenced `ScopeLink` — a
+ *   *reference*, so an **archived** `ScopeLink` still resolves its stored key for a
+ *   final delete/audit (SS-10 criterion 5).
+ * - `resolved` — `{ kind: "resolved", values }`: the shared-value-space (L2
+ *   `record-derived`) case. The resolved `{ parameterName → value }` map, **frozen**
+ *   at establishment — so an L2 rule's deletes route from stored values too, unifying
+ *   the delete fix across L2 and L3.
+ */
+export const recordLinkScopeRefSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("scope-link"), scopeLinkId: z.string().min(1) }),
+  z.object({ kind: z.literal("resolved"), values: z.record(z.string(), z.string()) }),
+]);
+export type RecordLinkScopeRef = z.infer<typeof recordLinkScopeRefSchema>;
+
 // ── RecordLink ───────────────────────────────────────────────────────────────
 
 /**
@@ -63,6 +94,8 @@ export type RecordLinkEstablishingQueueKey = z.infer<typeof recordLinkEstablishi
  *   `both-native-id-queues` marker is confined to `manual` links (SD-2 criterion 4).
  * - `tombstonedAt` — nullable: `null` on an `active`/`archived` link, set when the
  *   link is tombstoned (SD-2 criterion 5).
+ * - `scopeRef` — optional (above); present only on a link under a scoped rule,
+ *   absent on a non-scoped rule's links (SS-10 criterion 4).
  */
 export const recordLinkSchema = z
   .object({
@@ -78,6 +111,7 @@ export const recordLinkSchema = z
     establishingQueueKey: recordLinkEstablishingQueueKeySchema,
     createdAt: z.date(),
     tombstonedAt: z.date().nullable(),
+    scopeRef: recordLinkScopeRefSchema.optional(),
   })
   .superRefine((link, ctx) => {
     // `tombstoneReason` is present iff the link is tombstoned.

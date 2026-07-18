@@ -76,30 +76,43 @@ export function toResourceBindingDto(
       confirmedAt: confirmedAt !== null ? confirmedAt.toISOString() : null,
     };
   });
-  const scopeBindings = (binding.scopePathBindings ?? []).map((entry): ResourceBindingScopeDto => {
-    const confirmedAt = entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null;
-    // A kind-tagged discriminated DTO (SS-9): `record-derived` (SS-8) reports its
-    // `sourceScopeKey` (+ any value-preserving `transform`) and carries **no** constant
-    // literal; `constant` (SS-3) reports its operator-authored literal `value`. Built
-    // explicitly per member so a record-derived entry never leaks a misleading `value`.
-    if (entry.kind === "record-derived") {
-      return {
-        parameterName: entry.parameterName,
-        kind: "record-derived",
-        sourceScopeKey: entry.sourceScopeKey,
-        ...(entry.transform !== undefined ? { transform: entry.transform } : {}),
-        confirmedBy: entry.confirmedBy,
-        confirmedAt,
-      };
-    }
-    return {
-      parameterName: entry.parameterName,
-      kind: "constant",
-      value: entry.value,
-      confirmedBy: entry.confirmedBy,
-      confirmedAt,
-    };
-  });
+  const scopeBindings = (binding.scopePathBindings ?? []).flatMap(
+    (entry): ResourceBindingScopeDto[] => {
+      const confirmedAt = entry.confirmedAt !== null ? entry.confirmedAt.toISOString() : null;
+      // A kind-tagged discriminated DTO (SS-9): `record-derived` (SS-8) reports its
+      // `sourceScopeKey` (+ any value-preserving `transform`) and carries **no** constant
+      // literal; `constant` (SS-3) reports its operator-authored literal `value`. Built
+      // explicitly per member so a record-derived entry never leaks a misleading `value`.
+      if (entry.kind === "record-derived") {
+        return [
+          {
+            parameterName: entry.parameterName,
+            kind: "record-derived",
+            sourceScopeKey: entry.sourceScopeKey,
+            ...(entry.transform !== undefined ? { transform: entry.transform } : {}),
+            confirmedBy: entry.confirmedBy,
+            confirmedAt,
+          },
+        ];
+      }
+      if (entry.kind === "constant") {
+        return [
+          {
+            parameterName: entry.parameterName,
+            kind: "constant",
+            value: entry.value,
+            confirmedBy: entry.confirmedBy,
+            confirmedAt,
+          },
+        ];
+      }
+      // `scope-link` (SS-10 domain member): its wire/DTO exposure and the container-
+      // linking UI are SS-15. No `scope-link` binding is persisted before SS-11/SS-12,
+      // so this branch is unreachable today; skip rather than pull the SS-15 contract +
+      // frontend surface into this domain/persistence slice.
+      return [];
+    },
+  );
   // `sourceScopeRef` (SS-7): null when absent (no container field), else the
   // component set + its single confirmed/unconfirmed state (SS-9's UI consumes it).
   const source = binding.sourceScopeRef;

@@ -50,9 +50,15 @@ import type {
   ProposalItemAlternative,
   RecordLinkEstablishedBy,
   RecordLinkEstablishingQueueKey,
+  RecordLinkScopeRef,
   RecordLinkStatus,
   RegisteredAppStatus,
   ResourceBinding,
+  ScopeContainerRef,
+  ScopeIdentityKey,
+  ScopeKey,
+  ScopeLinkEstablishedBy,
+  ScopeLinkStatus,
   ScopePathBinding,
   SourceScopeRef,
   ReviewState,
@@ -336,6 +342,19 @@ export const recordLinkTombstoneReasonEnum = pgEnum("record_link_tombstone_reaso
   "propagated-delete",
   "observed-delete",
 ] as const satisfies readonly TombstoneReason[]);
+
+// ── Phase-4 scoped-resource-sync L3 / ScopeLink enums (SS-10) ─────────────────
+
+export const scopeLinkEstablishedByEnum = pgEnum("scope_link_established_by", [
+  "constant",
+  "identity-match",
+  "manual",
+] as const satisfies readonly ScopeLinkEstablishedBy[]);
+
+export const scopeLinkStatusEnum = pgEnum("scope_link_status", [
+  "active",
+  "archived",
+] as const satisfies readonly ScopeLinkStatus[]);
 
 export const syncFieldStateSideEnum = pgEnum("sync_field_state_side", [
   "A",
@@ -1385,6 +1404,12 @@ export const recordLink = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     // NULL on an active/archived link; set when the link is tombstoned.
     tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+    // `scopeRef` (SS-10): the record's persisted container, captured at link
+    // establishment on a **scoped** rule. NULLABLE `jsonb` — a NULL column is the
+    // domain **absent** ref (a non-scoped rule's link); existing rows migrate to NULL.
+    // The stored `{ kind: "scope-link", scopeLinkId }` reference resolves even against
+    // an *archived* `ScopeLink`, so a final delete/audit still routes (SS-10 crit 5).
+    scopeRef: jsonb("scope_ref").$type<RecordLinkScopeRef>(),
   },
   (table) => [
     // The unique-active invariant, per side (partial on active): at most one active
@@ -1400,6 +1425,77 @@ export const recordLink = pgTable(
     // these non-unique indexes cover a record's history across statuses.
     index("record_link_side_a_idx").on(table.resourcePairRef, table.appAId, table.appANativeId),
     index("record_link_side_b_idx").on(table.resourcePairRef, table.appBId, table.appBNativeId),
+  ],
+);
+
+/**
+ * `ScopeCorrespondence` — the direction-agnostic **configuration** for one scoped
+ * resource pair's container correlation, the home of the scope identity key
+ * (`docs/architecture/data-model.md` `ScopeCorrespondence`, SS-10). **One per scoped
+ * resource pair**, enforced by the UNIQUE index on `resource_pair_ref`.
+ *
+ * The open-ended shapes are `jsonb` (the same treatment as `resource_binding`'s
+ * `scope_path_bindings`): `scope_identity_key` (a pairing array), and the container
+ * refs (`{ appId, resourceRef }`). None carries a `Date`, so — unlike the confirmable
+ * refs — they round-trip through `jsonb` verbatim; the scope-identity-key confirmation
+ * is a real `timestamptz` column (`confirmed_at`, NULL while unconfirmed).
+ */
+export const scopeCorrespondence = pgTable(
+  "scope_correspondence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourcePairRef: text("resource_pair_ref").notNull(),
+    scopeIdentityKey: jsonb("scope_identity_key").$type<ScopeIdentityKey>().notNull(),
+    targetContainerRef: jsonb("target_container_ref").$type<ScopeContainerRef>().notNull(),
+    // NULL when the source container is knowable only from records' `sourceScopeRef`.
+    sourceContainerRef: jsonb("source_container_ref").$type<ScopeContainerRef>(),
+    // The scope-identity-key confirmation: both NULL while unconfirmed, both set on
+    // confirmation (the domain refinement enforces the pairing).
+    confirmedBy: text("confirmed_by"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+  },
+  (table) => [
+    // "One per scoped resource pair" — the config uniqueness invariant, and the
+    // getByResourcePair / confirm-or-update key.
+    uniqueIndex("scope_correspondence_resource_pair_uq").on(table.resourcePairRef),
+  ],
+);
+
+/**
+ * `ScopeLink` — a persisted container ↔ container correspondence established under a
+ * `ScopeCorrespondence`, the one-level-up analog of `RecordLink`
+ * (`docs/architecture/data-model.md` `ScopeLink`, SS-10). `scope_correspondence_id`
+ * FKs its parent config. Each side's scope key is an open-ended `{ component → value }`
+ * map (`jsonb`, no `Date`), so a `scope-link` binding's `scopeKeyRef` can select one
+ * component. `resource_pair_ref` is the same canonical direction-agnostic form as
+ * `record_link`, so both directions resolve the same link.
+ *
+ * Archiving (SS-10.5) sets `status = 'archived'` (never deletes), so a
+ * `record_link.scope_ref` pointing here still resolves its frozen key for a final
+ * delete/audit — which is why the FK does **not** cascade-delete.
+ */
+export const scopeLink = pgTable(
+  "scope_link",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeCorrespondenceId: uuid("scope_correspondence_id")
+      .notNull()
+      .references(() => scopeCorrespondence.id),
+    appAId: uuid("app_a_id").notNull(),
+    appAScopeKey: jsonb("app_a_scope_key").$type<ScopeKey>().notNull(),
+    appBId: uuid("app_b_id").notNull(),
+    appBScopeKey: jsonb("app_b_scope_key").$type<ScopeKey>().notNull(),
+    resourcePairRef: text("resource_pair_ref").notNull(),
+    establishedBy: scopeLinkEstablishedByEnum("established_by").notNull(),
+    status: scopeLinkStatusEnum("status").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // list-by-correspondence + the archive-by-correspondence sweep.
+    index("scope_link_correspondence_idx").on(table.scopeCorrespondenceId),
+    // lookup-by-scope-key narrows by (resource pair, side app) before the jsonb match.
+    index("scope_link_side_a_idx").on(table.resourcePairRef, table.appAId),
+    index("scope_link_side_b_idx").on(table.resourcePairRef, table.appBId),
   ],
 );
 

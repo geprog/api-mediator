@@ -114,6 +114,35 @@ export const tombstoneReasonSchema = z.enum(["propagated-delete", "observed-dele
 export type TombstoneReason = z.infer<typeof tombstoneReasonSchema>;
 export const TombstoneReason = tombstoneReasonSchema.enum;
 
+// ── ScopeLink.establishedBy (SS-10) ──────────────────────────────────────────
+
+/**
+ * How a `ScopeLink` was established (`docs/architecture/data-model.md`
+ * `ScopeLink.establishedBy`; `docs/glossary.md` `ScopeLink`): `constant` (a
+ * single-scope operator literal), `identity-match` (a discovered match of the two
+ * sides' *scope identity keys*), or `manual` (an explicit UI link). Mirrors
+ * `RecordLink.establishedBy` **minus `create-propagation`** — the mediator rarely
+ * creates containers, so a container correspondence is never captured from a
+ * create response.
+ */
+export const scopeLinkEstablishedBySchema = z.enum(["constant", "identity-match", "manual"]);
+export type ScopeLinkEstablishedBy = z.infer<typeof scopeLinkEstablishedBySchema>;
+export const ScopeLinkEstablishedBy = scopeLinkEstablishedBySchema.enum;
+
+// ── ScopeLink.status (SS-10) ─────────────────────────────────────────────────
+
+/**
+ * The `ScopeLink` lifecycle status (`docs/architecture/data-model.md`
+ * `ScopeLink.status`). `archived` when either side's container or app leaves the
+ * landscape (same rationale as `RecordLink`'s `archived`) — set, never deleted, so
+ * a `RecordLink.scopeRef` pointing at an archived `ScopeLink` still resolves its
+ * frozen container key for a final delete/audit (SS-10 criterion 5). No `tombstoned`
+ * value: a container correspondence is not severed by a record deletion.
+ */
+export const scopeLinkStatusSchema = z.enum(["active", "archived"]);
+export type ScopeLinkStatus = z.infer<typeof scopeLinkStatusSchema>;
+export const ScopeLinkStatus = scopeLinkStatusSchema.enum;
+
 // ── SyncFieldState.side (SD-3) ───────────────────────────────────────────────
 
 /**

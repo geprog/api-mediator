@@ -1,4 +1,4 @@
-import type { RecordLink, TombstoneReason } from "@mediator/domain";
+import type { RecordLink, RecordLinkScopeRef, TombstoneReason } from "@mediator/domain";
 import { and, desc, eq, or } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
@@ -124,6 +124,17 @@ export class RecordLinkRepository implements RecordLinkStore {
 
   public async unlink(id: string): Promise<void> {
     await this.db.delete(recordLink).where(eq(recordLink.id, id));
+  }
+
+  /**
+   * Persist a link's `scopeRef` (SS-10) — the record's stored container, captured at
+   * establishment on a scoped rule. Separated from {@link insert} because a link may
+   * be established before its container is resolved (the scope is filled in on
+   * establishment/harvest); the `jsonb` union is written whole. Reading it back is via
+   * {@link getById} (the mapper collapses a NULL column to an absent `scopeRef`).
+   */
+  public async setScopeRef(id: string, scopeRef: RecordLinkScopeRef): Promise<void> {
+    await this.db.update(recordLink).set({ scopeRef }).where(eq(recordLink.id, id));
   }
 
   public async getById(id: string): Promise<RecordLink | undefined> {
