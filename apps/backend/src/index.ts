@@ -63,7 +63,11 @@ const detection = buildDetectionBackground({
   db,
   logger,
   additionalConsumers: [artifactInstantiation.consumer],
-  additionalReconcilers: [artifactInstantiation.reconciler, sync.reconciler],
+  additionalReconcilers: [
+    artifactInstantiation.reconciler,
+    sync.reconciler,
+    sync.scopeDiscoveryReconciler,
+  ],
 });
 
 async function shutdown(): Promise<void> {

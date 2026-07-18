@@ -10,6 +10,9 @@ import {
   parkedConflictStatusSchema,
   recordLinkEstablishedBySchema,
   recordLinkStatusSchema,
+  scopeKeySchema,
+  scopeLinkEstablishedBySchema,
+  scopeLinkStatusSchema,
   syncFieldStateSideSchema,
   syncRuleStatusSchema,
   targetDriftCheckSchema,
@@ -350,6 +353,73 @@ export const ambiguousMatchListResponseSchema = z.object({
   matches: z.array(ambiguousMatchDtoSchema),
 });
 export type AmbiguousMatchListResponse = z.infer<typeof ambiguousMatchListResponseSchema>;
+
+// ── SS-11: scope-link (container) linking ─────────────────────────────────────
+
+/**
+ * `POST /api/scope-links` request (SS-11.6): manually link two containers — the
+ * container analog of a manual record link. Addressed by the direction-agnostic
+ * `resourcePairRef` plus each side's app + **addressing** scope key (the path-parameter
+ * map that reaches that container: Gitea `{ owner, name }`, Vikunja `{ id }`). Scope
+ * values are operator config, not secrets.
+ */
+export const createScopeLinkRequestSchema = z.object({
+  resourcePairRef: z.string().min(1),
+  sourceAppId: z.uuid(),
+  sourceScopeKey: scopeKeySchema,
+  targetAppId: z.uuid(),
+  targetScopeKey: scopeKeySchema,
+});
+export type CreateScopeLinkRequest = z.infer<typeof createScopeLinkRequestSchema>;
+
+/** A `ScopeLink` on the wire — the two apps' container ids + scope keys, **no credential material**. */
+export const scopeLinkDtoSchema = z.object({
+  id: z.string(),
+  scopeCorrespondenceId: z.string(),
+  appAId: z.string(),
+  appAScopeKey: scopeKeySchema,
+  appBId: z.string(),
+  appBScopeKey: scopeKeySchema,
+  resourcePairRef: z.string(),
+  establishedBy: scopeLinkEstablishedBySchema,
+  status: scopeLinkStatusSchema,
+  createdAt: isoDateTimeSchema,
+});
+export type ScopeLinkDto = z.infer<typeof scopeLinkDtoSchema>;
+
+/** `POST /api/scope-links` response (SS-11.6) — the established manual container link. */
+export const createScopeLinkResponseSchema = z.object({
+  link: scopeLinkDtoSchema,
+});
+export type CreateScopeLinkResponse = z.infer<typeof createScopeLinkResponseSchema>;
+
+/** `DELETE /api/scope-links/:id` response (SS-11.6) — the severed link's id. */
+export const unlinkScopeLinkResponseSchema = z.object({
+  id: z.string(),
+  unlinked: z.literal(true),
+});
+export type UnlinkScopeLinkResponse = z.infer<typeof unlinkScopeLinkResponseSchema>;
+
+/**
+ * One parked container-link (SS-11.5): a record whose container could not be resolved to
+ * a `ScopeLink` (ambiguous → candidate ids present; unresolvable → empty). The input to a
+ * manual container-linking decision (SS-15). Ids + scope keys only, no payload values.
+ */
+export const parkedContainerLinkDtoSchema = z.object({
+  syncEventId: z.string(),
+  resourcePairRef: z.string(),
+  sourceAppId: z.string(),
+  sourceScopeKey: scopeKeySchema,
+  candidateTargetNativeIds: z.array(z.string()),
+  observedAt: isoDateTimeSchema,
+});
+export type ParkedContainerLinkDto = z.infer<typeof parkedContainerLinkDtoSchema>;
+
+/** `GET /api/scope-links/parked` response (SS-11.5) — the parked container-linking queue. */
+export const parkedContainerLinkListResponseSchema = z.object({
+  parked: z.array(parkedContainerLinkDtoSchema),
+});
+export type ParkedContainerLinkListResponse = z.infer<typeof parkedContainerLinkListResponseSchema>;
 
 // ── SA-4: the parked-conflict queue + resolution ─────────────────────────────
 

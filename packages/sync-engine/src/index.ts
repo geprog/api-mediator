@@ -99,6 +99,37 @@ export type {
   TargetReadBinding,
 } from "./identity-resolution/types.js";
 
+// ── Scope discovery — establish `ScopeLink`s (SS-11: constant / identity-match / manual) ──
+
+export {
+  ScopeDiscoveryStage,
+  type DiscoveryPassParams,
+  type EstablishContainerLinkParams,
+  type ResolveContainerParams,
+  type ScopeDiscoveryStageDeps,
+  type ScopeDiscoveryStageOptions,
+} from "./scope-discovery/scope-discovery-stage.js";
+export {
+  canonicalScopeSides,
+  scopeIdentitySignature,
+  type CanonicalScopeSides,
+} from "./scope-discovery/canonical.js";
+export {
+  AMBIGUOUS_CONTAINER_DETAILS_PREFIX,
+  formatAmbiguousContainerDetails,
+  parseAmbiguousContainerDetails,
+  type AmbiguousContainerDetails,
+} from "./scope-discovery/details.js";
+export { FakeScopeLinkStore } from "./scope-discovery/fakes.js";
+export type {
+  AmbiguousContainerMatch,
+  CapturedSourceScope,
+  ContainerParkReader,
+  ContainerResolutionOutcome,
+  DiscoveryPassResult,
+  ScopeContainerCandidate,
+} from "./scope-discovery/types.js";
+
 // ── Loop Prevention — the pipeline's second stage (EP-1..EP-4) ────────────────
 
 export {

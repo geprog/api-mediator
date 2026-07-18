@@ -5,13 +5,15 @@ import type {
   EnablementDegradationDto,
   EnablementRequirementDto,
   ParkedConflictDto,
+  ParkedContainerLinkDto,
   PollRunOutcomeDto,
   RecordLinkDto,
+  ScopeLinkDto,
   SyncEventDto,
   SyncRuleStatusDto,
 } from "@mediator/contracts";
 import type { ParkedWriteEntry } from "@mediator/db";
-import type { AuditLogEntry, ParkedConflict, RecordLink } from "@mediator/domain";
+import type { AuditLogEntry, ParkedConflict, RecordLink, ScopeLink } from "@mediator/domain";
 import type {
   EnablementDegradation,
   EnablementRequirement,
@@ -21,6 +23,7 @@ import type {
 import type {
   AmbiguousMatchView,
   EnableOutcome,
+  ParkedContainerLinkView,
   SyncRuleView,
 } from "../../modules/sync/operator.js";
 
@@ -131,6 +134,34 @@ export function toRecordLinkDto(link: RecordLink): RecordLinkDto {
     establishedBy: link.establishedBy,
     status: link.status,
     createdAt: link.createdAt.toISOString(),
+  };
+}
+
+/** A `ScopeLink` → the SS-11 wire shape. Container ids + scope keys only, no credential material. */
+export function toScopeLinkDto(link: ScopeLink): ScopeLinkDto {
+  return {
+    id: link.id,
+    scopeCorrespondenceId: link.scopeCorrespondenceId,
+    appAId: link.appAId,
+    appAScopeKey: link.appAScopeKey,
+    appBId: link.appBId,
+    appBScopeKey: link.appBScopeKey,
+    resourcePairRef: link.resourcePairRef,
+    establishedBy: link.establishedBy,
+    status: link.status,
+    createdAt: link.createdAt.toISOString(),
+  };
+}
+
+/** A parked container-link view → the SS-11.5 wire shape. Ids + scope keys only, no payload values. */
+export function toParkedContainerLinkDto(view: ParkedContainerLinkView): ParkedContainerLinkDto {
+  return {
+    syncEventId: view.syncEventId,
+    resourcePairRef: view.resourcePairRef,
+    sourceAppId: view.sourceAppId,
+    sourceScopeKey: view.sourceScopeKey,
+    candidateTargetNativeIds: [...view.candidateTargetNativeIds],
+    observedAt: view.observedAt.toISOString(),
   };
 }
 

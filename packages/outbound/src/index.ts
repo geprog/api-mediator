@@ -120,6 +120,8 @@ export {
 
 // The failure signals + classifier the ordering queue settles outbound calls with (OC-4).
 export {
+  CONTAINER_LINK_PARK_REASON,
+  ContainerUnresolvedError,
   PermanentOutboundError,
   RetryableOutboundError,
   ThrottledOutboundError,

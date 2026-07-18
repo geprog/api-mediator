@@ -39,6 +39,32 @@ export class PermanentOutboundError extends Error {
   }
 }
 
+/**
+ * The **container-linking** park reason (SS-11.5) — the distinct `last_error` a record
+ * dead-lettered because its container could not be resolved to a `ScopeLink` carries, so
+ * the dead-letter surface (SA-5) distinguishes a container-link park (which an operator
+ * resolves by *linking a container*, then replaying) from an ordinary write failure. A
+ * non-secret note (scope keys are operator config, never a payload value).
+ */
+export const CONTAINER_LINK_PARK_REASON = "container-link-unresolved";
+
+/**
+ * A record whose container could **not** be resolved to a `ScopeLink` (ambiguous or
+ * unresolvable — SS-11.5). A {@link PermanentOutboundError} so the ordering-queue
+ * dispatcher **parks it immediately** (not a transient retry — a container is linked by an
+ * operator, not by burning retries) into the existing dead-letter store with the distinct
+ * {@link CONTAINER_LINK_PARK_REASON}; replay (SA-5 reactivate) re-runs the pipeline, which
+ * re-attempts container resolution. The **throw** that raises this lives in the SS-12
+ * write-composition/routing path (out of scope here); SS-11 provides the error + reason +
+ * park disposition the dead-letter store reuses.
+ */
+export class ContainerUnresolvedError extends PermanentOutboundError {
+  public constructor(detail: string, options?: { readonly cause?: unknown }) {
+    super(`${CONTAINER_LINK_PARK_REASON}: ${detail}`, options);
+    this.name = "ContainerUnresolvedError";
+  }
+}
+
 /** A load-discipline throttle: defer without counting a failed attempt. */
 export class ThrottledOutboundError extends Error {
   /** How long to defer before retrying (the ceiling wait or `Retry-After`). */

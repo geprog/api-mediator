@@ -17,6 +17,8 @@ import {
   RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
   SyncFieldStateRepository,
   SyncRuleRepository,
   type Database,
@@ -51,6 +53,7 @@ import {
   Poller,
   QueueKeyResolver,
   Scheduler,
+  ScopeDiscoveryStage,
   TtlRecentlyWrittenCache,
   DbPollStateStore,
   evaluateEnablement,
@@ -70,6 +73,16 @@ import { resolveEnableRuleInput } from "./enable-resolver.js";
 import { RepoPollPlanResolver } from "./poll-plan-resolver.js";
 import { RepoSyncPipelineContextLoader } from "./pipeline-context-loader.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos } from "./resolution.js";
+import {
+  RepoContainerParkReader,
+  RepoScopeContainerEnumerator,
+  ScopeDiscoveryService,
+} from "./scope-discovery.js";
+import {
+  InMemoryScopeDiscoveryInFlightRegistry,
+  RepoScopeDiscoveryReadiness,
+  ScopeDiscoveryReconciler,
+} from "./scope-discovery-reconciler.js";
 import {
   RepoTargetCollectionReadResolver,
   RestTargetIdentityLookup,
@@ -173,6 +186,10 @@ export interface SyncBackground {
   readonly orderingQueue: OrderingQueueRepository;
   /** SA-4 — the structured parked-conflict store (the operator queue + resolution reads/writes). */
   readonly parkedConflicts: ParkedConflictRepository;
+  /** SS-11 — the scope-discovery service (constant/manual container link + enablement/harvest/on-demand). */
+  readonly scopeDiscovery: ScopeDiscoveryService;
+  /** SS-11 — the `ScopeLink` store (the parked-container-link queue's drop-resolved lookup). */
+  readonly scopeLinks: ScopeLinkRepository;
   /**
    * SA-4.2 — read the CURRENT source record for a resolution re-run (a single-record
    * read of the rule's source, obeying the same OC-3 load discipline as any read). The
@@ -190,6 +207,8 @@ export interface SyncBackground {
 
   // ── For the composition root: register on the SHARED reconciliation sweep ────
   readonly reconciler: SyncExecutionReconciler;
+  /** SS-11.7 — the scope-discovery sweep re-trigger (registered on the same shared sweep). */
+  readonly scopeDiscoveryReconciler: ScopeDiscoveryReconciler;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
   /** Start the ordering-queue dispatcher and the `unref`'d schedule loop. */
@@ -290,6 +309,29 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     { applyCredential },
   );
 
+  // ── SS-11 scope discovery: establish `ScopeLink`s (constant / identity-match / manual) ──
+  // Reads only (container enumeration via the shared identity-lookup reader) + link
+  // persistence; it NEVER writes to either app (SS-11.8).
+  const scopeLinks = new ScopeLinkRepository(db);
+  const scopeCorrespondences = new ScopeCorrespondenceRepository(db);
+  const scopeDiscoveryStage = new ScopeDiscoveryStage({
+    links: scopeLinks,
+    events: syncEventStore,
+    // SS-11.7 — dedup a container park across sweeps (reuse an open park's event id rather
+    // than minting a new `failure` event every pass).
+    parkReader: new RepoContainerParkReader(auditLog, scopeLinks),
+  });
+  const scopeDiscovery = new ScopeDiscoveryService({
+    stage: scopeDiscoveryStage,
+    links: scopeLinks,
+    enumerator: new RepoScopeContainerEnumerator(
+      { apiSpecs, resourceBindings, registeredApps },
+      targetIdentityLookup,
+    ),
+    correspondences: scopeCorrespondences,
+    repos: { apiSpecs, resourceBindings, registeredApps },
+  });
+
   // ── Pipeline stages (real repos; the SAME syncFieldState instance the handler holds) ──
   const seeder = new IdentityMatchSeeder(syncFieldState);
   const identityResolution = new IdentityResolutionStage({
@@ -372,6 +414,35 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   // ── Background-run tracking (graceful shutdown awaits every in-flight enable) ─
   const activeBackfills = new Set<Promise<unknown>>();
 
+  // ── SS-11 scope discovery: the enablement-time pass + the sweep re-trigger ─────
+  const scopeDiscoveryInFlight = new InMemoryScopeDiscoveryInFlightRegistry();
+  /**
+   * Run the enablement-time container-discovery pass for a pair (SS-11.2), bracketed
+   * in-flight so the sweep can tell a live pass from a crash-orphaned one (SS-11.7). A
+   * non-scoped / not-confirmed / source-not-enumerable pair is a cheap no-op-with-reason;
+   * the pass is idempotent + reads only (never writes to either app — SS-11.8). Best-effort:
+   * a failure degrades timeliness (the sweep re-triggers), never the enable.
+   */
+  const runDiscoveryPass = async (resourcePairRef: string): Promise<void> => {
+    scopeDiscoveryInFlight.markInFlight(resourcePairRef);
+    try {
+      const outcome = await scopeDiscovery.runEnablementDiscoveryPass(resourcePairRef);
+      if (outcome.kind === "incomplete-fetch") {
+        logger.warn(
+          { resourcePairRef, side: outcome.side },
+          "scope discovery pass aborted on a partial container fetch (will retry on the sweep)",
+        );
+      }
+    } catch (error) {
+      logger.error(
+        { resourcePairRef, err: describeError(error) },
+        "scope discovery pass failed (will retry on the sweep)",
+      );
+    } finally {
+      scopeDiscoveryInFlight.clear(resourcePairRef);
+    }
+  };
+
   /**
    * The in-flight bracket (RS): `markInFlight` BEFORE the enable action flips the rule
    * `enabled`+`running`, `clear` in a `finally` AFTER the terminal status flip commits.
@@ -385,6 +456,10 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     inFlightRegistry.markInFlight(ruleId);
     const run = (async (): Promise<EnableRuleResult> => {
       try {
+        // SS-11.2 — the container-level link-only discovery pass runs at enablement
+        // BEFORE the record backfill seeds, so a both-enumerable pair's `ScopeLink`s are
+        // established before records route through them (a no-op for a non-scoped rule).
+        await runDiscoveryPass(input.enablement.rule.resourcePairRef);
         return await ruleEnabler.enable(input);
       } finally {
         inFlightRegistry.clear(ruleId);
@@ -436,6 +511,20 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     }
     await runBracketedEnable(ruleId, resolved.input);
   };
+
+  // SS-11.7 — the sweep re-trigger for a lost/crashed enablement discovery pass. NOT a
+  // second scheduler: it registers on the SHARED reconciliation sweep (like the backfill
+  // reconciler) and re-triggers the idempotent pass only for a scoped, confirmed pair
+  // with no active `ScopeLink` yet and no pass in flight.
+  const scopeDiscoveryReconciler = new ScopeDiscoveryReconciler({
+    rules: syncRules,
+    retrigger: { retriggerDiscovery: runDiscoveryPass },
+    inFlight: scopeDiscoveryInFlight,
+    readiness: new RepoScopeDiscoveryReadiness({
+      correspondences: scopeCorrespondences,
+      links: scopeLinks,
+    }),
+  });
 
   const reconciler = new SyncExecutionReconciler({
     rules: syncRules,
@@ -521,12 +610,15 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     syncFieldState,
     orderingQueue,
     parkedConflicts,
+    scopeDiscovery,
+    scopeLinks,
     readSourceRecord,
     poller,
     scheduler,
     queueDispatcher,
     inFlightRegistry,
     reconciler,
+    scopeDiscoveryReconciler,
     start(): void {
       queueDispatcher.start();
       if (!scheduleRunning) {
