@@ -12,7 +12,9 @@ export type RecordLinkInsert = typeof recordLink.$inferInsert;
  * (the `RecordLink` refinement requires it absent on a non-`tombstoned` link);
  * `tombstoned_at` stays nullable (`null` on an active/archived link). The
  * `establishing_queue_key` jsonb round-trips as the `RecordLinkEstablishingQueueKey`
- * discriminated union it was stored as.
+ * discriminated union it was stored as. `scope_ref` (SS-10) collapses NULL → an
+ * **absent** domain key (`scopeRef` is absent on a non-scoped rule's link); its
+ * `jsonb` union carries no `Date`, so it round-trips verbatim.
  */
 export function mapRecordLinkRow(row: RecordLinkRow): RecordLink {
   return stripUndefined({
@@ -28,10 +30,14 @@ export function mapRecordLinkRow(row: RecordLinkRow): RecordLink {
     establishingQueueKey: row.establishingQueueKey,
     createdAt: row.createdAt,
     tombstonedAt: row.tombstonedAt,
+    scopeRef: row.scopeRef ?? undefined,
   });
 }
 
-/** Domain → insert. An absent `tombstoneReason` becomes a NULL column. */
+/**
+ * Domain → insert. An absent `tombstoneReason` becomes a NULL column; an absent
+ * `scopeRef` (a non-scoped rule's link) becomes a NULL `scope_ref` column.
+ */
 export function toRecordLinkInsert(link: RecordLink): RecordLinkInsert {
   return {
     id: link.id,
@@ -46,5 +52,6 @@ export function toRecordLinkInsert(link: RecordLink): RecordLinkInsert {
     establishingQueueKey: link.establishingQueueKey,
     createdAt: link.createdAt,
     tombstonedAt: link.tombstonedAt,
+    scopeRef: link.scopeRef ?? null,
   };
 }

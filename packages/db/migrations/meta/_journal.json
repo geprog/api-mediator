@@ -127,6 +127,13 @@
       "when": 1784270826018,
       "tag": "0017_narrow_storm",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784357846072,
+      "tag": "0018_acoustic_nick_fury",
+      "breakpoints": true
     }
   ]
 }

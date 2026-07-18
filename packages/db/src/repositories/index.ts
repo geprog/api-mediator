@@ -33,6 +33,8 @@ export {
   type RecordLinkSideRef,
   type RecordLinkStore,
 } from "./record-link.js";
+export { ScopeCorrespondenceRepository } from "./scope-correspondence.js";
+export { ScopeLinkRepository, type ScopeLinkSideRef } from "./scope-link.js";
 export { SyncFieldStateRepository, type SyncFieldStateStore } from "./sync-field-state.js";
 export {
   ParkedConflictRepository,

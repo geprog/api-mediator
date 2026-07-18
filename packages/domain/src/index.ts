@@ -33,5 +33,7 @@ export * from "./downstream-artifacts.js";
 export * from "./audit-log.js";
 export * from "./sync-enums.js";
 export * from "./record-link.js";
+export * from "./scope-correspondence.js";
+export * from "./scope-link.js";
 export * from "./sync-field-state.js";
 export * from "./parked-conflict.js";

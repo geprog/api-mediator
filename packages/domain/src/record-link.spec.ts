@@ -137,3 +137,46 @@ describe("RecordLink schema — retained ordering-queue key (SD-2 crit 4)", () =
     expect(result.success).toBe(false);
   });
 });
+
+describe("RecordLink schema — scopeRef union (SS-10 crit 4)", () => {
+  it("is absent on a non-scoped rule's link (absence is not undefined)", () => {
+    const parsed = recordLinkSchema.parse(activeLink());
+    expect(parsed.scopeRef).toBeUndefined();
+    expect("scopeRef" in parsed).toBe(false);
+  });
+
+  it("round-trips the L3 scope-link kind (arbitrary value-spaces, a ScopeLink reference)", () => {
+    const parsed = recordLinkSchema.parse({
+      ...activeLink(),
+      scopeRef: { kind: "scope-link", scopeLinkId: "sl-42" },
+    });
+    expect(parsed.scopeRef).toStrictEqual({ kind: "scope-link", scopeLinkId: "sl-42" });
+  });
+
+  it("round-trips the L2 resolved kind (frozen { parameterName → value } map)", () => {
+    const parsed = recordLinkSchema.parse({
+      ...activeLink(),
+      scopeRef: { kind: "resolved", values: { owner: "alice", name: "phoenix" } },
+    });
+    expect(parsed.scopeRef).toStrictEqual({
+      kind: "resolved",
+      values: { owner: "alice", name: "phoenix" },
+    });
+  });
+
+  it("rejects a scope-link scopeRef with an empty scopeLinkId", () => {
+    const result = recordLinkSchema.safeParse({
+      ...activeLink(),
+      scopeRef: { kind: "scope-link", scopeLinkId: "" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an unknown scopeRef kind", () => {
+    const result = recordLinkSchema.safeParse({
+      ...activeLink(),
+      scopeRef: { kind: "captured", values: { owner: "alice" } },
+    });
+    expect(result.success).toBe(false);
+  });
+});
