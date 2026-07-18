@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CONTAINER_LINK_PARK_REASON,
+  ContainerUnresolvedError,
   PermanentOutboundError,
   RetryableOutboundError,
   ThrottledOutboundError,
@@ -27,6 +29,15 @@ describe("classifyOutboundFailure", () => {
     expect(classifyOutboundFailure(new PermanentOutboundError("HTTP 400"), 1, 5)).toStrictEqual({
       kind: "park",
     });
+  });
+
+  it("container-unresolved → park immediately with the distinct container-link reason (SS-11.5)", () => {
+    const error = new ContainerUnresolvedError("no ScopeLink for scope {owner:alice}");
+    // A permanent-park disposition: a container is linked by an operator, never by retries.
+    expect(classifyOutboundFailure(error, 1, 5)).toStrictEqual({ kind: "park" });
+    // The dead-letter store's `last_error` reason distinguishes a container-link park.
+    expect(error.message.startsWith(CONTAINER_LINK_PARK_REASON)).toBe(true);
+    expect(error).toBeInstanceOf(PermanentOutboundError);
   });
 
   it("retryable → retry under the ceiling, park at it", () => {

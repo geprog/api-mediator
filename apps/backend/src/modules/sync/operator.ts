@@ -14,6 +14,7 @@ import {
   type ParkedConflictStore,
   type ParkedWriteEntry,
   type ReactivateParkedResult,
+  type ScopeLinkStore,
   type SyncRuleConfigPatch,
 } from "@mediator/db";
 import type {
@@ -22,6 +23,8 @@ import type {
   ParkedConflict,
   ParkedConflictResolutionChoice,
   RecordLink,
+  ScopeKey,
+  ScopeLink,
   SyncRule,
   TombstoneReason,
 } from "@mediator/domain";
@@ -29,6 +32,7 @@ import { stripUndefined } from "@mediator/domain";
 import {
   buildChangePayload,
   evaluateEnablement,
+  parseAmbiguousContainerDetails,
   type DetectedChange,
   type EnablementDegradation,
   type EnablementInput,
@@ -42,6 +46,7 @@ import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/teleme
 import { BadRequestError, NotFoundError } from "../../app-errors.js";
 import type { EnableRuleGateResult } from "./background.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos, type RuleArtifacts } from "./resolution.js";
+import type { EstablishLinkOutcome, ScopeDiscoveryService } from "./scope-discovery.js";
 import { computeRequiredScopeBindings } from "./scope-requirements.js";
 
 /**
@@ -116,6 +121,10 @@ export interface SyncOperatorEngine {
   };
   /** SA-4.2 — read the CURRENT source record so a source-wins re-run propagates the live value. */
   readSourceRecord(ruleId: string, sourceNativeId: string): Promise<SingleRecordReadResult>;
+  /** SS-11 — the scope-discovery service (constant/manual container link + on-demand resolution). */
+  readonly scopeDiscovery: ScopeDiscoveryService;
+  /** SS-11.5 — the active-link lookup used to drop already-linked containers from the parked queue. */
+  readonly scopeLinks: ScopeLinkStore;
 }
 
 export interface SyncOperatorServiceDeps {
@@ -205,6 +214,26 @@ export interface ManualLinkRequest {
   readonly ruleId: string;
   readonly sourceNativeId: string;
   readonly targetNativeId: string;
+}
+
+/** The SS-11.6 manual **container**-link request (mirrors the DTO). */
+export interface ContainerLinkRequest {
+  readonly resourcePairRef: string;
+  readonly sourceAppId: string;
+  readonly sourceScopeKey: ScopeKey;
+  readonly targetAppId: string;
+  readonly targetScopeKey: ScopeKey;
+}
+
+/** One parked container-link the operator must resolve by linking a container (SS-11.5). */
+export interface ParkedContainerLinkView {
+  readonly syncEventId: string;
+  readonly resourcePairRef: string;
+  readonly sourceAppId: string;
+  readonly sourceScopeKey: ScopeKey;
+  /** The candidate target container native ids (empty = unresolvable / no candidate). */
+  readonly candidateTargetNativeIds: readonly string[];
+  readonly observedAt: Date;
 }
 
 /** The SA-4 resolve request (mirrors the DTO): the operator's chosen resolution. */
@@ -557,6 +586,99 @@ export class SyncOperatorService {
       });
     }
     return matches;
+  }
+
+  // ── SS-11: scope-link (container) linking ──────────────────────────────────
+
+  /**
+   * SS-11.6 — manually link two containers (`establishedBy = manual`, mirroring SA-3's
+   * manual record link). A pair with no `ScopeCorrespondence` is a 404; a container
+   * already linked to a different counterpart surfaces as a `BadRequestError` (never
+   * silently re-pointed). Attributed to the identity (OA-3).
+   */
+  public async linkContainers(request: ContainerLinkRequest, actor: string): Promise<ScopeLink> {
+    const outcome = await this.#sync.scopeDiscovery.linkContainers(
+      request.resourcePairRef,
+      request.sourceAppId,
+      request.sourceScopeKey,
+      request.targetAppId,
+      request.targetScopeKey,
+    );
+    const link = this.#unwrapEstablish(outcome, request.resourcePairRef);
+    await this.#auditLog.insert(
+      this.#attribution(actor, "scope link established manually", {
+        originAppId: request.sourceAppId,
+      }),
+    );
+    return link;
+  }
+
+  /**
+   * SS-11.6 — sever a `ScopeLink` (manual unlink). A missing link is a 404. Attributed
+   * to the identity.
+   */
+  public async unlinkContainer(scopeLinkId: string, actor: string): Promise<void> {
+    const removed = await this.#sync.scopeDiscovery.unlinkContainer(scopeLinkId);
+    if (!removed) {
+      throw new NotFoundError(`Scope link ${scopeLinkId} not found.`);
+    }
+    await this.#auditLog.insert(this.#attribution(actor, "scope link severed manually", {}));
+  }
+
+  /**
+   * SS-11.5 — the parked container-linking queue: records whose container could not be
+   * resolved to a `ScopeLink` (ambiguous or unresolvable), surfaced from the discovery
+   * `failure` `SyncEvent`s so an operator can link the container and replay. A parked
+   * entry drops off once an active `ScopeLink` covers its source scope (mirroring the
+   * ambiguous-record queue's drop-resolved). Bounded by `limit`. No payload/secret value.
+   */
+  public async listParkedContainerLinks(
+    limit = DEFAULT_EVENT_LIMIT,
+  ): Promise<ParkedContainerLinkView[]> {
+    const events = await this.#auditLog.querySyncEvents({ status: "failure", limit });
+    const views: ParkedContainerLinkView[] = [];
+    for (const event of events) {
+      if (event.details === undefined) {
+        continue;
+      }
+      const parsed = parseAmbiguousContainerDetails(event.details);
+      if (parsed === undefined) {
+        continue;
+      }
+      // Drop already-resolved containers: an active ScopeLink covering the source scope.
+      const active = await this.#sync.scopeLinks.lookupByScopeKey(parsed.resourcePairRef, {
+        appId: parsed.sourceAppId,
+        scopeKey: parsed.sourceScopeKey,
+      });
+      if (active !== undefined) {
+        continue;
+      }
+      views.push({
+        syncEventId: event.id,
+        resourcePairRef: parsed.resourcePairRef,
+        sourceAppId: parsed.sourceAppId,
+        sourceScopeKey: parsed.sourceScopeKey,
+        candidateTargetNativeIds: parsed.candidateNativeIds,
+        observedAt: event.timestamp,
+      });
+    }
+    return views;
+  }
+
+  /** Turn a discovery establish outcome into the established link, or a 4xx. */
+  #unwrapEstablish(outcome: EstablishLinkOutcome, resourcePairRef: string): ScopeLink {
+    if (outcome.kind === "not-scoped") {
+      throw new NotFoundError(
+        `No ScopeCorrespondence for resource pair ${resourcePairRef} — confirm the scope identity key first.`,
+      );
+    }
+    const result = outcome.result;
+    if (result.kind === "conflict") {
+      throw new BadRequestError(
+        `A container in this pair is already linked to a different counterpart (existing link ${result.existing.id}); unlink it before re-linking.`,
+      );
+    }
+    return result.link;
   }
 
   // ── SA-4: resolve a parked conflict ────────────────────────────────────────
