@@ -88,13 +88,14 @@ general fallback but not exercisable against scenario-1's *trimmed* source (no r
 
 ## Design decisions (coordinator's six questions)
 
-1. **Scope correspondence = new entity `ScopeLink`** (not a `RecordLink` extension). Container correspondence
-   is structurally identical to `RecordLink` (two apps' own ids, established by constant/identity-match/manual,
-   resource-pair-scoped) but at a different granularity with a different key and lifecycle; and repos↔projects
-   is explicitly **not** an `ApprovedMapping` (ground-truth marks it ambiguous/non-mapping). Identified by a
-   **scope identity key** over the container's fields. It *can* be discovered (list source + target containers +
-   match) — a mini container-level backfill — or harvested from record-carried scope where a container-list op
-   is absent.
+1. **Scope correspondence = new entity `ScopeLink`** (instances) under a new **`ScopeCorrespondence`** (config,
+   the finalized home of the **scope identity key** — see the *Finalized L3 decisions* box in Layer 3), not a
+   `RecordLink` extension. Structurally identical to `RecordLink` (two apps' own ids, established by
+   constant/identity-match/manual, resource-pair-scoped) but a different granularity/key/lifecycle; repos↔projects
+   is explicitly **not** an `ApprovedMapping`. Discovered (list source + target containers + match) or harvested
+   from record-carried scope where a container-list op is absent. **Delete routing:** `RecordLink` gains
+   `scopeRef` (persisted container at establishment) so a delete — which has no captured scope — still routes;
+   this also fixes the L2 record-derived-delete gap.
 2. **Per-param binding references its source via a discriminated union** on `ResourceBinding.scopePathBindings`:
    `constant` (literal) | `record-derived` (`sourceScopeKey` selecting a component of the source
    resource's `sourceScopeRef`, shared value-space) | `scope-link` (`scopeKeyRef` into the resolved
@@ -436,100 +437,156 @@ Blocked by SS-8, Phase-4 SU-1/SU-5.
 
 # Layer 3 — Explicit scope correspondence + multi-scope (`kind: scope-link`)
 
-Adds the first-class `ScopeLink` (container ↔ container), its discovery/linking, per-scope polling, and
-scope-qualified record identity. Enables **true multi-repo → multi-project sync** with arbitrary
-container id value-spaces.
+Adds the `ScopeCorrespondence` config (home of the **scope identity key**), the first-class `ScopeLink`
+instances (container ↔ container), their discovery/linking, the `scope-link` binding fill, the
+`RecordLink.scopeRef` that routes deletes, per-scope polling, and scope-qualified record identity. Enables
+**true multi-repo → multi-project sync** with arbitrary container-id value-spaces.
 
-## SS-10 — `ScopeLink` domain entity + scope identity key
+> **Finalized L3 decisions (coordinator's four items):**
+> **(1) Scope-identity-key home** = a new direction-agnostic config entity **`ScopeCorrespondence`** (one
+> per scoped resource pair), not `ResourceBinding` (single-spec) nor `SyncRule` (one-directional). The
+> scope identity key is the value-preserving pairing *source `sourceScopeRef` component(s) ↔ target
+> container field(s)* — reusing the already-built `sourceScopeRef` for the source side.
+> **(2) Discovery** = an enablement-time link-only pass (mini container backfill) + steady-state on-demand
+> harvest + sweep re-run + manual; an unresolvable/ambiguous container **parks** (never guessed, never
+> dropped). Not a second scheduler.
+> **(3) Delete routing** = `RecordLink` gains `scopeRef` (persisted container, captured at establishment),
+> so a delete — which carries **no captured scope** (source record gone) — and any no-capture read route
+> from stored state; this **closes the L2 record-derived-delete generic-Error gap** for both layers.
+> **(4) Scoped record identity** = match within the resolved container; pre-link queue key becomes
+> scope-qualified; ambiguous guard runs within the container; snapshot still keys by globally-unique
+> native id.
 
-**As an** operator, **I** have container correspondences persisted with their own identity, **so that**
-a record's source container can be translated to its target container even when the two apps' container
-ids are unrelated.
+## SS-10 — `ScopeCorrespondence` config + scope identity key + `ScopeLink` / `RecordLink.scopeRef` domain
+
+**As an** operator, **I** have the container-correspondence configuration, its instances, and each
+record's stored container persisted, **so that** a record's source container translates to its target
+container (even with unrelated ids) and a delete can still find its container.
 
 ### Acceptance criteria
 
-1. **Given** the domain model, **when** `ScopeLink` is added, **then** it carries
-   `{ id, appAId, appAScopeKey, appBId, appBScopeKey, resourcePairRef, establishedBy, status, createdAt }`
-   ([data-model.md](../architecture/data-model.md) `ScopeLink`).
-2. **Given** `resourcePairRef`, **when** modeled, **then** it uses the same canonical direction-agnostic
-   form as `RecordLink.resourcePairRef`, so both directions of a pair resolve the same `ScopeLink`.
-3. **Given** `establishedBy`, **when** modeled, **then** its values are `constant | identity-match |
-   manual` (no `create-propagation`).
-4. **Given** the **scope identity key**, **when** modeled, **then** it is the confirmed container-field(s)
-   on each side (Gitea repo `full_name` ↔ Vikunja project `title`/`identifier`), confirmed by the
-   operator like a record identity key but over the container resource, and restricted to value-preserving
-   comparison.
-5. **Given** a `ScopeLink`, **when** either side's container/app is archived or deregistered, **then** the
-   link is set `status = archived` (not deleted), mirroring `RecordLink` archival.
+1. **Given** the domain model, **when** `ScopeCorrespondence` is added, **then** it carries
+   `{ id, resourcePairRef, scopeIdentityKey, targetContainerRef, sourceContainerRef?, confirmedBy, confirmedAt }`,
+   **one per scoped resource pair**, `resourcePairRef` in the canonical direction-agnostic form
+   ([data-model.md](../architecture/data-model.md) `ScopeCorrespondence`).
+2. **Given** `scopeIdentityKey`, **when** modeled, **then** it is the **value-preserving** pairing of the
+   source resource's `sourceScopeRef` component(s) to the target **container** resource's identity
+   field(s) (source `name` ↔ target `title`), restricted to value-preserving comparison (reject
+   `coerce`/`aggregate`/`expression`, mirroring `FieldMapping.isIdentityKey`'s `rename`-only rule), and
+   **derive-then-confirm** (proposed by name/type similarity, operator-confirmed).
+3. **Given** the domain model, **when** `ScopeLink` is added, **then** it carries
+   `{ id, scopeCorrespondenceId, appAId, appAScopeKey, appBId, appBScopeKey, resourcePairRef,
+   establishedBy (constant|identity-match|manual), status (active|archived), createdAt }`, `resourcePairRef`
+   direction-agnostic so both directions resolve the same link.
+4. **Given** `RecordLink`, **when** extended, **then** it gains an optional `scopeRef`:
+   `{ kind: "scope-link", scopeLinkId }` (L3, arbitrary value-spaces) **or** `{ kind: "resolved", values }`
+   (L2 shared value-space — the frozen `{ parameterName → value }`); **absent** on a non-scoped rule's
+   links ([data-model.md](../architecture/data-model.md) `RecordLink.scopeRef`).
+5. **Given** a container or app leaves the landscape, **when** the cascade runs, **then** the
+   `ScopeCorrespondence`'s affected `ScopeLink`s are set `status = archived` (not deleted); a
+   `RecordLink.scopeRef` pointing at an archived `ScopeLink` still resolves its frozen key for a final
+   delete/audit.
+6. **Given** the config is cross-app + direction-agnostic, **when** its home is chosen, **then** it is
+   **not** placed on `ResourceBinding` (single-spec) or `SyncRule` (one-directional) — the reason
+   `ScopeCorrespondence` is its own entity.
 
 ### Out of scope
 
-- Establishing links (discovery/manual) — SS-11. Filling params from a link — SS-12.
+- Establishing links (discovery/manual) — SS-11. Filling/routing from a link — SS-12.
 
 ### Dependencies
 
-Blocked by SS-1, Phase-4 SD-2 (RecordLink domain, as sibling). Precedes SS-11..SS-16.
+Blocked by SS-1, Phase-4 SD-2 (`RecordLink` domain, as sibling). Precedes SS-11..SS-16.
 
 ---
 
 ## SS-11 — Establish `ScopeLink`s: constant | identity-match discovery | manual
 
 **As an** operator, **I** have container correspondences established by a constant, by discovery, or
-manually, **so that** every record's container resolves to a target container.
+manually — at enablement and on demand — **so that** every record's container resolves to a target
+container, and one that cannot is parked, not guessed.
 
 ### Acceptance criteria
 
 1. **Given** a single source container, **when** the operator maps it to a target container by literal,
-   **then** a `ScopeLink` is written `establishedBy = constant`.
-2. **Given** both container resources are **enumerable** (a confirmed container `collectionReadRef` on
-   each — e.g. Vikunja `GET /projects`), **when** discovery runs, **then** it lists both sides and
-   establishes `ScopeLink`s `establishedBy = identity-match` where the two **scope identity keys** match;
-   an ambiguous container match is never auto-linked (surfaced for manual linking, mirroring RL-4).
+   **then** a `ScopeLink` is written `establishedBy = constant` under the pair's `ScopeCorrespondence`.
+2. **Given** enablement (**before** record backfill), **when** the container-level **link-only discovery
+   pass** runs and both container resources are **enumerable** (a confirmed container `collectionReadRef`
+   on each — e.g. Vikunja `GET /projects`), **then** it lists both sides and establishes `ScopeLink`s
+   `establishedBy = identity-match` where the two sides' `scopeIdentityKey` values match; an **ambiguous**
+   container match is never auto-linked (parked for manual linking, mirroring RL-4).
 3. **Given** the source container resource is **not** enumerable (scenario-1 trimmed Gitea has no
    repo-list), **when** records stream from a cross-scope read, **then** scopes are **harvested** from the
-   records' `sourceScopeRef` values and matched to target containers (listed via the target's container
-   `collectionReadRef`), establishing `ScopeLink`s `identity-match`.
-4. **Given** the operator, **when** they link/unlink containers in the UI, **then** a `ScopeLink`
+   records' captured `sourceScopeRef` values and matched to target containers (listed via
+   `targetContainerRef`'s `collectionReadRef`), establishing `ScopeLink`s `identity-match`.
+4. **Given** steady state, **when** a polled record's container has **no resolved `ScopeLink`**, **then**
+   an **on-demand harvest** attempts resolution inline (captured scope → match/lookup target container →
+   establish the link) — the container analog of a steady-state identity match.
+5. **Given** a container that is **ambiguous or cannot be resolved**, **when** a record needs it, **then**
+   the record is **parked** for manual container linking — recorded, surfaced, replayable — **never**
+   written to a guessed container and never silently dropped.
+6. **Given** the operator, **when** they link/unlink containers in the UI, **then** a `ScopeLink`
    `establishedBy = manual` is written/severed.
-5. **Given** discovery, **when** it runs, **then** its executions are ordinary `SyncEvent`s and it does
-   **not** write to either app (a container-level link-only pass).
+7. **Given** the reconciliation sweep, **when** an enablement discovery pass was lost/crashed, **then** it
+   **re-triggers** the pass (mirrors RS-1's backfill re-trigger); container discovery is enablement-time +
+   on-demand + sweep + manual — **not** a second continuous scheduler.
+8. **Given** discovery, **when** it runs, **then** its executions are ordinary `SyncEvent`s and it **never
+   writes** to either app (a container-level link-only pass).
 
 ### Out of scope
 
-- Filling params — SS-12. Per-scope polling — SS-13.
+- Filling/routing params from a link — SS-12. Per-scope polling — SS-13.
 
 ### Dependencies
 
-Blocked by SS-10, Phase-4 RL-3/RL-4 (identity-match + ambiguous guard patterns). Precedes SS-12, SS-13.
+Blocked by SS-10, Phase-4 RL-3/RL-4 (identity-match + ambiguous guard), RS-1 (sweep). Precedes SS-12, SS-13.
 
 ---
 
-## SS-12 — `scope-link` resolver: fill target scope from the resolved `ScopeLink`
+## SS-12 — `scope-link` resolver + delete/no-capture routing via `RecordLink.scopeRef`
 
-**As an** operator, **I** have the write side fill a scope parameter from the record's resolved container
-correspondence, **so that** arbitrary target container ids (project `42`) are reached correctly.
+**As an** operator, **I** have the write side fill a scope parameter from the record's resolved container —
+from its captured scope while creating, from its **stored** container thereafter — **so that** arbitrary
+target ids (project `42`) are reached and a **delete** (which has no source record) still routes.
 
 ### Acceptance criteria
 
-1. **Given** a `scopePathBindings` entry `kind: "scope-link"`, **when** a write is composed, **then** the
-   parameter is filled from the record's resolved `ScopeLink` target-side container key (`scopeKeyRef`)
-   — e.g. `PUT /projects/{id}/tasks`'s `{id}` = the linked Vikunja project id.
-2. **Given** a record whose source scope has **no** resolved `ScopeLink`, **when** a write is attempted,
-   **then** no scope value is fabricated — the resolver returns `undefined` and the execution is parked
-   for manual container linking (surfaced, never silently mis-scoped).
-3. **Given** the id parameter, **when** the write is composed, **then** it is still filled from the
-   `RecordLink` (scope from `ScopeLink`, id from `RecordLink` — never crossed).
-4. **Given** scenario-1 with `ScopeLink(alice/phoenix ↔ project 42)`, **when** a Gitea issue create is
+1. **Given** the `scopePathBindings` union, **when** extended, **then** it gains the `kind: "scope-link"`
+   member `{ kind, parameterName, scopeKeyRef, confirmedBy, confirmedAt }`, slotting into the existing
+   discriminated union beside `constant`/`record-derived` without reshaping the collection.
+2. **Given** a **create** (no `RecordLink` yet), **when** a write is composed, **then** the target scope
+   parameter is filled from the record's **captured scope** resolved through its matched/looked-up
+   `ScopeLink` — the target `appXScopeKey` selected by `scopeKeyRef` (e.g. `PUT /projects/{id}/tasks`'s
+   `{id}` = the linked project id); on link establishment, `RecordLink.scopeRef =
+   { kind: "scope-link", scopeLinkId }` is persisted.
+3. **Given** a **linked** update/delete/read, **when** a write is composed, **then** the target scope is
+   resolved from **`RecordLink.scopeRef`** (the authoritative stored container), **not** from a captured
+   scope — so a **delete**, which carries no captured scope (source record gone), and a
+   `read-before-write`/PUT read-carry route to the right container.
+4. **Given** a delete (or no-capture read) under a scoped rule whose `RecordLink.scopeRef` is
+   **absent/unresolvable**, **when** it runs, **then** the execution is **parked** for manual container
+   linking — **not** a generic transient throw (this closes the L2 record-derived-delete gap where
+   `targetDriftCheck != none` throws today) and never a guessed container.
+5. **Given** the record id and the scope, **when** a write is composed, **then** they are **never
+   crossed**: the id parameter from the `RecordLink`'s native id, the scope parameter(s) from the
+   `ScopeLink`/`scopeRef`.
+6. **Given** a create whose captured scope has **no** resolvable `ScopeLink`, **when** a write is
+   attempted, **then** the resolver returns `undefined` and the execution is parked (SS-11.5) — never a
+   fabricated scope.
+7. **Given** an **L2 `record-derived`** rule, **when** a record is linked, **then** its
+   `RecordLink.scopeRef = { kind: "resolved", values }` is persisted from the resolved scope, so its
+   **deletes route from stored values** too — the delete fix is unified across L2 and L3.
+8. **Given** scenario-1 with `ScopeLink(alice/phoenix ↔ project 42)`, **when** a Gitea issue create is
    propagated, **then** it resolves to `PUT /projects/42/tasks` with the transformed task body — the true
    multi-scope create.
 
 ### Out of scope
 
-- Choosing the cross-scope vs per-scope read — SS-13. Scoped record identity — SS-14.
+- Cross-scope vs per-scope read choice — SS-13. Scoped record identity/queue key — SS-14.
 
 ### Dependencies
 
-Blocked by SS-11, SS-4. Precedes SS-13, SS-14.
+Blocked by SS-11, SS-4, Phase-4 OC-4 (park mechanics). Precedes SS-13, SS-14.
 
 ---
 
@@ -564,29 +621,37 @@ Blocked by SS-12, Phase-4 SP-2/SP-5/BE-6. Precedes SS-14, SS-15.
 
 ---
 
-## SS-14 — Scoped record identity: match, queue key, ambiguous guard
+## SS-14 — Scoped record identity: match within container, scope-qualified queue key, ambiguous guard
 
 **As an** operator, **I** have record-level identity resolved **within** a container, **so that** two
-records sharing a title in different containers are never merged.
+records sharing a `title` in different containers are never merged or serialized together.
 
 ### Acceptance criteria
 
 1. **Given** a record whose identity key is unique only within its container, **when** identity-match
-   runs, **then** the target lookup/fetch-and-match is scoped to the record's **resolved target
-   container** (look up `title` within project `42`, not globally).
+   runs, **then** the target lookup/fetch-and-match is **scoped to the record's resolved target
+   container**: a filtered read (`FieldMapping.targetLookupParamRef`) fills the container scope
+   parameters from the `ScopeLink` so it searches only within project `42`; fetch-and-match enumerates
+   only that container — never a global lookup.
 2. **Given** the pre-link ordering-queue key (OQ), **when** a record has no `RecordLink` yet, **then** the
-   key is `(scope, identity-value)` — scope-qualified — so records with the same identity value in
-   different containers do not serialize together or cross-match.
-3. **Given** an ambiguous match **within** the resolved container, **when** detected, **then** it is
-   surfaced for manual linking (never auto-picked), mirroring RL-4.
-4. **Given** snapshot keying, **when** a snapshot is written, **then** it keys by globally-unique native
-   id (unchanged) — scoping affects matching and queue keys, not snapshot keys.
-5. **Given** a record whose container has no resolved `ScopeLink`, **when** identity resolution runs,
-   **then** it cannot match/route and is parked for container linking (never mis-scoped).
+   key is **scope-qualified**: for an **L2 shared value-space**, `(shared-scope-value, identity-value)`;
+   for an **L3 arbitrary value-space**, `(ScopeLink canonical key, identity-value)` — each side's captured
+   scope resolved to the shared `ScopeLink` **first**, so both directions compute the **same** key and do
+   not cross-match. Extends OQ's pre-link identity-value fallback key.
+3. **Given** a record whose container is **unresolved**, **when** it would be enqueued, **then** it is
+   **parked before cross-direction queueing** (it cannot be safely scope-keyed) — consistent with SS-12.6.
+4. **Given** an **ambiguous** match **within** the resolved container, **when** detected, **then** it is
+   parked for manual linking (never auto-picked), mirroring RL-4 — the guard runs in the scoped domain.
+5. **Given** snapshot keying, **when** a snapshot is written, **then** it keys by **globally-unique native
+   id** (confirmed unchanged) — scoping affects matching and queue keys, not snapshot keys; per-scope
+   polling (SS-13) keeps a per-scope snapshot still keyed by native id within it.
+6. **Given** the data path, **when** identity resolves, **then** it is fed by the **captured scope**
+   (create/update path, from the source record) and by the **resolved `ScopeLink` / `RecordLink.scopeRef`**
+   (linked path) — consistent with SS-8 (L2 capture) and SS-12 (L3 store).
 
 ### Out of scope
 
-- The container-linking UI — SS-15.
+- The container-linking / parked-scope UI — SS-15.
 
 ### Dependencies
 
@@ -596,24 +661,30 @@ Blocked by SS-12, Phase-4 RL-1..RL-4, OQ-2..OQ-4. Precedes SS-15.
 
 ## SS-15 — Enablement gate + UI for scoped rules (scope-link)
 
-**As an** operator, **I** see what a scoped rule needs — scope identity key, resolvable `ScopeLink`s,
-container list op — and link containers, **so that** a multi-scope rule enables only when it can resolve
-every record's container.
+**As an** operator, **I** see what a scoped rule needs — the scope identity key, resolvable `ScopeLink`s,
+the container list op — confirm the scope identity key, and link containers, **so that** a multi-scope
+rule enables only when it can resolve every record's container.
 
 ### Acceptance criteria
 
-1. **Given** a rule with any `scope-link` scope binding, **when** the gate runs (extends SS-5), **then** it
-   requires the **scope identity key confirmed** and the relevant `ScopeLink`(s) resolvable — a
-   confirmed identity key for discovery, or constant/manual links covering the scopes in play.
-2. **Given** per-scope enumeration is the read mode, **when** the gate runs, **then** the source
-   container's `collectionReadRef` (and `paginationRef` where paging) must be confirmed.
+1. **Given** a rule with any `kind: scope-link` scope binding, **when** the gate runs (extends SS-5),
+   **then** it requires the pair's `ScopeCorrespondence.scopeIdentityKey` **confirmed** and the relevant
+   `ScopeLink`(s) **resolvable** — a confirmed scope identity key for discovery, or `constant`/`manual`
+   links covering the scopes in play.
+2. **Given** per-scope enumeration is the read mode (SS-13), **when** the gate runs, **then** the source
+   container's `collectionReadRef` (and `paginationRef` where paging) must be confirmed, and the
+   `targetContainerRef`'s `collectionReadRef` must be confirmed for discovery.
 3. **Given** an unmet scope precondition, **when** enable is attempted, **then** it is blocked and listed
-   in "still needs" (extends BE-1/BE-2, SU-5), distinguishing an **unconfirmed scope identity key** from
-   an **unresolved `ScopeLink`**.
-4. **Given** the container-linking screen (mirrors SU-2), **when** it renders, **then** it lists
-   unresolved/ambiguous container matches with candidate target containers and lets the operator
-   link/unlink `ScopeLink`s.
-5. **Given** a `viewer`, **when** they open either surface, **then** it is read-only (OA-2).
+   in "still needs" (extends BE-1/BE-2, SU-5), **distinguishing** an unconfirmed **scope identity key**, an
+   unresolved **`ScopeLink`**, and an unconfirmed **container list op**.
+4. **Given** a **scope-identity-key confirmation panel** (mirrors the record identity-key panel / RB-3),
+   **when** it renders, **then** the operator confirms the value-preserving pairing *source `sourceScopeRef`
+   component ↔ target container field* (derive-then-correct — the mediator pre-selects a candidate).
+5. **Given** the **container-linking screen** (mirrors SU-2), **when** it renders, **then** it lists
+   unresolved/ambiguous/**parked** container matches (SS-11.5 / SS-12.4) with candidate target containers
+   and lets the operator link/unlink `ScopeLink`s; a parked record leaves the queue once its container is
+   linked and it replays.
+6. **Given** a `viewer`, **when** they open any of these surfaces, **then** they render read-only (OA-2).
 
 ### Out of scope
 
@@ -639,13 +710,16 @@ change invalidates them, **so that** a stale or newly-required scope is never us
    re-validation).
 3. **Given** a change introducing a **new** required path parameter on an operation an enabled rule calls,
    **when** applied, **then** a new unconfirmed scope binding is created and the rule pauses.
-4. **Given** a breaking change to a **scope identity key** field, **when** applied, **then** affected
-   `identity-match` `ScopeLink` resolution is invalidated and the rule stays unenableable until the scope
-   identity key is re-confirmed (mirrors record identity-key handling under successor adoption).
-5. **Given** a container or app leaves the landscape, **when** the cascade runs, **then** its `ScopeLink`s
-   are archived (SS-10 criterion 5), not deleted.
+4. **Given** a breaking change to a **scope-identity-key** field (a source `sourceScopeRef` component or a
+   target container field), **when** applied, **then** the pair's `ScopeCorrespondence.scopeIdentityKey` is
+   returned to **unconfirmed**, `identity-match` `ScopeLink` resolution is invalidated, and the rule stays
+   unenableable until it is re-confirmed (mirrors record identity-key handling under successor adoption).
+5. **Given** a container or app leaves the landscape, **when** the cascade runs, **then** the
+   `ScopeCorrespondence`'s affected `ScopeLink`s are **archived** (SS-10 criterion 5), not deleted; a
+   `RecordLink.scopeRef` pointing at an archived link still resolves its frozen key for a final
+   delete/audit.
 6. **Given** the SpecDiff/re-pin machinery is **Phase-6-owned**, **when** this story is scoped, **then** it
-   specifies only the scope-binding/`ScopeLink` behavior within that lifecycle.
+   specifies only the `scopePathBindings`/`ScopeCorrespondence`/`ScopeLink` behavior within that lifecycle.
 
 ### Out of scope
 
@@ -677,15 +751,16 @@ Blocked by SS-1, SS-10, and the Phase-6 spec-update lifecycle.
 |---|---|---|---|---|
 | **L1** (SS-1..6) | `constant` scope bindings | one-repo↔one-board Gitea↔Vikunja | **Yes** | No |
 | **L2** (SS-7..9) | `record-derived` + cross-scope read (single cursor) | cross-container polling where value-spaces shared | (already gone) | partial (read side) |
-| **L3** (SS-10..16) | `ScopeLink` + discovery + per-scope poll + scoped identity | **true multi-repo → multi-project** | (already gone) | **Yes** |
+| **L3** (SS-10..16) | `ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` + discovery + per-scope poll + scoped identity | **true multi-repo → multi-project** (+ fixes L2 record-derived delete routing) | (already gone) | **Yes** |
 
 ## Suggested build order
 
 Domain → derive → confirm → resolver → gate → UI, per layer. Ship **L1 for approval first** (drops the
 SU-6 workaround, smallest surface). Then L2 (record-carried scope, single cursor — cheap, high value for
-shared value-spaces). Then L3 (the entity + discovery + per-scope polling — the largest slice). Within L3:
-SS-10 (entity) → SS-11 (establish) → SS-12 (resolve/fill) → SS-13 (poll modes) → SS-14 (scoped identity) →
-SS-15 (gate/UI) → SS-16 (lifecycle).
+shared value-spaces). Then L3 (the entities + discovery + per-scope polling — the largest slice). Within
+L3: SS-10 (`ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` domain) → SS-11 (establish/discover)
+→ SS-12 (`scope-link` fill + delete routing) → SS-13 (poll modes) → SS-14 (scoped identity) → SS-15
+(gate/UI + scope-identity-key panel) → SS-16 (lifecycle).
 
 ## Open questions for a human (concept silent or a decision to ratify)
 
@@ -696,14 +771,21 @@ SS-15 (gate/UI) → SS-16 (lifecycle).
    union forward-compatible.
 3. **Phase-5 adapter fallback to a scope binding** when a consumer omits a scope param on a dual-role
    provider. *Recommended:* decide in Phase 5; keep separate.
-4. **Is `ScopeLink` its own entity (chosen) or a `RecordLink` subtype/flag?** *Recommended:* its own entity
-   — different key, cardinality, lifecycle, and it is not an `ApprovedMapping`. Confirm.
-5. **Where the scope identity key lives.** It is over the *container* resource, which may have no
-   `ApprovedMapping` (repos↔projects is non-mapping), so it cannot be a `FieldMapping.isIdentityKey`.
-   *Recommended:* a small confirmed scope-config (source container key path ↔ target container key path)
-   attached to the scoped `SyncRule`/`ScopeLink` machinery; confirm the home.
-6. **Discovery scheduling for `ScopeLink`s.** *Recommended:* a container-level link-only pass at enablement
-   (mirrors backfill) plus re-run on the reconciliation sweep; confirm whether continuous re-discovery is
-   wanted or links are established once + maintained manually.
-7. **Should this become its own phase (e.g. Phase 4.5 / a Phase-6 addendum)?** *Recommended:* yes — it is a
-   phase-sized feature; L1 can nonetheless ship inside Phase 4's tail to drop the SU-6 workaround.
+4. **[FINALIZED] `ScopeLink` is its own entity** (not a `RecordLink` subtype) — different key, cardinality,
+   lifecycle, and it is not an `ApprovedMapping`. Residual ratification: none expected.
+5. **[FINALIZED] The scope identity key lives on a new `ScopeCorrespondence` config** (one per scoped
+   resource pair), reusing the source `sourceScopeRef` for the source side and pairing it to a target
+   container field. Not on `ResourceBinding` (single-spec) or `SyncRule` (one-directional). **Residual for
+   the human:** confirm `ScopeCorrespondence` as a new entity vs. folding the scope identity key onto the
+   existing `ScopeLink`-per-pair config differently — recommended as specified.
+6. **[FINALIZED] Discovery** = enablement-time link-only pass + steady-state on-demand harvest + sweep
+   re-run + manual; an unresolvable/ambiguous container **parks** (SS-11.5, SS-12.4). Not continuous
+   polling. **Residual for the human:** confirm parked-scope records surface in the container-linking
+   screen (SS-15.5) vs. the existing conflict/parked screen.
+7. **[FINALIZED] Delete routing** = `RecordLink.scopeRef` (persisted container at establishment), covering
+   L2 (`resolved` values) and L3 (`scope-link` id). **Residual for the human:** confirm storing a
+   `scopeLinkId` reference (chosen) vs. denormalizing the resolved values for L3 too — recommended as the
+   reference, since a container's native id is stable and an archived link still resolves it.
+8. **Should this become its own phase (e.g. Phase 4.5 / a Phase-6 addendum)?** *Recommended:* yes — it is a
+   phase-sized feature; L1/L2 already shipped inside Phase 4's tail (L1 dropped the SU-6 workaround), and
+   L3 is the largest remaining slice.
