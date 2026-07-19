@@ -8,7 +8,7 @@ import { QueueKeyResolver } from "../ordering/queue-key-resolver.js";
 import { contentHashOfRecord } from "./content-hash.js";
 import { FakePollPlanResolver, FakePollStateStore, FakeSourceReader } from "./fakes.js";
 import { Poller } from "./poller.js";
-import type { ObservedRecord, PollPlan } from "./types.js";
+import type { CrossScopePollPlan, ObservedRecord, PollPlan } from "./types.js";
 
 /**
  * Unit tests for the **Poller** (SP-2..SP-5) against a fake source (canned pages +
@@ -23,13 +23,15 @@ const TARGET_APP = "app-target";
 const PAIR = "pair::customers";
 const NOW = new Date("2026-07-13T12:00:00.000Z");
 
-function plan(overrides: Partial<PollPlan> = {}): PollPlan {
+// The cross-scope (SS-13.1) plan these SP-2..SP-5 tests exercise — unchanged from SS-8.
+function plan(overrides: Partial<CrossScopePollPlan> = {}): CrossScopePollPlan {
   return {
     ruleId: RULE_ID,
     mappingId: "mapping-1",
     sourceAppId: SOURCE_APP,
     targetAppId: TARGET_APP,
     resourcePairRef: PAIR,
+    scopeMode: "cross-scope",
     mode: "full-fetch",
     identitySourcePath: "email",
     cursor: undefined,

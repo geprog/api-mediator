@@ -3,6 +3,7 @@ import type {
   BackfillMode,
   BackfillStatus,
   DeletePropagation,
+  PollScopeMode,
   SyncRule,
   SyncRuleStatus,
   TargetDriftCheck,
@@ -75,6 +76,12 @@ export interface SyncRuleConfigPatch {
   readonly deletePropagation?: DeletePropagation;
   readonly targetDriftCheck?: TargetDriftCheck;
   readonly backfillMode?: BackfillMode;
+  /**
+   * SS-13.5 — the operator's correction of the derived poll-enumeration mode. Present
+   * as a value pins the override; present-as-`null` clears it back to "use the derived
+   * mode"; absent leaves the column untouched (mirrors `pollIntervalOverride`).
+   */
+  readonly pollScopeMode?: PollScopeMode | null;
 }
 
 /**
@@ -226,6 +233,7 @@ export class SyncRuleRepository {
       deletePropagation?: DeletePropagation;
       targetDriftCheck?: TargetDriftCheck;
       backfillMode?: BackfillMode;
+      pollScopeMode?: PollScopeMode | null;
     } = {};
     // `in` (not `!== undefined`) for the nullable override, so an explicit `null`
     // (clear the override) is written while an absent key is left untouched.
@@ -243,6 +251,10 @@ export class SyncRuleRepository {
     }
     if (patch.backfillMode !== undefined) {
       set.backfillMode = patch.backfillMode;
+    }
+    // SS-13.5 — same nullable-override discipline: `null` clears back to derived.
+    if ("pollScopeMode" in patch) {
+      set.pollScopeMode = patch.pollScopeMode ?? null;
     }
     if (Object.keys(set).length === 0) {
       return;

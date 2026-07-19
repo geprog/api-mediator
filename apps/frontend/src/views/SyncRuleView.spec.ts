@@ -55,6 +55,7 @@ function rule(overrides: Partial<SyncRuleStatusDto> = {}): SyncRuleStatusDto {
     resourcePair: PAIR,
     stillNeeds: [],
     pollerLag: { lastRunAt: null, expectedIntervalMs: null, lagMs: null, stuck: false },
+    pollScopeMode: null,
     ...overrides,
   };
 }

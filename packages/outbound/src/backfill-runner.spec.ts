@@ -29,6 +29,7 @@ import {
   type LinkOnlyBackfillContext,
   type PushBackfillContext,
 } from "./backfill-runner.js";
+import { resolveScopeRefFillValues, type ScopeLinkReader } from "./container-scope.js";
 import { OutboundCallExecutor, type CredentialAccess, type OutboundCall } from "./executor.js";
 import { AppLoadGovernor } from "./load-governor.js";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protocol-client.js";
@@ -548,5 +549,84 @@ describe("BE-5 push backfill", () => {
     // The create response's native id established the RecordLink.
     const link = h.links.all()[0];
     expect(link?.appBNativeId).toBe("b-new-1");
+  });
+});
+
+// ── SS-13: backfill-scopeRef discharge (the SS-12 deferral) ─────────────────────
+
+describe("SS-13 backfill establishes RecordLink.scopeRef (discharges the SS-12 deferral)", () => {
+  // A ScopeLinkReader that is never consulted for a `{kind:"resolved"}` scopeRef.
+  const unusedReader: ScopeLinkReader = { getById: () => Promise.resolve(undefined) };
+
+  it("link-only identity-match: freezes the resolved container on the new link, so a later delete routes", async () => {
+    const h = setup();
+    h.lookup.setTarget(APP_B, {
+      identityFieldPath: "email",
+      records: [{ nativeId: "b1", record: { id: "b1", email: "alice@x.com", name: "Alice" } }],
+    });
+    const reader = onePage([record("a1", { id: "a1", email: "alice@x.com", name: "Alice" })]);
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    // The SS-13 hook resolves each record's container from its captured scope (L2 here).
+    const result = await runner.run({
+      mode: "link-only",
+      context: {
+        ...linkOnlyContext(),
+        resolveScopeRef: () =>
+          Promise.resolve({ kind: "resolved" as const, values: { project: "42" } }),
+      },
+    });
+    expect(result.outcome).toBe("completed");
+
+    // The backfill-established link carries the frozen scopeRef (was ABSENT pre-SS-13).
+    const link = h.links.all()[0];
+    expect(link?.scopeRef).toStrictEqual({ kind: "resolved", values: { project: "42" } });
+
+    // Prove the later scoped delete ROUTES from that stored scopeRef (no captured scope) —
+    // SS-12's resolution resolves the container fill from the frozen values.
+    const fill = await resolveScopeRefFillValues({
+      scopeRef: link?.scopeRef,
+      targetAppId: APP_B,
+      scopePathBindings: [],
+      reader: unusedReader,
+    });
+    expect(fill).toStrictEqual(new Map([["project", "42"]]));
+  });
+
+  it("push create-propagation: freezes the resolved container on the create-propagation link", async () => {
+    const h = setup();
+    const reader = onePage([record("a9", { id: "a9", email: "new@x.com", name: "Newby" })]);
+    const runner = runnerWith(h, reader, h.realOutbound);
+
+    const result = await runner.run({
+      mode: "push",
+      context: {
+        ...pushContext(),
+        resolveScopeRef: () =>
+          Promise.resolve({ kind: "scope-link" as const, scopeLinkId: "sl-42" }),
+      },
+    });
+    expect(result.outcome).toBe("completed");
+
+    const link = h.links.all()[0];
+    expect(link?.scopeRef).toStrictEqual({ kind: "scope-link", scopeLinkId: "sl-42" });
+  });
+
+  it("no L1/L2 regression: without the hook (non-scoped rule), the established link carries NO scopeRef", async () => {
+    const h = setup();
+    h.lookup.setTarget(APP_B, {
+      identityFieldPath: "email",
+      records: [{ nativeId: "b1", record: { id: "b1", email: "alice@x.com", name: "Alice" } }],
+    });
+    const reader = onePage([record("a1", { id: "a1", email: "alice@x.com", name: "Alice" })]);
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    // linkOnlyContext() supplies no `resolveScopeRef` → pre-SS-13 behaviour preserved.
+    const result = await runner.run({ mode: "link-only", context: linkOnlyContext() });
+    expect(result.outcome).toBe("completed");
+
+    const link = h.links.all()[0];
+    expect(link?.scopeRef).toBeUndefined();
+    expect(link !== undefined && "scopeRef" in link).toBe(false);
   });
 });

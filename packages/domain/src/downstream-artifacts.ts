@@ -11,6 +11,7 @@ import {
   backfillModeSchema,
   backfillStatusSchema,
   deletePropagationSchema,
+  pollScopeModeSchema,
   targetDriftCheckSchema,
 } from "./sync-enums.js";
 
@@ -79,6 +80,14 @@ export const syncRuleSchema = z.object({
   targetDriftCheck: targetDriftCheckSchema.optional(),
   /** The one-time initial reconciliation mode. */
   backfillMode: backfillModeSchema.optional(),
+  /**
+   * SS-13 — the operator **override** of the derived poll-enumeration mode for a
+   * scoped rule (`docs/requirements/scoped-resource-sync.md` SS-13.5). Absent (NULL
+   * column) means "use the mode derived from `pollOperationRef` + the container
+   * binding"; a set value pins the operator's correction. Meaningful only for a
+   * scoped rule; a non-scoped rule leaves it absent and always polls cross-scope.
+   */
+  pollScopeMode: pollScopeModeSchema.optional(),
   /** The backfill lifecycle status (concept default `pending`). */
   backfillStatus: backfillStatusSchema.optional(),
   /** Last successful poll-run completion; nullable — unset until first live poll. */

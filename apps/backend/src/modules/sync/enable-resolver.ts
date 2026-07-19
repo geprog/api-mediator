@@ -1,5 +1,11 @@
-import type { FieldMapping, IrRefTarget } from "@mediator/domain";
+import type {
+  FieldMapping,
+  IrRefTarget,
+  RecordLinkScopeRef,
+  SourceScopeRef,
+} from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
+import type { ScopeLinkStore } from "@mediator/db";
 import type {
   BackfillRunInput,
   EnableRuleInput,
@@ -7,8 +13,9 @@ import type {
   PollSeedDescriptor,
   PushBackfillContext,
 } from "@mediator/outbound";
-import type { EnablementInput } from "@mediator/sync-engine";
+import type { DetectedChange, EnablementInput } from "@mediator/sync-engine";
 
+import { resolveScopedContainer } from "./container-routing.js";
 import {
   buildLoopPreventionContext,
   buildResolutionContext,
@@ -71,6 +78,7 @@ export async function resolveEnableRuleInput(
   ruleId: string,
   options: { readonly backfillSkipped: boolean },
   repos: RuleArtifactRepos,
+  scopeLinks: ScopeLinkStore,
 ): Promise<EnableInputResolution | EnableInputUnresolved> {
   const artifacts = await resolveRuleArtifacts(ruleId, repos);
   if (artifacts === undefined) {
@@ -94,7 +102,7 @@ export async function resolveEnableRuleInput(
     }),
   };
 
-  const backfill = await buildBackfillRunInput(artifacts, repos);
+  const backfill = await buildBackfillRunInput(artifacts, repos, scopeLinks);
   const pollSeed = buildPollSeed(artifacts);
 
   return { ok: true, input: { enablement, backfill, pollSeed } };
@@ -103,14 +111,9 @@ export async function resolveEnableRuleInput(
 async function buildBackfillRunInput(
   artifacts: RuleArtifacts,
   repos: RuleArtifactRepos,
+  scopeLinks: ScopeLinkStore,
 ): Promise<BackfillRunInput> {
   const identityField = findIdentityField(artifacts.fieldMappings) ?? PLACEHOLDER_IDENTITY;
-  // SS-12 note: the enable-resolver intentionally omits the `containerRouting` option, so
-  // backfill resolves ops with the pre-SS-12 behaviour and a backfill-established `RecordLink`
-  // carries **no** `scopeRef`. A backfilled record's later scoped delete therefore parks for
-  // manual container linking (fail-safe — never a wrong/guessed container), and scoped push
-  // backfill create is not fully wired here. Threading the resolved container into backfill /
-  // per-scope seeding is deferred to **SS-13** (scoped backfill), not this slice.
   const operations = resolveTargetOperations(
     artifacts.operationMappings,
     artifacts.targetGroup,
@@ -122,7 +125,18 @@ async function buildBackfillRunInput(
     operations.create !== undefined,
   );
 
-  const linkOnly: LinkOnlyBackfillContext = {
+  // SS-13 (SS-12 discharge) — on a **scoped** rule, backfill captures each record's scope
+  // (`sourceScopeRef`) and freezes the record's resolved container onto the new
+  // `RecordLink.scopeRef` via `resolveScopeRef` — the SAME container resolution a
+  // steady-state create uses (`resolveScopedContainer`). A backfilled scoped record's
+  // later scoped delete then routes from stored state instead of parking. Both are no-ops
+  // on a non-scoped rule (no confirmed `sourceScopeRef` → no capture; no scope bindings →
+  // `resolveScopedContainer` returns nothing), so a non-scoped backfill is unchanged.
+  const sourceScopeRef = confirmedSourceScopeRef(artifacts);
+  const resolveScopeRef = async (change: DetectedChange): Promise<RecordLinkScopeRef | undefined> =>
+    (await resolveScopedContainer(change, artifacts.targetBinding, scopeLinks)).scopeRefForNewLink;
+
+  const linkOnly: LinkOnlyBackfillContext = stripUndefined({
     ruleId: artifacts.rule.id,
     mappingId: artifacts.mapping.id,
     sourceAppId: artifacts.mapping.sourceAppId,
@@ -130,7 +144,9 @@ async function buildBackfillRunInput(
     resourcePairRef: artifacts.rule.resourcePairRef,
     resolution,
     fieldMappings: artifacts.fieldMappings,
-  };
+    sourceScopeRef,
+    resolveScopeRef,
+  });
 
   if ((artifacts.rule.backfillMode ?? "link-only") !== "push") {
     return { mode: "link-only", context: linkOnly };
@@ -161,6 +177,19 @@ async function buildBackfillRunInput(
     targetChangeTimestampRef: confirmedFieldPath(artifacts.targetBinding.changeTimestampRef),
   });
   return { mode: "push", context };
+}
+
+/**
+ * The source resource's `sourceScopeRef` when it is **confirmed** (both stamps set) — the
+ * scope capture backfill freezes the container from (SS-13). Absent/unconfirmed → no
+ * capture (a non-scoped / constant-only rule is unaffected — SS-7.4).
+ */
+function confirmedSourceScopeRef(artifacts: RuleArtifacts): SourceScopeRef | undefined {
+  const ref = artifacts.sourceBinding.sourceScopeRef;
+  if (ref === undefined || ref.confirmedBy === null || ref.confirmedAt === null) {
+    return undefined;
+  }
+  return ref;
 }
 
 async function loadCounterpartFields(

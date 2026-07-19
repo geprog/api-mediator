@@ -1,12 +1,9 @@
 import type { ScopeLinkStore } from "@mediator/db";
-import type { FieldMapping, RecordLinkScopeRef, ResourceBinding } from "@mediator/domain";
+import type { FieldMapping } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import {
   PermanentOutboundError,
-  resolveRecordDerivedScopeValues,
-  resolveScopeLinkScopeValues,
   resolveSingleRecordReadBinding,
-  targetScopeKeyOf,
   type ResolvedTargetOperation,
   type SyncPipelineContext,
   type SyncPipelineContextLoader,
@@ -19,13 +16,13 @@ import type {
   TargetWriteShape,
 } from "@mediator/sync-engine";
 
+import { resolveScopedContainer } from "./container-routing.js";
 import {
   buildLoopPreventionContext,
   buildResolutionContext,
   resolveTargetOperations,
   toConflictField,
 } from "./context-builders.js";
-import { scopeKeyFromCaptured } from "./scope-signature.js";
 import {
   confirmedFieldPath,
   confirmedValue,
@@ -98,8 +95,13 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
     // SS-12 — resolve the record's container once from the change's captured scope (Layer 3:
     // the matched active `ScopeLink`; Layer 2: the frozen `record-derived` values), for the
     // create op's fill + the new link's `scopeRef`. Absent on a delete (no captured scope) —
-    // a linked delete routes from the stored `scopeRef` in the handler instead.
-    const container = await this.#resolveScopedContainer(change, artifacts.targetBinding);
+    // a linked delete routes from the stored `scopeRef` in the handler instead. Shared with
+    // the initial-backfill discharge (SS-13) via `resolveScopedContainer`.
+    const container = await resolveScopedContainer(
+      change,
+      artifacts.targetBinding,
+      this.#scopeLinks,
+    );
 
     // SS-8.3 — thread the change's captured scope so each `record-derived` target scope
     // param is filled from it (by the binding's `sourceScopeKey`) alongside the constants;
@@ -159,67 +161,6 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
     });
   }
 
-  /**
-   * SS-12 — resolve the record's target **container** from this change's captured scope, for
-   * the create op's fill + the new link's `scopeRef` (frozen at establishment). Returns
-   * empty when the container does not resolve (a delete carries no captured scope; a Layer-3
-   * create whose captured scope matches **no active `ScopeLink`** — SS-12.6 — leaves the
-   * create op's `{…}` templated so the pipeline handler parks for manual container linking,
-   * never a guessed container):
-   *
-   *  - **Layer 3** (`scope-link` bindings) — the captured scope's source key → the active
-   *    `ScopeLink` (`lookupByScopeKey`) → its target-side key → `createScopeLinkValues`, and
-   *    `scopeRef = { kind: "scope-link", scopeLinkId }`;
-   *  - **Layer 2** (`record-derived` bindings) — the frozen resolved values, as
-   *    `scopeRef = { kind: "resolved", values }`, so the L2 rule's deletes route from stored
-   *    values too (SS-12.7). No create fill — the record-derived fill happens per op.
-   */
-  async #resolveScopedContainer(
-    change: DetectedChange,
-    targetBinding: ResourceBinding,
-  ): Promise<{
-    readonly createScopeLinkValues?: ReadonlyMap<string, string>;
-    readonly scopeRefForNewLink?: RecordLinkScopeRef;
-  }> {
-    const bindings = targetBinding.scopePathBindings ?? [];
-    const captured = change.capturedScope;
-    if (captured === undefined) {
-      return {}; // delete / non-scoped — a linked write routes from the stored scopeRef.
-    }
-    if (bindings.some((binding) => binding.kind === "scope-link" && isConfirmed(binding))) {
-      // Layer 3 — resolve the captured scope to an active ScopeLink; never establish inline
-      // (on-demand establishment is SS-13). No active link → SS-12.6 park (leave unresolved).
-      const sourceScopeKey = scopeKeyFromCaptured(captured);
-      if (sourceScopeKey === undefined) {
-        return {};
-      }
-      const link = await this.#scopeLinks.lookupByScopeKey(change.resourcePairRef, {
-        appId: change.sourceAppId,
-        scopeKey: sourceScopeKey,
-      });
-      if (link === undefined) {
-        return {};
-      }
-      const targetScopeKey = targetScopeKeyOf(link, change.targetAppId);
-      if (targetScopeKey === undefined) {
-        return {};
-      }
-      return {
-        createScopeLinkValues: resolveScopeLinkScopeValues(bindings, targetScopeKey),
-        scopeRefForNewLink: { kind: "scope-link", scopeLinkId: link.id },
-      };
-    }
-    if (bindings.some((binding) => binding.kind === "record-derived" && isConfirmed(binding))) {
-      // Layer 2 — freeze the resolved record-derived values so deletes route from them (SS-12.7).
-      const values = resolveRecordDerivedScopeValues(bindings, captured);
-      if (values.size === 0) {
-        return {};
-      }
-      return { scopeRefForNewLink: { kind: "resolved", values: Object.fromEntries(values) } };
-    }
-    return {};
-  }
-
   /** The bidirectional counterpart's `FieldMapping`s (empty for a one-way rule) — EP-1.2. */
   async #counterpartFields(artifacts: RuleArtifacts): Promise<readonly FieldMapping[]> {
     const counterpartMappingId = artifacts.mapping.counterpartMappingId;
@@ -268,11 +209,6 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
       targetReadBinding,
     });
   }
-}
-
-/** A scope path binding is confirmed iff both confirmation stamps are set (used nowhere until then). */
-function isConfirmed(binding: { confirmedBy: string | null; confirmedAt: Date | null }): boolean {
-  return binding.confirmedBy !== null && binding.confirmedAt !== null;
 }
 
 function sourceResource(change: DetectedChange, artifacts: RuleArtifacts): string {

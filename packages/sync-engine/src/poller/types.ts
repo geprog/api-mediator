@@ -69,30 +69,69 @@ export type DeltaOutcome =
   | { readonly ok: false; readonly reason: string };
 
 /**
+ * SS-13.2/13.3 — one **resolved scope** the per-scope Poller polls: the source
+ * container's `ScopeLink` (constant / manual / discovered — SS-11) plus the
+ * `{ scope path parameter → value }` fill for that container's scoped read. The
+ * `scopeLinkId` is the per-`(rule, scope)` state discriminator (cursor/snapshot key —
+ * SS-13.3), keying the scope by its `ScopeLink` so every establishment kind fits.
+ */
+export interface PollScope {
+  /** The resolved `ScopeLink` id — the per-scope cursor/snapshot state key (SS-13.3). */
+  readonly scopeLinkId: string;
+  /**
+   * The scope path parameters filled for this container's scoped source read (a Gitea
+   * `{ owner: "alice", repo: "phoenix" }`), resolved from the `ScopeLink`'s source-side
+   * scope key (SS-12's container fill, source side). The reader substitutes these into
+   * the still-templated source read path.
+   */
+  readonly fillValues: ReadonlyMap<string, string>;
+}
+
+/**
+ * SS-13 fail-loud — a source container the per-scope resolution could **not** resolve
+ * to a `ScopeLink` (SS-11.5 / SS-12.6). The Poller records it as a **parked** scope in
+ * the run outcome and **never polls a guessed container** — surfaced for manual
+ * container linking, never silently skipped.
+ */
+export interface PollScopeUnresolved {
+  /** A human id of the unresolved container (for the parked-scope surface). */
+  readonly container: string;
+  readonly reason: string;
+}
+
+/**
  * The source-read port (SP-2). Delta where the source supports it, else a paged
  * collection read. Faked in unit tests (canned pages/delta + injectable failures);
  * the real {@link RestSourceReader} wires `ProtocolClient` + `CredentialAccess` + the
  * `AppLoadGovernor` so reads obey the **same OC-3 per-app ceilings as writes** (SP-2
  * criterion 4). Keyed by `ruleId`: the reader owns the per-rule transport binding
  * (base URL, operation, pagination/delta conventions, native-id path).
+ *
+ * SS-13 — the optional `scope` fills a **per-scope** read's container path parameters
+ * (SS-13.2). Absent (cross-scope mode, SS-13.1) the read is exactly as before — one
+ * cross-scope call, no container fill. The trailing-optional shape keeps every existing
+ * caller/implementor source-compatible.
  */
 export interface SourceReader {
   /** Read one page of the collection read; `continuation` is the reader's own token (SP-2). */
-  readCollectionPage(ruleId: string, continuation: string | undefined): Promise<PageOutcome>;
+  readCollectionPage(
+    ruleId: string,
+    continuation: string | undefined,
+    scope?: PollScope,
+  ): Promise<PageOutcome>;
   /** Read the delta batch since `cursor` (SP-2/SP-3). */
-  readDelta(ruleId: string, cursor: string | undefined): Promise<DeltaOutcome>;
+  readDelta(ruleId: string, cursor: string | undefined, scope?: PollScope): Promise<DeltaOutcome>;
 }
 
-// ── The poll plan (SP-2/SP-3 resolution) ─────────────────────────────────────
+// ── The poll plan (SP-2/SP-3 resolution; SS-13 scope mode) ────────────────────
 
 /**
- * The resolved, transport-agnostic plan for one rule's poll: the ids the enqueued
- * {@link DetectedChange} carries, the poll `mode` (delta vs full-fetch), the current
- * delta `cursor`, and the confirmed identity **source** path the queue key is
- * computed from (`docs/architecture/sync-engine.md` *Ordering and consistency*). SP
- * assembles it from the `SyncRule` + `ApprovedMapping` + source `ResourceBinding`s.
+ * The fields every poll plan shares, whatever its scope mode: the ids the enqueued
+ * {@link DetectedChange} carries, the poll `mode` (delta vs full-fetch), and the
+ * confirmed identity **source** path the queue key is computed from
+ * (`docs/architecture/sync-engine.md` *Ordering and consistency*).
  */
-export interface PollPlan {
+export interface PollPlanCommon {
   readonly ruleId: string;
   readonly mappingId: string;
   readonly sourceAppId: string;
@@ -105,18 +144,48 @@ export interface PollPlan {
    * transform) for the pre-link ordering key, exactly as Identity Resolution reads it.
    */
   readonly identitySourcePath: string;
-  /** The stored delta cursor (delta mode only); `undefined` seeds from the beginning. */
-  readonly cursor: string | undefined;
   /**
    * The **source** resource's confirmed `sourceScopeRef` (SS-7), when it has one — the
    * keyed component set the Poller extracts each polled record's **captured scope** from
    * (SS-8.2). `undefined` for a non-scoped / constant-only rule (no confirmed
    * `sourceScopeRef`), in which case the Poller captures nothing (constant rules
-   * unaffected). Riding it on the plan needs **no** new persisted poll state — the
-   * per-rule `cursor`/snapshot is unchanged; capture is purely per-record and in-flight.
+   * unaffected).
    */
   readonly sourceScopeRef?: SourceScopeRef | undefined;
 }
+
+/**
+ * SS-13.1 — the **cross-scope** plan (the recommended default): one cross-scope
+ * collection read and the **single per-rule `cursor`/snapshot** unchanged from SS-8.
+ * Riding `sourceScopeRef` on it needs no new persisted poll state — capture is purely
+ * per-record and in-flight.
+ */
+export interface CrossScopePollPlan extends PollPlanCommon {
+  readonly scopeMode: "cross-scope";
+  /** The stored per-rule delta cursor (delta mode only); `undefined` seeds from the beginning. */
+  readonly cursor: string | undefined;
+}
+
+/**
+ * SS-13.2/13.3/13.4 — the **per-scope** plan: the Poller enumerates the resolved
+ * `scopes` and polls each container's scoped read, keeping a **cursor/snapshot per
+ * scope** (loaded/advanced from `poll_scope_state` by `scopeLinkId`, not carried on
+ * the plan). `unresolvedScopes` are surfaced/parked, never guessed (SS-13 fail-loud).
+ */
+export interface PerScopePollPlan extends PollPlanCommon {
+  readonly scopeMode: "per-scope";
+  readonly scopes: readonly PollScope[];
+  readonly unresolvedScopes: readonly PollScopeUnresolved[];
+}
+
+/**
+ * The resolved, transport-agnostic plan for one rule's poll — a discriminated union on
+ * `scopeMode` (SS-13.5, derive-then-correct): a `cross-scope` rule keeps SS-8's single
+ * cursor, a `per-scope` rule enumerates scopes and keeps per-scope state. SP assembles
+ * it from the `SyncRule` + `ApprovedMapping` + source `ResourceBinding`s (+ the rule's
+ * resolved `ScopeLink`s for the per-scope variant).
+ */
+export type PollPlan = CrossScopePollPlan | PerScopePollPlan;
 
 /**
  * Why a rule cannot be polled right now — the runtime **backstop** (SP-2.5): an
@@ -161,10 +230,18 @@ export interface PollSnapshotState {
  * rule advances `cursor`; a full-fetch rule replaces `snapshotEntries`. The store
  * applies all of it in **one transaction** — cursor, snapshot, and `lastRunAt` move
  * together or not at all.
+ *
+ * SS-13.3 — `scopeKey` (a scope's `ScopeLink` id) routes the advance to that scope's
+ * **own** `poll_scope_state` row + scoped `poll_snapshot` (one atomic tx per scope);
+ * **absent** it is the cross-scope advance over `sync_rule` + the sentinel snapshot,
+ * unchanged from SP-5. A per-scope advance therefore never touches another scope's — nor
+ * the cross-scope — state (per-scope isolation).
  */
 export interface PollAdvance {
   readonly ruleId: string;
   readonly lastRunAt: Date;
+  /** SS-13.3 — the scope's `ScopeLink` id (per-scope mode); absent = cross-scope. */
+  readonly scopeKey?: string;
   /** Delta rules only: the new cursor. `undefined` leaves the cursor unchanged. */
   readonly cursor?: string;
   /** Full-fetch rules only: the replacement `native id → content hash` snapshot. */
@@ -175,16 +252,27 @@ export interface PollAdvance {
 
 /**
  * The poll-state persistence port (SP-5). The real `DbPollStateStore` runs
- * {@link advance} inside a `tx()` over the `sync_rule` + `poll_snapshot` tables; the
- * `FakePollStateStore` mirrors that atomicity (it mutates both maps synchronously with
- * no intervening `await`), so the enqueue-then-advance invariant can be unit-tested.
+ * {@link advance} inside a `tx()` over the `sync_rule` + `poll_snapshot` (cross-scope)
+ * or `poll_scope_state` + `poll_snapshot` (per-scope, SS-13.3) tables; the
+ * `FakePollStateStore` mirrors that atomicity (it mutates the per-`(rule, scope)` state
+ * synchronously with no intervening `await`), so the enqueue-then-advance invariant and
+ * per-scope isolation can be unit-tested.
+ *
+ * The optional `scopeKey` selects a **scope's** state (SS-13.3); absent it is the
+ * cross-scope state (SS-13.1) — every SP-5 caller passing none keeps SP-5 behaviour.
  */
 export interface PollStateStore {
-  /** The rule's current snapshot (full-fetch), or `undefined` when it has none yet. */
-  loadSnapshot(ruleId: string): Promise<PollSnapshotState | undefined>;
+  /** The (rule, scope)'s current snapshot (full-fetch), or `undefined` when it has none yet. */
+  loadSnapshot(ruleId: string, scopeKey?: string): Promise<PollSnapshotState | undefined>;
   /**
-   * Atomically advance the rule's live polling state (SP-5). Called ONLY after every
-   * detected change of the run is durably enqueued.
+   * SS-13.3 — one **scope's** stored delta cursor (per-scope mode). `undefined` when the
+   * scope has no cursor yet (its first delta poll seeds from the beginning). A
+   * cross-scope rule never calls this — its cursor rides the {@link CrossScopePollPlan}.
+   */
+  loadScopeCursor(ruleId: string, scopeKey: string): Promise<string | undefined>;
+  /**
+   * Atomically advance the rule's (or one scope's) live polling state (SP-5). Called ONLY
+   * after every detected change of that (scope's) run is durably enqueued.
    */
   advance(advance: PollAdvance): Promise<void>;
 }
@@ -246,6 +334,27 @@ export interface EnqueuedChange {
 }
 
 /**
+ * How **one scope** of a per-scope run ended (SS-13.3) — the per-scope analog of a
+ * whole cross-scope run's outcome, so per-scope isolation is observable/testable: a
+ * `parked` scope (SS-13 fail-loud, an unresolvable container) or an `aborted` scope
+ * (SP-4 per scope) sits **beside** the other scopes' `completed` results without
+ * stopping them.
+ */
+export interface PerScopeRunResult {
+  /** The scope's `ScopeLink` id (`"__unresolved__"` for a parked, unresolvable scope). */
+  readonly scopeLinkId: string;
+  readonly result:
+    | {
+        readonly kind: "completed";
+        readonly enqueued: readonly EnqueuedChange[];
+        readonly mode: "delta" | "full-fetch";
+      }
+    | { readonly kind: "aborted"; readonly reason: string }
+    // SS-13 fail-loud — an unresolvable scope is parked, never polled with a guessed container.
+    | { readonly kind: "parked"; readonly reason: string };
+}
+
+/**
  * How one poll cycle ended (the deterministic poll-trigger hook returns this):
  *  - `completed` — the run detected `enqueued.length` changes, durably enqueued them
  *    all, and advanced the cursor/snapshot/`lastRunAt` (SP-5). `enqueued` is empty on a
@@ -254,6 +363,10 @@ export interface EnqueuedChange {
  *    false deletion. Poller lag keeps growing (surfaces as a stuck poller, SP-4.4).
  *  - `skipped` — the rule is not pollable right now (an unconfirmed ref backstop, or
  *    the named rule was not found).
+ *  - `completed-per-scope` (SS-13.3) — a per-scope run: `scopes` carries each resolved
+ *    scope's own completed/aborted result **plus** each unresolvable scope's `parked`
+ *    result. One scope aborting/parking never aborts the whole run — the others still
+ *    complete and advance their own state (per-scope isolation).
  */
 export type PollRunOutcome =
   | {
@@ -262,7 +375,8 @@ export type PollRunOutcome =
       readonly mode: "delta" | "full-fetch";
     }
   | { readonly kind: "aborted"; readonly reason: string }
-  | { readonly kind: "skipped"; readonly reason: NotPollableReason };
+  | { readonly kind: "skipped"; readonly reason: NotPollableReason }
+  | { readonly kind: "completed-per-scope"; readonly scopes: readonly PerScopeRunResult[] };
 
 /**
  * Poll-run observability (optional; default no-op). The Poller reports each run's

@@ -8,6 +8,7 @@ import {
   parkedConflictKindSchema,
   parkedConflictResolutionChoiceSchema,
   parkedConflictStatusSchema,
+  pollScopeModeSchema,
   recordLinkEstablishedBySchema,
   recordLinkStatusSchema,
   scopeKeySchema,
@@ -168,6 +169,18 @@ export const syncRuleStatusDtoSchema = z.object({
   resourcePair: syncRuleResourcePairDtoSchema.nullable(),
   stillNeeds: z.array(enablementRequirementDtoSchema),
   pollerLag: pollerLagDtoSchema,
+  /**
+   * SS-13.5 — the poll-enumeration mode, operator-visible: the persisted `override`
+   * (`null` = "use the derived mode"), the `derived` mode, and the `effective` mode the
+   * Poller acts on. `null` when the rule's artifacts do not resolve.
+   */
+  pollScopeMode: z
+    .object({
+      override: pollScopeModeSchema.nullable(),
+      derived: pollScopeModeSchema,
+      effective: pollScopeModeSchema,
+    })
+    .nullable(),
 });
 export type SyncRuleStatusDto = z.infer<typeof syncRuleStatusDtoSchema>;
 
@@ -198,6 +211,8 @@ export const configureSyncRuleRequestSchema = z
     pollOperationRef: z.string().min(1).optional(),
     deletePropagation: deletePropagationSchema.optional(),
     targetDriftCheck: targetDriftCheckSchema.optional(),
+    // SS-13.5 — correct the derived poll-enumeration mode; `null` clears to the derived mode.
+    pollScopeMode: pollScopeModeSchema.nullable().optional(),
     fieldConflictPolicies: z.array(fieldConflictPolicyDtoSchema).optional(),
   })
   .refine((body) => Object.keys(body).length > 0, {
@@ -548,9 +563,27 @@ export type ReplayParkedWriteResponse = z.infer<typeof replayParkedWriteResponse
  *    is the non-secret failure summary (same class as an audit-log `lastError`).
  *  - **`skipped`** — the rule is not pollable right now (an unconfirmed ref backstop);
  *    `reason` is the machine-readable not-pollable reason.
+ *  - **`completed-per-scope`** (SS-13.3) — a per-scope run: `scopes` carries each scope's
+ *    own completed/aborted result plus each unresolvable scope's `parked` result (a
+ *    **count only** for completed scopes — never the enqueued payloads/queue keys). One
+ *    scope aborting/parking never aborts the whole run (per-scope isolation).
  *
  * This carries **no** live field value and **no** credential material.
  */
+export const perScopeRunResultDtoSchema = z.object({
+  scopeLinkId: z.string(),
+  result: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("completed"),
+      mode: z.enum(["delta", "full-fetch"]),
+      enqueuedCount: z.number().int().nonnegative(),
+    }),
+    z.object({ kind: z.literal("aborted"), reason: z.string() }),
+    z.object({ kind: z.literal("parked"), reason: z.string() }),
+  ]),
+});
+export type PerScopeRunResultDto = z.infer<typeof perScopeRunResultDtoSchema>;
+
 export const pollRunOutcomeDtoSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("completed"),
@@ -559,6 +592,10 @@ export const pollRunOutcomeDtoSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("aborted"), reason: z.string() }),
   z.object({ kind: z.literal("skipped"), reason: z.string() }),
+  z.object({
+    kind: z.literal("completed-per-scope"),
+    scopes: z.array(perScopeRunResultDtoSchema),
+  }),
 ]);
 export type PollRunOutcomeDto = z.infer<typeof pollRunOutcomeDtoSchema>;
 

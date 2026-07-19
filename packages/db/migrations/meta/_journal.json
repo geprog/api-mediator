@@ -134,6 +134,13 @@
       "when": 1784357846072,
       "tag": "0018_acoustic_nick_fury",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784466882638,
+      "tag": "0019_chief_kronos",
+      "breakpoints": true
     }
   ]
 }
