@@ -239,6 +239,20 @@ describe("fillContainerScopeParams (SS-12.5 — id × scope never crossed)", () 
     expect(filled.unfilled).toEqual([]);
   });
 
+  it("skips the record-id param even when a scope binding SHARES its bare name (SS-12.5 collision)", () => {
+    // The scenario-1 Vikunja collision: the scope binding is named `id` (the project), and the
+    // op's record-id path param is also `id` (`/tasks/{id}`). The record-id slot must stay
+    // templated for the executor, NEVER filled from the container (project 42).
+    const filled = fillContainerScopeParams(
+      "/tasks/{id}",
+      ["id"],
+      new Map([["id", "42"]]),
+      "id", // recordIdParamName — this op's record-id path parameter
+    );
+    expect(filled.path).toBe("/tasks/{id}");
+    expect(filled.unfilled).toEqual([]); // the skipped record-id is not "unfilled"
+  });
+
   it("reports an unfilled container param (a missing/unsafe key) → the caller parks", () => {
     const filled = fillContainerScopeParams("/projects/{id}/tasks", ["id"], new Map());
     expect(filled.path).toBe("/projects/{id}/tasks");

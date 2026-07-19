@@ -204,6 +204,53 @@ const SCOPE_LINK_BINDINGS = [
   },
 ];
 
+// SS-12.5 — the id × scope collision: the scope param and the record id share the bare name
+// `id` (real in scenario-1 Vikunja: `PUT /projects/{id}/tasks` scope vs `POST`/`DELETE
+// /tasks/{id}` record id). The linked update/delete op's `{id}` is the RECORD id.
+const COLLIDING_SCOPE_BINDINGS = [
+  {
+    kind: "scope-link" as const,
+    parameterName: "id",
+    scopeKeyRef: "id",
+    confirmedBy: "operator",
+    confirmedAt: T0,
+  },
+];
+
+/** A linked delete `/tasks/{id}` whose `{id}` is the RECORD id (targetIdParamRef), not the scope. */
+const COLLIDING_DELETE_OP: ResolvedTargetOperation = {
+  operation: {
+    method: "DELETE",
+    pathTemplate: "/tasks/{id}",
+    parameterLocations: { idParam: { name: "id", in: "path" } },
+  },
+  operationMapping: {
+    id: "op-delete-collide",
+    mappingId: MAP_AB,
+    sourceOperationRef: "a.get",
+    targetOperationRef: "b.delete",
+    action: "delete",
+    targetIdParamRef: "idParam",
+  },
+};
+
+/** A linked update `/tasks/{id}` whose `{id}` is the RECORD id (targetIdParamRef), not the scope. */
+const COLLIDING_UPDATE_OP: ResolvedTargetOperation = {
+  operation: {
+    method: "PATCH",
+    pathTemplate: "/tasks/{id}",
+    parameterLocations: { idParam: { name: "id", in: "path" } },
+  },
+  operationMapping: {
+    id: "op-update-collide",
+    mappingId: MAP_AB,
+    sourceOperationRef: "a.get",
+    targetOperationRef: "b.update",
+    action: "update",
+    targetIdParamRef: "idParam",
+  },
+};
+
 // ── Protocol / credential fakes (no network) ──────────────────────────────────
 
 class FakeProtocolClient implements ProtocolClient {
@@ -1503,5 +1550,74 @@ describe("SyncPipelineHandler — SS-12 scoped write container routing", () => {
     await expect(runHandle(h, deleteChange())).rejects.toBeInstanceOf(ContainerUnresolvedError);
     expect(h.targetReader.calls).toHaveLength(0);
     expect(h.protocol.requests).toHaveLength(0);
+  });
+
+  it("id × scope collision — linked DELETE /tasks/{id} fills {id} from the RECORD id, not the scope (SS-12.5)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink({ kind: "scope-link", scopeLinkId: "link-42" }));
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: COLLIDING_DELETE_OP,
+      scopePathBindings: COLLIDING_SCOPE_BINDINGS,
+    });
+
+    await runHandle(h, deleteChange());
+
+    // The scope param and the record id are BOTH named `id`; the record-id slot MUST carry
+    // the RecordLink native id (task b1), never the container/project id (42).
+    expect(h.protocol.requests[0]?.method).toBe("DELETE");
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/tasks/${B_NATIVE}`);
+    expect(h.protocol.requests[0]?.url).not.toContain("/tasks/42");
+  });
+
+  it("id × scope collision — linked UPDATE /tasks/{id} fills {id} from the RECORD id, not the scope (SS-12.5)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink({ kind: "scope-link", scopeLinkId: "link-42" }));
+    // Undrifted baselines so CF produces a clean write for the changed `name`.
+    await h.fieldState.seed([
+      fieldRow("A", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("A", "name", { synced: "Old", observed: "Old" }),
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "Old" }),
+    ]);
+    h.loader = () => ({
+      ...baseContext(),
+      updateOperation: COLLIDING_UPDATE_OP,
+      scopePathBindings: COLLIDING_SCOPE_BINDINGS,
+    });
+
+    await runHandle(h, updateChange({ email: "e@x", name: "New" }));
+
+    expect(h.protocol.requests[0]?.method).toBe("PATCH");
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/tasks/${B_NATIVE}`);
+    expect(h.protocol.requests[0]?.url).not.toContain("/tasks/42");
+  });
+
+  it("regression guard — the record-id skip is uniform: an L2 record-derived colliding delete also excludes it", async () => {
+    const h = setup();
+    // L2 (record-derived) scoped rule: its container is frozen as `{ resolved, values }`;
+    // the record-derived scope binding is named `id` and collides with the record-id `{id}`.
+    await h.links.insert(scopedActiveLink({ kind: "resolved", values: { id: "42" } }));
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: COLLIDING_DELETE_OP,
+      scopePathBindings: [
+        {
+          kind: "record-derived",
+          parameterName: "id",
+          sourceScopeKey: "project",
+          confirmedBy: "operator",
+          confirmedAt: T0,
+        },
+      ],
+    });
+
+    await runHandle(h, deleteChange());
+
+    // Same record-id-aware path (SS-12.5) across every scope-binding kind → record id, not 42.
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/tasks/${B_NATIVE}`);
+    expect(h.protocol.requests[0]?.url).not.toContain("/tasks/42");
   });
 });

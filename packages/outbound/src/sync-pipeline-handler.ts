@@ -1030,6 +1030,9 @@ export class SyncPipelineHandler {
       operation.operation.pathTemplate,
       containerParams,
       containerScope,
+      // SS-12.5 — the op's record-id path parameter is filled from the `RecordLink`'s native
+      // id downstream, never from the container, even when a scope binding shares its name.
+      writeRecordIdPathParamName(operation),
     );
     if (filled.unfilled.length > 0) {
       throw new ContainerUnresolvedError(
@@ -1311,6 +1314,23 @@ function sourceInputPaths(fieldMappings: readonly FieldMapping[]): string[] {
 /** The record's target-side native id — the opposite side of the change's source side. */
 function targetNativeIdOf(link: RecordLink, sourceSide: SyncFieldStateSide): string {
   return sourceSide === "A" ? link.appBNativeId : link.appANativeId;
+}
+
+/**
+ * SS-12.5 — this write op's **record-id path parameter** name (the one the Outbound Call
+ * Executor fills from the `RecordLink`'s native id), or `undefined` when the op has no id
+ * parameter **in its path** (a create carries no `targetIdParamRef`; a query/header id is
+ * not a path parameter). Read from the resolved binding's `parameterLocations` keyed by
+ * `OperationMapping.targetIdParamRef` — the exact id parameter the executor fills — so the
+ * container fill skips it even when a scope binding shares its bare name (`{id}`).
+ */
+function writeRecordIdPathParamName(operation: ResolvedTargetOperation): string | undefined {
+  const idRef = operation.operationMapping.targetIdParamRef;
+  if (idRef === undefined) {
+    return undefined;
+  }
+  const location = operation.operation.parameterLocations[idRef];
+  return location?.in === "path" ? location.name : undefined;
 }
 
 /** Which side of the link the change's source app occupies (mirrors the stages). */

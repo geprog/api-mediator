@@ -185,9 +185,17 @@ export async function resolveScopeRefFillValues(input: {
  * Fill a write op's still-templated **container** scope parameters (`{param}`) from a
  * resolved `{ parameterName → value }` map — the linked delete/update path's fill over the
  * op's `pathTemplate` (constant/record-derived params already substituted at composition
- * time, the record-id param left templated for the executor). Only the named container
- * params are touched (never the record-id param — SS-12.5), each URL-encoded exactly as
+ * time, the record-id param left templated for the executor), each URL-encoded exactly as
  * {@link fillScopePathParameters} encodes a scope value.
+ *
+ * **The record id and the scope are never crossed (SS-12.5):** `recordIdParamName` — this
+ * op's record-id path parameter — is **skipped**, so it stays templated for the executor's
+ * `RecordLink`-id fill even when a scope binding **shares its bare name**. This is the real
+ * scenario-1 Vikunja collision: the scope param and the record id are both `{id}` (`PUT
+ * /projects/{id}/tasks` scope vs `POST`/`DELETE /tasks/{id}` record id) — filling the
+ * record-id slot from the container would silently write/delete the **wrong record**. The
+ * skip mirrors {@link fillScopePathParameters}'s SS-4.2 record-id skip on the read /
+ * load-time paths, keeping the record-id-aware fill uniform across every scope-binding kind.
  *
  * Returns the filled path plus the `containerScopeParamNames` still left as `{…}` — a
  * parameter with no safe resolved value (an unsafe/absent container key). The caller parks
@@ -198,10 +206,16 @@ export function fillContainerScopeParams(
   pathTemplate: string,
   containerParamNames: readonly string[],
   fillValues: ReadonlyMap<string, string>,
+  recordIdParamName?: string,
 ): { readonly path: string; readonly unfilled: readonly string[] } {
   let path = pathTemplate;
   const unfilled: string[] = [];
   for (const name of containerParamNames) {
+    if (name === recordIdParamName) {
+      // SS-12.5 — this op's record-id parameter is filled from the `RecordLink`'s native id
+      // downstream, NEVER from the container, even when a scope binding shares its name.
+      continue;
+    }
     const token = `{${name}}`;
     if (!path.includes(token)) {
       continue; // this op does not carry that container parameter.
