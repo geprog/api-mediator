@@ -72,6 +72,36 @@ export const backfillStatusSchema = z.enum(["pending", "running", "completed", "
 export type BackfillStatus = z.infer<typeof backfillStatusSchema>;
 export const BackfillStatus = backfillStatusSchema.enum;
 
+// ── SyncRule.pollScopeMode (SS-13) ───────────────────────────────────────────
+
+/**
+ * How a scoped `SyncRule`'s Poller enumerates the scopes it polls
+ * (`docs/requirements/scoped-resource-sync.md` SS-13). **Derive-then-correct**: the
+ * effective mode is *derived* from the pinned `pollOperationRef` + the source
+ * resource's container binding (a cross-scope read → `cross-scope`; else an
+ * enumerable container → `per-scope-enumerated`; else the pinned `constant`/`manual`
+ * `ScopeLink`s → `per-scope-pinned`), and this value is the operator **override**
+ * persisted on the rule (`sync_rule.poll_scope_mode`, nullable — NULL = "use the
+ * derived mode"). The resolver honors the override when set (SS-13.5).
+ *
+ *  - `cross-scope` (SS-13.1, the recommended default) — one cross-scope collection
+ *    read + a confirmed `sourceScopeRef`; the Poller keeps its **single per-rule
+ *    `cursor`/snapshot** (SS-8), capturing each record's scope in-flight.
+ *  - `per-scope-enumerated` (SS-13.2) — no cross-scope read but an enumerable
+ *    container resource; the Poller enumerates scopes and polls each container's
+ *    scoped read, keeping a **cursor/snapshot per scope** (SS-13.3).
+ *  - `per-scope-pinned` (SS-13.4) — neither a cross-scope read nor an enumerable
+ *    container; the scope set is exactly the `constant`/`manual` `ScopeLink`s the
+ *    operator pinned, polled per-scope.
+ */
+export const pollScopeModeSchema = z.enum([
+  "cross-scope",
+  "per-scope-enumerated",
+  "per-scope-pinned",
+]);
+export type PollScopeMode = z.infer<typeof pollScopeModeSchema>;
+export const PollScopeMode = pollScopeModeSchema.enum;
+
 // ── RecordLink.establishedBy (SD-2) ──────────────────────────────────────────
 
 /**

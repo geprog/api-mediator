@@ -6,6 +6,7 @@ import type {
   PollPlanResolution,
   PollPlanResolver,
   PollRunOutcome,
+  PollScope,
   PollSnapshotState,
   PollStateStore,
   PollerMetrics,
@@ -14,6 +15,14 @@ import type {
   DeltaOutcome,
   PageOutcome,
 } from "./types.js";
+
+/** The fake's cross-scope bucket key (mirrors the real store's `CROSS_SCOPE_SCOPE_KEY` sentinel). */
+const CROSS_SCOPE = "__cross_scope__";
+
+/** Compose the per-`(rule, scope)` bucket key the fakes store under; `undefined` = cross-scope. */
+function scopedKey(ruleId: string, scopeKey: string | undefined): string {
+  return `${ruleId}::${scopeKey ?? CROSS_SCOPE}`;
+}
 
 /**
  * In-memory fakes for the Scheduler + Poller unit tests (SP-1..SP-5). Each **mirrors**
@@ -49,23 +58,36 @@ export class FakeSourceReader implements SourceReader {
   readonly #fullFetch = new Map<string, readonly FakePage[]>();
   readonly #delta = new Map<string, readonly FakeDeltaBatch[]>();
   readonly #deltaCalls = new Map<string, number>();
+  /** Records every scope passed to a per-scope read, for asserting the container fill (SS-13.2). */
+  public readonly scopeCalls: { ruleId: string; scopeLinkId: string; kind: "page" | "delta" }[] =
+    [];
 
-  /** Configure the canned full-fetch pages for a rule (served in order, to exhaustion). */
-  public setFullFetch(ruleId: string, pages: readonly FakePage[]): void {
-    this.#fullFetch.set(ruleId, pages);
+  /**
+   * Configure the canned full-fetch pages for a rule (served in order, to exhaustion).
+   * SS-13 — pass `scopeLinkId` to configure a **per-scope** container's pages; omit it
+   * for the cross-scope read. So one fake serves both a cross-scope rule and a per-scope
+   * rule's several containers independently.
+   */
+  public setFullFetch(ruleId: string, pages: readonly FakePage[], scopeLinkId?: string): void {
+    this.#fullFetch.set(scopedKey(ruleId, scopeLinkId), pages);
   }
 
-  /** Configure the canned delta batches for a rule (one consumed per `readDelta` call). */
-  public setDelta(ruleId: string, batches: readonly FakeDeltaBatch[]): void {
-    this.#delta.set(ruleId, batches);
-    this.#deltaCalls.set(ruleId, 0);
+  /** Configure the canned delta batches for a rule/scope (one consumed per `readDelta` call). */
+  public setDelta(ruleId: string, batches: readonly FakeDeltaBatch[], scopeLinkId?: string): void {
+    const key = scopedKey(ruleId, scopeLinkId);
+    this.#delta.set(key, batches);
+    this.#deltaCalls.set(key, 0);
   }
 
   public readCollectionPage(
     ruleId: string,
     continuation: string | undefined,
+    scope?: PollScope,
   ): Promise<PageOutcome> {
-    const pages = this.#fullFetch.get(ruleId);
+    if (scope !== undefined) {
+      this.scopeCalls.push({ ruleId, scopeLinkId: scope.scopeLinkId, kind: "page" });
+    }
+    const pages = this.#fullFetch.get(scopedKey(ruleId, scope?.scopeLinkId));
     if (pages === undefined) {
       return Promise.resolve({ ok: false, reason: `no full-fetch config for ${ruleId}` });
     }
@@ -85,15 +107,23 @@ export class FakeSourceReader implements SourceReader {
     });
   }
 
-  public readDelta(ruleId: string): Promise<DeltaOutcome> {
-    const batches = this.#delta.get(ruleId);
+  public readDelta(
+    ruleId: string,
+    _cursor: string | undefined,
+    scope?: PollScope,
+  ): Promise<DeltaOutcome> {
+    if (scope !== undefined) {
+      this.scopeCalls.push({ ruleId, scopeLinkId: scope.scopeLinkId, kind: "delta" });
+    }
+    const key = scopedKey(ruleId, scope?.scopeLinkId);
+    const batches = this.#delta.get(key);
     if (batches === undefined) {
       return Promise.resolve({ ok: false, reason: `no delta config for ${ruleId}` });
     }
-    const call = this.#deltaCalls.get(ruleId) ?? 0;
+    const call = this.#deltaCalls.get(key) ?? 0;
     // Past the configured batches, report an empty (no-change) batch that keeps the cursor.
     const batch = batches[call] ?? {};
-    this.#deltaCalls.set(ruleId, call + 1);
+    this.#deltaCalls.set(key, call + 1);
     if ("fail" in batch) {
       return Promise.resolve({ ok: false, reason: batch.fail });
     }
@@ -142,14 +172,21 @@ export interface FakePollState {
  * the state is left exactly as if the advance never ran — the next poll re-detects.
  */
 export class FakePollStateStore implements PollStateStore {
+  // Keyed per-`(rule, scope)` (SS-13.3): `undefined` scope = the cross-scope bucket, a
+  // `scopeLinkId` = that scope's bucket, so a per-scope advance/abort never touches
+  // another scope's — nor the cross-scope — state (the isolation invariant to test).
   readonly #state = new Map<string, FakePollState>();
   #snapshotIds = 0;
-  #throwOnAdvance = false;
+  readonly #throwOn = new Set<string>();
 
-  /** Seed a rule's prior snapshot (full-fetch diff tests). */
-  public seedSnapshot(ruleId: string, entries: ReadonlyMap<string, string>): void {
+  /** Seed a rule/scope's prior snapshot (full-fetch diff tests). `scopeKey` omitted = cross-scope. */
+  public seedSnapshot(
+    ruleId: string,
+    entries: ReadonlyMap<string, string>,
+    scopeKey?: string,
+  ): void {
     this.#snapshotIds += 1;
-    this.#state.set(ruleId, {
+    this.#state.set(scopedKey(ruleId, scopeKey), {
       snapshotRef: `snap-${String(this.#snapshotIds)}`,
       entries: new Map(entries),
       cursor: undefined,
@@ -158,33 +195,43 @@ export class FakePollStateStore implements PollStateStore {
     });
   }
 
-  /** Seed a delta rule's stored cursor (delta advance tests). */
-  public seedCursor(ruleId: string, cursor: string): void {
-    const state = this.#ensure(ruleId);
+  /** Seed a delta rule/scope's stored cursor (delta advance tests). */
+  public seedCursor(ruleId: string, cursor: string, scopeKey?: string): void {
+    const state = this.#ensure(scopedKey(ruleId, scopeKey));
     state.cursor = cursor;
   }
 
-  /** Make the NEXT `advance` throw before mutating (crash-before-advance, SP-5). */
-  public throwOnNextAdvance(): void {
-    this.#throwOnAdvance = true;
+  /**
+   * Make the NEXT `advance` for a given `(rule, scope)` throw before mutating
+   * (crash-before-advance, SP-5) — scoped so one scope's failure can be injected without
+   * touching the others (per-scope isolation tests). `scopeKey` omitted = cross-scope.
+   */
+  public throwOnNextAdvance(ruleId?: string, scopeKey?: string): void {
+    this.#throwOn.add(ruleId === undefined ? "*" : scopedKey(ruleId, scopeKey));
   }
 
-  public loadSnapshot(ruleId: string): Promise<PollSnapshotState | undefined> {
-    const state = this.#state.get(ruleId);
+  public loadSnapshot(ruleId: string, scopeKey?: string): Promise<PollSnapshotState | undefined> {
+    const state = this.#state.get(scopedKey(ruleId, scopeKey));
     if (state === undefined || state.snapshotRef === undefined) {
       return Promise.resolve(undefined);
     }
     return Promise.resolve({ snapshotRef: state.snapshotRef, entries: new Map(state.entries) });
   }
 
+  public loadScopeCursor(ruleId: string, scopeKey: string): Promise<string | undefined> {
+    return Promise.resolve(this.#state.get(scopedKey(ruleId, scopeKey))?.cursor);
+  }
+
   public advance(advance: PollAdvance): Promise<void> {
-    if (this.#throwOnAdvance) {
-      this.#throwOnAdvance = false;
+    const key = scopedKey(advance.ruleId, advance.scopeKey);
+    if (this.#throwOn.has("*") || this.#throwOn.has(key)) {
+      this.#throwOn.delete("*");
+      this.#throwOn.delete(key);
       // Throw BEFORE any mutation: the advance did not happen (crash-before-advance).
       return Promise.reject(new Error("simulated crash before advance"));
     }
     // Atomic: all fields move together, no `await` between them (mirrors the real tx).
-    const state = this.#ensure(advance.ruleId);
+    const state = this.#ensure(key);
     if (advance.snapshotEntries !== undefined) {
       if (state.snapshotRef === undefined) {
         this.#snapshotIds += 1;
@@ -200,13 +247,13 @@ export class FakePollStateStore implements PollStateStore {
     return Promise.resolve();
   }
 
-  /** The current state for a rule (tests). */
-  public stateOf(ruleId: string): FakePollState | undefined {
-    return this.#state.get(ruleId);
+  /** The current state for a rule/scope (tests). `scopeKey` omitted = cross-scope. */
+  public stateOf(ruleId: string, scopeKey?: string): FakePollState | undefined {
+    return this.#state.get(scopedKey(ruleId, scopeKey));
   }
 
-  #ensure(ruleId: string): FakePollState {
-    let state = this.#state.get(ruleId);
+  #ensure(key: string): FakePollState {
+    let state = this.#state.get(key);
     if (state === undefined) {
       state = {
         snapshotRef: undefined,
@@ -215,7 +262,7 @@ export class FakePollStateStore implements PollStateStore {
         lastRunAt: undefined,
         advanceCount: 0,
       };
-      this.#state.set(ruleId, state);
+      this.#state.set(key, state);
     }
     return state;
   }

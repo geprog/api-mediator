@@ -6,14 +6,34 @@ import { contentHashOfRecord } from "./content-hash.js";
 import {
   buildChangePayload,
   type ChangeEnqueue,
+  type CrossScopePollPlan,
   type EnqueuedChange,
-  type PollPlan,
+  type PerScopePollPlan,
+  type PerScopeRunResult,
+  type PollPlanCommon,
   type PollPlanResolver,
   type PollRunOutcome,
+  type PollScope,
   type PollStateStore,
   type PollerMetrics,
   type SourceReader,
 } from "./types.js";
+
+/**
+ * SS-13.3 — how one scope's (or the cross-scope) poll cycle ended: `completed` (its
+ * changes enqueued + its own state advanced) or `aborted` (SP-4, no advance, no false
+ * delete). The narrow result `#pollDelta`/`#pollFullFetch` return — assignable to both
+ * the whole-run {@link PollRunOutcome} (cross-scope) and a {@link PerScopeRunResult}.
+ */
+type ScopeRunOutcome =
+  | {
+      readonly kind: "completed";
+      readonly enqueued: readonly EnqueuedChange[];
+      readonly mode: "delta" | "full-fetch";
+    }
+  | { readonly kind: "aborted"; readonly reason: string };
+
+const UNRESOLVED_SCOPE_MARKER = "__unresolved__";
 
 /**
  * The **Poller** — one poll cycle for a `SyncRule`: pull the source's changes (delta
@@ -105,17 +125,79 @@ export class Poller {
     }
     const plan = resolution.plan;
     const outcome =
-      plan.mode === "delta" ? await this.#pollDelta(plan) : await this.#pollFullFetch(plan);
+      plan.scopeMode === "cross-scope"
+        ? await this.#pollCrossScope(plan)
+        : await this.#pollPerScope(plan);
     this.#metrics?.recordPollRun(ruleId, outcome);
     return outcome;
   }
 
+  // ── Cross-scope polling (SS-13.1) — SS-8's single cursor, UNCHANGED ──────────
+
+  /**
+   * SS-13.1 — the cross-scope poll: one call, the single per-rule `cursor`/snapshot
+   * (scope `undefined` throughout). Byte-for-byte the SP-5 behaviour — adding per-scope
+   * state must not alter it.
+   */
+  async #pollCrossScope(plan: CrossScopePollPlan): Promise<PollRunOutcome> {
+    return plan.mode === "delta"
+      ? this.#pollDelta(plan, plan.cursor, undefined)
+      : this.#pollFullFetch(plan, undefined);
+  }
+
+  // ── Per-scope polling (SS-13.2/13.3/13.4) ────────────────────────────────────
+
+  /**
+   * SS-13.3 — enumerate the resolved scopes and poll each container's scoped read with
+   * its **own** cursor/snapshot. Per-scope isolation is the whole contract: one scope's
+   * abort (SP-4 per scope) or write/enqueue failure **never** aborts or advances another
+   * scope — each scope's run is independent, and an unresolvable scope is **parked** (SS-13
+   * fail-loud), never polled with a guessed container and never silently skipped.
+   */
+  async #pollPerScope(plan: PerScopePollPlan): Promise<PollRunOutcome> {
+    const scopes: PerScopeRunResult[] = [];
+    // SS-13 fail-loud — surface every unresolvable container as a parked scope first.
+    for (const unresolved of plan.unresolvedScopes) {
+      scopes.push({
+        scopeLinkId: UNRESOLVED_SCOPE_MARKER,
+        result: {
+          kind: "parked",
+          reason: `unresolved container ${unresolved.container}: ${unresolved.reason}`,
+        },
+      });
+    }
+    for (const scope of plan.scopes) {
+      // Isolate each scope: a thrown store/enqueue fault for one scope is confined to it
+      // (recorded as that scope's abort) so the remaining scopes still poll and advance.
+      let result: ScopeRunOutcome;
+      try {
+        result =
+          plan.mode === "delta"
+            ? await this.#pollDelta(
+                plan,
+                await this.#state.loadScopeCursor(plan.ruleId, scope.scopeLinkId),
+                scope,
+              )
+            : await this.#pollFullFetch(plan, scope);
+      } catch (error) {
+        result = { kind: "aborted", reason: `scope run failed: ${describeError(error)}` };
+      }
+      scopes.push({ scopeLinkId: scope.scopeLinkId, result });
+    }
+    return { kind: "completed-per-scope", scopes };
+  }
+
   // ── Delta polling (SP-2 delta / SP-3 create-vs-update + reported deletions) ──
 
-  async #pollDelta(plan: PollPlan): Promise<PollRunOutcome> {
-    const result = await this.#reader.readDelta(plan.ruleId, plan.cursor);
+  async #pollDelta(
+    plan: PollPlanCommon,
+    cursor: string | undefined,
+    scope: PollScope | undefined,
+  ): Promise<ScopeRunOutcome> {
+    const result = await this.#reader.readDelta(plan.ruleId, cursor, scope);
     if (!result.ok) {
-      // SP-4 discipline extended to delta: a failed call never advances the cursor.
+      // SP-4 discipline extended to delta: a failed call never advances the cursor
+      // (per scope in per-scope mode — this scope's cursor stays put, others proceed).
       return { kind: "aborted", reason: result.reason };
     }
 
@@ -135,11 +217,15 @@ export class Poller {
 
     // SP-5: durably enqueue every change BEFORE advancing.
     await this.#enqueueAll(prepared);
-    // SP-5: advance the cursor (with `lastRunAt`) atomically, and only now.
-    const advance: { ruleId: string; lastRunAt: Date; cursor?: string } = {
+    // SP-5: advance the cursor (with `lastRunAt`) atomically, and only now — keyed to
+    // this scope in per-scope mode (SS-13.3), the whole rule cross-scope.
+    const advance: { ruleId: string; scopeKey?: string; lastRunAt: Date; cursor?: string } = {
       ruleId: plan.ruleId,
       lastRunAt: this.#now(),
     };
+    if (scope !== undefined) {
+      advance.scopeKey = scope.scopeLinkId;
+    }
     if (result.nextCursor !== undefined) {
       advance.cursor = result.nextCursor;
     }
@@ -149,16 +235,20 @@ export class Poller {
 
   // ── Full-fetch polling (SP-2 paged-to-exhaustion + snapshot diff; SP-4) ──────
 
-  async #pollFullFetch(plan: PollPlan): Promise<PollRunOutcome> {
-    const prior = await this.#state.loadSnapshot(plan.ruleId);
+  async #pollFullFetch(
+    plan: PollPlanCommon,
+    scope: PollScope | undefined,
+  ): Promise<ScopeRunOutcome> {
+    const prior = await this.#state.loadSnapshot(plan.ruleId, scope?.scopeLinkId);
     const priorEntries = prior?.entries ?? new Map<string, string>();
 
     // Page to exhaustion. SP-4 (SACRED): any page failure aborts BEFORE any diff, so a
-    // truncated fetch can never be misread as mass deletion.
+    // truncated fetch can never be misread as mass deletion — per scope in per-scope
+    // mode (this scope's snapshot/cursor stay put; the other scopes still poll).
     const fetched = new Map<string, JsonRecord>();
     let continuation: string | undefined;
     for (let page = 0; page < this.#maxPages; page += 1) {
-      const outcome = await this.#reader.readCollectionPage(plan.ruleId, continuation);
+      const outcome = await this.#reader.readCollectionPage(plan.ruleId, continuation, scope);
       if (!outcome.ok) {
         return { kind: "aborted", reason: outcome.reason };
       }
@@ -166,7 +256,7 @@ export class Poller {
         fetched.set(observed.nativeId, observed.record);
       }
       if (outcome.next.done) {
-        return await this.#completeFullFetch(plan, priorEntries, fetched);
+        return await this.#completeFullFetch(plan, priorEntries, fetched, scope);
       }
       continuation = outcome.next.continuation;
     }
@@ -177,14 +267,16 @@ export class Poller {
   /**
    * The complete fetch succeeded (every page ok) — now the diff is sound (SP-4.3): a
    * native id in the prior snapshot but absent from this complete fetch is a delete
-   * candidate. Build the new snapshot, classify each present/absent record, enqueue,
-   * then replace the snapshot + advance `lastRunAt` atomically (SP-5).
+   * candidate. Build the new snapshot (keyed by native id **within this scope** — SS-13
+   * foreshadowing SS-14.5), classify each present/absent record, enqueue, then replace
+   * the snapshot + advance `lastRunAt` atomically (SP-5, per scope).
    */
   async #completeFullFetch(
-    plan: PollPlan,
+    plan: PollPlanCommon,
     priorEntries: ReadonlyMap<string, string>,
     fetched: ReadonlyMap<string, JsonRecord>,
-  ): Promise<PollRunOutcome> {
+    scope: PollScope | undefined,
+  ): Promise<ScopeRunOutcome> {
     const newSnapshot = new Map<string, string>();
     const prepared: PreparedChange[] = [];
 
@@ -209,14 +301,25 @@ export class Poller {
 
     // SP-5: durably enqueue every change BEFORE advancing.
     await this.#enqueueAll(prepared);
-    // SP-5: replace the snapshot + set `lastRunAt` atomically, and only now.
+    // SP-5: replace the snapshot + set `lastRunAt` atomically, and only now — keyed to
+    // this scope in per-scope mode (SS-13.3).
     const capturedAt = this.#now();
-    await this.#state.advance({
+    const advance: {
+      ruleId: string;
+      scopeKey?: string;
+      lastRunAt: Date;
+      snapshotEntries: ReadonlyMap<string, string>;
+      capturedAt: Date;
+    } = {
       ruleId: plan.ruleId,
       lastRunAt: capturedAt,
       snapshotEntries: newSnapshot,
       capturedAt,
-    });
+    };
+    if (scope !== undefined) {
+      advance.scopeKey = scope.scopeLinkId;
+    }
+    await this.#state.advance(advance);
     return { kind: "completed", enqueued: toEnqueued(prepared), mode: "full-fetch" };
   }
 
@@ -231,7 +334,7 @@ export class Poller {
    * that, out of SP scope). A delete stays a delete.
    */
   async #prepareChange(
-    plan: PollPlan,
+    plan: PollPlanCommon,
     sourceNativeId: string,
     observedRecord: JsonRecord | undefined,
     isDelete: boolean,
@@ -300,4 +403,8 @@ function toEnqueued(prepared: readonly PreparedChange[]): EnqueuedChange[] {
     changeKind: change.changeKind,
     sourceNativeId: change.sourceNativeId,
   }));
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

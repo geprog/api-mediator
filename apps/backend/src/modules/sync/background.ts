@@ -377,7 +377,13 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   // ── Poller + Scheduler (change detection) ────────────────────────────────────
   const poller = new Poller(
     sourceReader,
-    new RepoPollPlanResolver(ruleArtifactRepos),
+    // SS-13 — the resolver derives the poll-enumeration mode (+ honors the operator
+    // override) and, for a per-scope rule, resolves its scope set from the pair's
+    // ScopeCorrespondence + established ScopeLinks.
+    new RepoPollPlanResolver(ruleArtifactRepos, {
+      scopeCorrespondences: scopeCorrespondences,
+      scopeLinks,
+    }),
     new DbPollStateStore(db),
     orderingQueue,
     new QueueKeyResolver(recordLinks),
@@ -481,6 +487,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       ruleId,
       { backfillSkipped: options.backfillSkipped ?? false },
       ruleArtifactRepos,
+      scopeLinks,
     );
     if (!resolved.ok) {
       return { kind: "unresolved", reason: resolved.reason };
@@ -507,6 +514,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       ruleId,
       { backfillSkipped: false },
       ruleArtifactRepos,
+      scopeLinks,
     );
     if (!resolved.ok) {
       logger.error({ ruleId, reason: resolved.reason }, "backfill retrigger: rule did not resolve");

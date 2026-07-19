@@ -8,6 +8,8 @@ import type {
   IrRefTarget,
   OutboundLoadLimits,
   RecordLink,
+  RecordLinkScopeRef,
+  SourceScopeRef,
   SyncFieldState,
   SyncFieldStateSide,
   TombstoneReason,
@@ -29,7 +31,14 @@ import {
   type SyncEventRecorder,
   type TargetIdentityLookup,
 } from "@mediator/sync-engine";
-import { isTransformError, readPath, type JsonRecord, type JsonValue } from "@mediator/transform";
+import {
+  extractCapturedScope,
+  isTransformError,
+  readPath,
+  type CapturedScope,
+  type JsonRecord,
+  type JsonValue,
+} from "@mediator/transform";
 
 import type { OutboundCall, OutboundCallCommon, OutboundCallResult } from "./executor.js";
 import type { ApplyFieldMappingsFn, ResolvedTargetOperation } from "./sync-pipeline-handler.js";
@@ -136,6 +145,24 @@ export interface LinkOnlyBackfillContext {
   readonly resolution: ResolutionContext;
   /** This direction's `FieldMapping`s — the seed's pairings. */
   readonly fieldMappings: readonly FieldMapping[];
+  /**
+   * SS-13 — the **source** resource's confirmed `sourceScopeRef` (SS-7), when it has one,
+   * so backfill captures each enumerated record's scope from the record it already fetched
+   * (mirroring the Poller's SS-8.2 capture) — the input {@link resolveScopeRef} resolves
+   * the container from. Absent on a non-scoped / constant-only rule → no capture.
+   */
+  readonly sourceScopeRef?: SourceScopeRef;
+  /**
+   * SS-13 (discharges the SS-12 deferral) — resolve the record's **container** at link
+   * establishment on a **scoped** rule, so a backfilled record's later scoped delete
+   * routes from stored `RecordLink.scopeRef` instead of parking. Called per record with
+   * its `DetectedChange` (carrying the captured scope); returns the `scopeRef` to freeze
+   * on the new link (L3 `{ kind: "scope-link", scopeLinkId }` resolved through the active
+   * `ScopeLink`, or L2 `{ kind: "resolved", values }`), or `undefined` when the container
+   * does not resolve (leaves the link scopeRef-less, the pre-SS-13 fail-safe). **Absent**
+   * on a non-scoped rule — the link carries no `scopeRef`, exactly as before.
+   */
+  readonly resolveScopeRef?: (change: DetectedChange) => Promise<RecordLinkScopeRef | undefined>;
 }
 
 /** The push context — everything the dedicated push write path needs on top of {@link LinkOnlyBackfillContext} (BE-5). */
@@ -402,7 +429,10 @@ export class BackfillRunner {
     context: LinkOnlyBackfillContext,
     change: DetectedChange,
   ): Promise<BackfillRecordNote> {
-    const outcome = await this.#identity.resolve(change, context.resolution);
+    // SS-13 — freeze the record's resolved container onto the new link (scoped rule), so
+    // a backfilled record's later scoped delete routes from stored state (SS-12 discharge).
+    const resolution = await this.#resolutionForRecord(context, change);
+    const outcome = await this.#identity.resolve(change, resolution);
     switch (outcome.kind) {
       case "ambiguous-failure":
         // RL-4: never auto-link an ambiguous match — held for manual linking.
@@ -526,7 +556,10 @@ export class BackfillRunner {
     context: PushBackfillContext,
     change: DetectedChange,
   ): Promise<BackfillRecordNote> {
-    const outcome = await this.#identity.resolve(change, context.resolution);
+    // SS-13 — same per-record container resolution as link-only, threaded into both the
+    // identity-match link (via `resolve`) and the create-propagation link (`#pushCreate`).
+    const resolution = await this.#resolutionForRecord(context, change);
+    const outcome = await this.#identity.resolve(change, resolution);
     switch (outcome.kind) {
       case "ambiguous-failure":
         // RL-4 still applies under push — an ambiguous match is never auto-linked.
@@ -555,7 +588,7 @@ export class BackfillRunner {
           reason: "unexpected delete change during backfill enumeration",
         };
       case "straight-create":
-        return this.#pushCreate(context, change);
+        return this.#pushCreate(context, change, resolution);
       case "resolved":
         return this.#pushOverwrite(context, change, outcome.link);
     }
@@ -565,6 +598,7 @@ export class BackfillRunner {
   async #pushCreate(
     context: PushBackfillContext,
     change: DetectedChange,
+    resolution: ResolutionContext,
   ): Promise<BackfillRecordNote> {
     const observed = change.observedRecord ?? {};
     const operation = context.createOperation;
@@ -606,11 +640,7 @@ export class BackfillRunner {
         reason: "push create: response carried no object representation to re-baseline from",
       };
     }
-    const link = await this.#identity.recordCreatePropagation(
-      change,
-      context.resolution,
-      createdNativeId,
-    );
+    const link = await this.#identity.recordCreatePropagation(change, resolution, createdNativeId);
     await this.#recordWrite(context, change, {
       recordLinkId: link.id,
       stored,
@@ -770,7 +800,38 @@ export class BackfillRunner {
 
   // ── shared helpers ────────────────────────────────────────────────────────
 
+  /**
+   * SS-13 (SS-12 discharge) — the per-record {@link ResolutionContext}: the rule's shared
+   * context, plus the record's resolved container frozen as `scopeRefForNewLink` when the
+   * scoped-rule `resolveScopeRef` hook is supplied and resolves a container. When the hook
+   * is absent (non-scoped rule) or the container does not resolve, the shared context is
+   * used unchanged and the new link carries no `scopeRef` (the pre-SS-13 fail-safe).
+   */
+  async #resolutionForRecord(
+    context: LinkOnlyBackfillContext,
+    change: DetectedChange,
+  ): Promise<ResolutionContext> {
+    if (context.resolveScopeRef === undefined) {
+      return context.resolution;
+    }
+    const scopeRef = await context.resolveScopeRef(change);
+    if (scopeRef === undefined) {
+      return context.resolution;
+    }
+    return { ...context.resolution, scopeRefForNewLink: scopeRef };
+  }
+
   #changeOf(context: LinkOnlyBackfillContext, record: ObservedRecord): DetectedChange {
+    // SS-13 — capture this record's scope from the record already fetched (mirroring the
+    // Poller's SS-8.2 capture) so `resolveScopeRef` can freeze its container on the new
+    // link (the SS-12 discharge). Absent/empty on a non-scoped rule → no capture.
+    let capturedScope: CapturedScope | undefined;
+    if (context.sourceScopeRef !== undefined) {
+      const captured = extractCapturedScope(record.record, context.sourceScopeRef);
+      if (Object.keys(captured).length > 0) {
+        capturedScope = captured;
+      }
+    }
     // Backfill classifies every enumerated record as a `create`: it may already exist
     // in the target (Identity Resolution downgrades a match to an update).
     return {
@@ -782,6 +843,7 @@ export class BackfillRunner {
       sourceNativeId: record.nativeId,
       changeKind: "create",
       observedRecord: record.record,
+      ...(capturedScope !== undefined ? { capturedScope } : {}),
     };
   }
 

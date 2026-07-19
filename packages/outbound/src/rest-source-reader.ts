@@ -3,6 +3,7 @@ import type {
   DeltaOutcome,
   ObservedRecord,
   PageOutcome,
+  PollScope,
   SourceReader,
 } from "@mediator/sync-engine";
 import { readPath, type JsonValue } from "@mediator/transform";
@@ -157,11 +158,17 @@ export class RestSourceReader implements SourceReader {
   public async readCollectionPage(
     ruleId: string,
     continuation: string | undefined,
+    scope?: PollScope,
   ): Promise<PageOutcome> {
-    const binding = await this.#bindings.resolve(ruleId);
-    if (binding === undefined) {
+    const resolved = await this.#bindings.resolve(ruleId);
+    if (resolved === undefined) {
       return { ok: false, reason: `no source-read binding for ${ruleId}` };
     }
+    // SS-13.2 — a per-scope read fills this container's scope path params into the still-
+    // templated read path; a cross-scope read (no `scope`) is unchanged. A param the fill
+    // leaves `{…}` is caught by the `#call` unfilled-param guard → abort, never a guessed
+    // container (fail-loud).
+    const binding = withScopeFill(resolved, scope);
     const page = pageStateFrom(binding.pagination, continuation);
     const query = pageQuery(binding.pagination, page);
     const call = await this.#call(binding, query);
@@ -180,11 +187,17 @@ export class RestSourceReader implements SourceReader {
     };
   }
 
-  public async readDelta(ruleId: string, cursor: string | undefined): Promise<DeltaOutcome> {
-    const binding = await this.#bindings.resolve(ruleId);
-    if (binding === undefined) {
+  public async readDelta(
+    ruleId: string,
+    cursor: string | undefined,
+    scope?: PollScope,
+  ): Promise<DeltaOutcome> {
+    const resolved = await this.#bindings.resolve(ruleId);
+    if (resolved === undefined) {
       return { ok: false, reason: `no source-read binding for ${ruleId}` };
     }
+    // SS-13.2 — fill this scope's container path params (per-scope mode); unchanged cross-scope.
+    const binding = withScopeFill(resolved, scope);
     const delta = binding.delta;
     if (delta === undefined) {
       return { ok: false, reason: `rule ${ruleId} has no delta convention` };
@@ -359,6 +372,31 @@ function nextPage(
   // simply increments; it cannot skip, it only must not stop early.
   const nextValue = pagination.kind === "offset" ? page.value + received : page.value + 1;
   return { done: false, continuation: String(nextValue) };
+}
+
+// ── Per-scope container fill (SS-13.2) ─────────────────────────────────────────
+
+/**
+ * SS-13.2 — fill a per-scope read's container path parameters. Substitutes each
+ * `{param}` in the read `path` with the scope's resolved value (URL-encoded, exactly as
+ * the write-side {@link fillContainerScopeParams} encodes a scope value), so a scoped
+ * source read (`/repos/{owner}/{repo}/issues`) resolves to the polled container. A
+ * cross-scope read (`scope === undefined`) is returned untouched. Any parameter the fill
+ * does not cover stays `{…}` and is refused by the reader's unfilled-param guard (never a
+ * guessed container).
+ */
+function withScopeFill(
+  binding: RestSourceReadBinding,
+  scope: PollScope | undefined,
+): RestSourceReadBinding {
+  if (scope === undefined || scope.fillValues.size === 0) {
+    return binding;
+  }
+  let path = binding.path;
+  for (const [name, value] of scope.fillValues) {
+    path = path.split(`{${name}}`).join(encodeURIComponent(value));
+  }
+  return { ...binding, path };
 }
 
 // ── Request building + parsing ─────────────────────────────────────────────────

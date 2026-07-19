@@ -8,6 +8,7 @@ import {
   RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
   SyncRuleRepository,
   tx,
   type Database,
@@ -45,6 +46,7 @@ import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/teleme
 
 import { BadRequestError, NotFoundError } from "../../app-errors.js";
 import type { EnableRuleGateResult } from "./background.js";
+import { pollScopeModeView, type PollScopeModeView } from "./poll-scope-mode.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos, type RuleArtifacts } from "./resolution.js";
 import type { EstablishLinkOutcome, ScopeDiscoveryService } from "./scope-discovery.js";
 import { computeRequiredScopeBindings } from "./scope-requirements.js";
@@ -161,6 +163,12 @@ export interface SyncRuleView {
     { readonly source: SyncResourceSide; readonly target: SyncResourceSide } | undefined;
   readonly stillNeeds: readonly EnablementRequirement[];
   readonly pollerLag: PollerLagView;
+  /**
+   * SS-13.5 — the poll-enumeration mode surfaced for the operator: the persisted
+   * `override`, the `derived` mode, and the `effective` mode the Poller acts on. Absent
+   * when the rule's artifacts do not resolve (no source binding to derive from).
+   */
+  readonly pollScopeMode: PollScopeModeView | undefined;
 }
 
 /** The result of an enable attempt (SA-1.2/1.3). */
@@ -189,6 +197,11 @@ export interface SyncRuleConfig {
   readonly pollOperationRef?: string;
   readonly deletePropagation?: SyncRuleConfigPatch["deletePropagation"];
   readonly targetDriftCheck?: SyncRuleConfigPatch["targetDriftCheck"];
+  /**
+   * SS-13.5 — the operator's correction of the derived poll-enumeration mode. A value
+   * pins the override; `null` clears it back to the derived mode; absent leaves it.
+   */
+  readonly pollScopeMode?: SyncRuleConfigPatch["pollScopeMode"];
   readonly fieldConflictPolicies?: readonly {
     readonly fieldMappingId: string;
     readonly conflictPolicy: ConflictPolicy | null;
@@ -294,6 +307,7 @@ export class SyncOperatorService {
   readonly #syncRules: SyncRuleRepository;
   readonly #mappingArtifacts: MappingArtifactsRepository;
   readonly #auditLog: AuditLogRepository;
+  readonly #scopeCorrespondences: ScopeCorrespondenceRepository;
   readonly #repos: RuleArtifactRepos;
 
   public constructor(deps: SyncOperatorServiceDeps) {
@@ -307,6 +321,8 @@ export class SyncOperatorService {
     this.#syncRules = new SyncRuleRepository(deps.db);
     this.#mappingArtifacts = new MappingArtifactsRepository(deps.db);
     this.#auditLog = new AuditLogRepository(deps.db);
+    // SS-13.5 — resolve the pair's ScopeCorrespondence for the derived poll-scope mode.
+    this.#scopeCorrespondences = new ScopeCorrespondenceRepository(deps.db);
     this.#repos = {
       syncRules: this.#syncRules,
       approvedMappings: new ApprovedMappingRepository(deps.db),
@@ -331,7 +347,7 @@ export class SyncOperatorService {
     const views: SyncRuleView[] = [];
     for (const rule of rules) {
       const artifacts = await resolveRuleArtifacts(rule.id, this.#repos);
-      views.push(this.#viewFor(rule, artifacts, now));
+      views.push(this.#viewFor(rule, artifacts, await this.#pollScopeModeOf(rule, artifacts), now));
     }
     return views;
   }
@@ -931,16 +947,43 @@ export class SyncOperatorService {
       throw new NotFoundError(`Sync rule ${ruleId} not found.`);
     }
     const artifacts = await resolveRuleArtifacts(ruleId, this.#repos);
-    return this.#viewFor(rule, artifacts, this.#clock());
+    return this.#viewFor(
+      rule,
+      artifacts,
+      await this.#pollScopeModeOf(rule, artifacts),
+      this.#clock(),
+    );
   }
 
-  #viewFor(rule: SyncRule, artifacts: RuleArtifacts | undefined, now: Date): SyncRuleView {
+  /**
+   * SS-13.5 — the operator-visible poll-scope mode view (override + derived + effective).
+   * Absent when the rule's artifacts do not resolve (no source binding to derive from);
+   * else derived from the source binding + the pair's `ScopeCorrespondence`.
+   */
+  async #pollScopeModeOf(
+    rule: SyncRule,
+    artifacts: RuleArtifacts | undefined,
+  ): Promise<PollScopeModeView | undefined> {
+    if (artifacts === undefined) {
+      return undefined;
+    }
+    const correspondence = await this.#scopeCorrespondences.getByResourcePair(rule.resourcePairRef);
+    return pollScopeModeView(rule, artifacts.sourceBinding, correspondence);
+  }
+
+  #viewFor(
+    rule: SyncRule,
+    artifacts: RuleArtifacts | undefined,
+    scopeMode: PollScopeModeView | undefined,
+    now: Date,
+  ): SyncRuleView {
     if (artifacts === undefined) {
       return {
         rule,
         resourcePair: undefined,
         stillNeeds: [],
         pollerLag: pollerLag(rule, null, now, this.#staleMultiplier),
+        pollScopeMode: scopeMode,
       };
     }
     const decision = evaluateEnablement(this.#enablementInput(artifacts, false));
@@ -965,6 +1008,7 @@ export class SyncOperatorService {
         now,
         this.#staleMultiplier,
       ),
+      pollScopeMode: scopeMode,
     };
   }
 
@@ -1063,6 +1107,8 @@ function configPatch(config: SyncRuleConfig): SyncRuleConfigPatch {
       ? { deletePropagation: config.deletePropagation }
       : {}),
     ...(config.targetDriftCheck !== undefined ? { targetDriftCheck: config.targetDriftCheck } : {}),
+    // SS-13.5 — `in` preserves null-vs-absent so `null` clears the override to derived.
+    ...("pollScopeMode" in config ? { pollScopeMode: config.pollScopeMode ?? null } : {}),
   };
 }
 

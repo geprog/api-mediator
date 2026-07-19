@@ -160,6 +160,7 @@ export {
   type ParkedConflictListResponse,
   type ParkedContainerLinkDto,
   type ParkedContainerLinkListResponse,
+  type PerScopeRunResultDto,
   type PollRunOutcomeDto,
   type PollerLagDto,
   type RecordLinkDto,

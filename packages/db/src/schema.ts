@@ -46,6 +46,7 @@ import type {
   ParkedConflictKind,
   ParkedConflictResolutionChoice,
   ParkedConflictStatus,
+  PollScopeMode,
   ProposalElementRef,
   ProposalItemAlternative,
   RecordLinkEstablishedBy,
@@ -409,6 +410,13 @@ export const backfillStatusEnum = pgEnum("backfill_status", [
   "completed",
   "skipped",
 ] as const satisfies readonly BackfillStatus[]);
+
+// SS-13 — the operator override of a scoped rule's derived poll-enumeration mode.
+export const pollScopeModeEnum = pgEnum("poll_scope_mode", [
+  "cross-scope",
+  "per-scope-enumerated",
+  "per-scope-pinned",
+] as const satisfies readonly PollScopeMode[]);
 
 // ── Tables ───────────────────────────────────────────────────────────────────
 
@@ -1064,6 +1072,10 @@ export const syncRule = pgTable(
     targetDriftCheck: targetDriftCheckEnum("target_drift_check"),
     backfillMode: backfillModeEnum("backfill_mode"),
     backfillStatus: backfillStatusEnum("backfill_status"),
+    // SS-13.5 — the operator override of the derived poll-enumeration mode (nullable;
+    // NULL = use the derived mode). Additive/backward-compatible: a pre-SS-13 rule row
+    // has it NULL and polls cross-scope exactly as before.
+    pollScopeMode: pollScopeModeEnum("poll_scope_mode"),
     // Live polling state, seeded at the transition to live polling (BE) and advanced
     // atomically by the Poller (SP-5). `last_run_at` advances with the cursor;
     // `cursor` is delta-only; `last_snapshot_ref` points at this rule's
@@ -1089,26 +1101,39 @@ export const syncRule = pgTable(
 );
 
 /**
+ * SS-13 — the non-NULL **sentinel** scope key for the cross-scope (non-per-scope)
+ * case. Postgres treats NULLs as *distinct* in a unique index, so modeling the
+ * single-snapshot cross-scope case as `scope_key = NULL` under a `(sync_rule_id,
+ * scope_key)` unique index would let a rule accumulate many NULL-keyed snapshot rows
+ * and break the "one cross-scope snapshot per rule" invariant. A fixed non-NULL
+ * sentinel keeps that row unique. It can never collide with a real per-scope key: a
+ * per-scope key is a `ScopeLink` id (a uuid), never this string.
+ */
+export const CROSS_SCOPE_SCOPE_KEY = "__cross_scope__";
+
+/**
  * `poll_snapshot` — the per-record content-hash snapshot a full-fetch `SyncRule`
  * diffs against (`docs/architecture/data-model.md` `SyncRule.lastSnapshotRef`;
- * `docs/architecture/sync-engine.md` *Polling pull pipeline*, SP-2/SP-4/SP-5). One
- * row per rule (the `sync_rule_id` UNIQUE index), holding the whole `native id →
- * content hash` map as a single `jsonb` blob.
+ * `docs/architecture/sync-engine.md` *Polling pull pipeline*, SP-2/SP-4/SP-5).
  *
- * **Why one jsonb blob per rule, not a row-per-native-id table.** The Poller loads
- * the *entire* prior snapshot once per poll, diffs the complete fetch against it in
- * memory, and rewrites the whole map — it never queries an individual native id
- * from SQL, so per-row queryability buys the algorithm nothing. A blob makes the
- * SP-5 "replace the snapshot" a single `UPDATE`, which is what lets the snapshot
- * replacement and the `sync_rule` cursor/`last_run_at` advance commit in **one
- * transaction** — the atomic advance SP-5 requires. `record_count`/`captured_at`
- * stay first-class columns for cheap observability without deserializing the blob.
+ * **Per-`(rule, scope)` since SS-13.** A cross-scope rule (SS-13.1) keeps its single
+ * snapshot under the {@link CROSS_SCOPE_SCOPE_KEY} sentinel — unchanged from SP-5. A
+ * per-scope rule (SS-13.3) keeps one snapshot **per scope**, keyed by the scope's
+ * `ScopeLink` id, so a partial fetch for one scope replaces only that scope's
+ * snapshot and never touches another's. The unique key is therefore
+ * `(sync_rule_id, scope_key)`, never `sync_rule_id` alone.
+ *
+ * **Why one jsonb blob per (rule, scope), not a row-per-native-id table.** The Poller
+ * loads the *entire* prior snapshot for a scope once per poll, diffs the complete
+ * fetch against it in memory, and rewrites the whole map — it never queries an
+ * individual native id from SQL, so per-row queryability buys the algorithm nothing.
+ * A blob makes the SP-5 "replace the snapshot" a single `UPDATE`, which is what lets
+ * the snapshot replacement and the cursor/`last_run_at` advance commit in **one
+ * transaction** — the atomic advance SP-5 requires, now per scope.
  *
  * `sync_rule_id` FKs `sync_rule` `ON DELETE CASCADE`: the snapshot is wholly owned
- * by its rule. `sync_rule.last_snapshot_ref` points back at this row's `id` (set
- * when the snapshot is first seeded), so a rule with a NULL `last_snapshot_ref` has
- * no snapshot yet (a delta rule, or a full-fetch rule before its first complete
- * fetch — whose first poll initializes it, see *What enablement seeds*).
+ * by its rule. In cross-scope mode `sync_rule.last_snapshot_ref` points back at this
+ * row's `id`; in per-scope mode `poll_scope_state.last_snapshot_ref` does.
  */
 export const pollSnapshot = pgTable(
   "poll_snapshot",
@@ -1117,6 +1142,11 @@ export const pollSnapshot = pgTable(
     syncRuleId: uuid("sync_rule_id")
       .notNull()
       .references(() => syncRule.id, { onDelete: "cascade" }),
+    // SS-13 — the scope discriminator: a per-scope `ScopeLink` id, or the sentinel
+    // {@link CROSS_SCOPE_SCOPE_KEY} for a cross-scope rule (NOT NULL → no NULL-in-
+    // unique-index trap). Defaulted to the sentinel so existing per-rule rows stay
+    // unique under the new (sync_rule_id, scope_key) key (additive migration).
+    scopeKey: text("scope_key").notNull().default(CROSS_SCOPE_SCOPE_KEY),
     // The native id → content-hash map from the last complete fetch.
     entries: jsonb("entries").$type<Record<string, string>>().notNull(),
     // Denormalized `Object.keys(entries).length` for observability (no blob parse).
@@ -1126,8 +1156,52 @@ export const pollSnapshot = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    // One snapshot per rule → the replace-in-place UPDATE key and the load lookup.
-    uniqueIndex("poll_snapshot_sync_rule_uq").on(table.syncRuleId),
+    // One snapshot per (rule, scope) → the replace-in-place UPDATE key and load lookup.
+    // The cross-scope sentinel keeps the single-snapshot invariant (SS-13.3).
+    uniqueIndex("poll_snapshot_rule_scope_uq").on(table.syncRuleId, table.scopeKey),
+  ],
+);
+
+/**
+ * `poll_scope_state` — SS-13.3 the **per-`(rule, scope)`** live polling state for a
+ * per-scope rule (`docs/requirements/scoped-resource-sync.md` SS-13.3;
+ * `docs/architecture/sync-engine.md` *Polling pull pipeline*). Each scope keeps its
+ * **own** `cursor` (delta) / `last_snapshot_ref` (full-fetch) / `last_run_at`, so a
+ * partial fetch or a write failure for one scope aborts and preserves **only that
+ * scope's** state — never another's (per-scope isolation, mirroring SP-4/SP-5 per
+ * scope). A cross-scope rule (SS-13.1) uses **none** of this — its single cursor
+ * stays on `sync_rule.cursor`/`sync_rule.last_snapshot_ref`, unchanged from SP-5.
+ *
+ * `scope_key` is the scope's `ScopeLink` id (constant / manual / discovered scopes
+ * all fit — SS-11). `sync_rule_id` FKs `sync_rule` `ON DELETE CASCADE` (owned by its
+ * rule). The `(sync_rule_id, scope_key)` UNIQUE index is the upsert key the atomic
+ * per-scope advance writes through, and `scope_key` is NOT NULL so there is no
+ * NULL-in-unique-index trap. `last_snapshot_ref` FKs `poll_snapshot` `ON DELETE SET
+ * NULL` (the snapshot is replaced in place; a cascade-deleted snapshot leaves the
+ * pointer NULL, i.e. "no snapshot yet", never dangling).
+ */
+export const pollScopeState = pgTable(
+  "poll_scope_state",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    syncRuleId: uuid("sync_rule_id")
+      .notNull()
+      .references(() => syncRule.id, { onDelete: "cascade" }),
+    // The scope's `ScopeLink` id (the per-scope discriminator).
+    scopeKey: text("scope_key").notNull(),
+    // Delta-polling cursor for this scope; NULL until seeded (BE-6 per scope).
+    cursor: text("cursor"),
+    // Last successful poll-run completion for this scope.
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    // This scope's `poll_snapshot` row (full-fetch); NULL until its first complete fetch.
+    lastSnapshotRef: uuid("last_snapshot_ref").references(() => pollSnapshot.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // One state row per (rule, scope) → the per-scope atomic-advance upsert key.
+    uniqueIndex("poll_scope_state_rule_scope_uq").on(table.syncRuleId, table.scopeKey),
   ],
 );
 

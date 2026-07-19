@@ -11,6 +11,7 @@ export { MIGRATIONS_FOLDER, runMigrations } from "./migrate.js";
 
 // Schema (tables, pg enums, ref-kind vocabulary).
 export {
+  CROSS_SCOPE_SCOPE_KEY,
   DETECTION_JOB_STATUSES,
   ORDERING_QUEUE_STATUSES,
   RESOURCE_BINDING_REF_KINDS,
@@ -55,6 +56,8 @@ export {
   parkedConflictKindEnum,
   parkedConflictResolutionChoiceEnum,
   parkedConflictStatusEnum,
+  pollScopeModeEnum,
+  pollScopeState,
   pollSnapshot,
   processedEvent,
   recordLink,
@@ -154,6 +157,7 @@ export {
   MappingProposalRepository,
   OrderingQueueRepository,
   ParkedConflictRepository,
+  PollScopeStateRepository,
   PollSnapshotRepository,
   ProcessedEventRepository,
   RecordLinkRepository,
@@ -183,6 +187,8 @@ export {
   type ParkedWriteEntry,
   type ReactivateParkedResult,
   type PollCandidate,
+  type PollScopeStateAdvance,
+  type PollScopeStateRecord,
   type PollSnapshotRecord,
   type ProcessedEventOps,
   type EstablishScopeLinkResult,

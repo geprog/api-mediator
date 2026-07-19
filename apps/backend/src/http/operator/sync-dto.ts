@@ -55,7 +55,7 @@ export function toEnablementDegradationDto(
 
 /** A `SyncRuleView` → the SA-2 wire shape. No credential material. */
 export function toSyncRuleStatusDto(view: SyncRuleView): SyncRuleStatusDto {
-  const { rule, resourcePair, stillNeeds, pollerLag } = view;
+  const { rule, resourcePair, stillNeeds, pollerLag, pollScopeMode } = view;
   return {
     id: rule.id,
     approvedMappingId: rule.approvedMappingId,
@@ -83,6 +83,15 @@ export function toSyncRuleStatusDto(view: SyncRuleView): SyncRuleStatusDto {
       lagMs: pollerLag.lagMs,
       stuck: pollerLag.stuck,
     },
+    // SS-13.5 — the operator-visible poll-enumeration mode (override + derived + effective).
+    pollScopeMode:
+      pollScopeMode === undefined
+        ? null
+        : {
+            override: pollScopeMode.override ?? null,
+            derived: pollScopeMode.derived,
+            effective: pollScopeMode.effective,
+          },
   };
 }
 
@@ -230,6 +239,22 @@ export function toPollRunOutcomeDto(outcome: PollRunOutcome): PollRunOutcomeDto 
       return { kind: "aborted", reason: outcome.reason };
     case "skipped":
       return { kind: "skipped", reason: outcome.reason };
+    case "completed-per-scope":
+      // SS-13.3 — per-scope: each scope's completed (count only) / aborted / parked result.
+      return {
+        kind: "completed-per-scope",
+        scopes: outcome.scopes.map((scope) => ({
+          scopeLinkId: scope.scopeLinkId,
+          result:
+            scope.result.kind === "completed"
+              ? {
+                  kind: "completed",
+                  mode: scope.result.mode,
+                  enqueuedCount: scope.result.enqueued.length,
+                }
+              : { kind: scope.result.kind, reason: scope.result.reason },
+        })),
+      };
   }
 }
 

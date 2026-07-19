@@ -95,6 +95,8 @@ function toSyncRuleConfig(body: ConfigureSyncRuleRequest): SyncRuleConfig {
     ...(body.pollOperationRef !== undefined ? { pollOperationRef: body.pollOperationRef } : {}),
     ...(body.deletePropagation !== undefined ? { deletePropagation: body.deletePropagation } : {}),
     ...(body.targetDriftCheck !== undefined ? { targetDriftCheck: body.targetDriftCheck } : {}),
+    // SS-13.5 — `null` clears the poll-scope-mode override to derived; a value pins it.
+    ...("pollScopeMode" in body ? { pollScopeMode: body.pollScopeMode ?? null } : {}),
     ...(body.fieldConflictPolicies !== undefined
       ? { fieldConflictPolicies: body.fieldConflictPolicies }
       : {}),

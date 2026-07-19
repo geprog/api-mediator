@@ -58,3 +58,8 @@ export {
   type SyncRuleEnableTransition,
 } from "./sync-rule.js";
 export { PollSnapshotRepository, type PollSnapshotRecord } from "./poll-snapshot.js";
+export {
+  PollScopeStateRepository,
+  type PollScopeStateRecord,
+  type PollScopeStateAdvance,
+} from "./poll-scope-state.js";
