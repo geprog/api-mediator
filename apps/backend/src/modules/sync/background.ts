@@ -72,6 +72,7 @@ import { createCredentialApplier } from "./credential-applier.js";
 import { resolveEnableRuleInput } from "./enable-resolver.js";
 import { RepoPollPlanResolver } from "./poll-plan-resolver.js";
 import { RepoSyncPipelineContextLoader } from "./pipeline-context-loader.js";
+import { RepoContainerParkSink, RepoPreLinkScopeResolver } from "./pre-link-scope.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos } from "./resolution.js";
 import {
   RepoContainerParkReader,
@@ -314,12 +315,14 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   // persistence; it NEVER writes to either app (SS-11.8).
   const scopeLinks = new ScopeLinkRepository(db);
   const scopeCorrespondences = new ScopeCorrespondenceRepository(db);
+  // SS-11.7 — dedup a container park across sweeps/polls (reuse an open park's event id
+  // rather than minting a new `failure` event every pass); shared by the discovery stage
+  // and the SS-14.3 poller container-park sink.
+  const containerParkReader = new RepoContainerParkReader(auditLog, scopeLinks);
   const scopeDiscoveryStage = new ScopeDiscoveryStage({
     links: scopeLinks,
     events: syncEventStore,
-    // SS-11.7 — dedup a container park across sweeps (reuse an open park's event id rather
-    // than minting a new `failure` event every pass).
-    parkReader: new RepoContainerParkReader(auditLog, scopeLinks),
+    parkReader: containerParkReader,
   });
   const scopeDiscovery = new ScopeDiscoveryService({
     stage: scopeDiscoveryStage,
@@ -386,7 +389,15 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     }),
     new DbPollStateStore(db),
     orderingQueue,
-    new QueueKeyResolver(recordLinks),
+    // SS-14.2/14.3 — for a scoped rule the pre-link ordering-queue key is scope-qualified via
+    // the shared ScopeLink (resolved from the captured scope), so both directions compute the
+    // same key and different containers never collide; an unresolved container is parked.
+    new QueueKeyResolver(recordLinks, new RepoPreLinkScopeResolver(scopeLinks)),
+    {
+      // SS-14.3 — an unresolved-container record is parked BEFORE enqueue onto the SS-11.5
+      // parked-container surface (never enqueued under a guessed / un-scoped key).
+      containerPark: new RepoContainerParkSink(syncEventStore, containerParkReader),
+    },
   );
   const scheduler = new Scheduler(syncRules, poller, {
     onError: (error) => {

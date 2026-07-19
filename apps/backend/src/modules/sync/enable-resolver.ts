@@ -1,12 +1,8 @@
-import type {
-  FieldMapping,
-  IrRefTarget,
-  RecordLinkScopeRef,
-  SourceScopeRef,
-} from "@mediator/domain";
+import type { FieldMapping, IrRefTarget, SourceScopeRef } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import type { ScopeLinkStore } from "@mediator/db";
 import type {
+  BackfillContainerResolution,
   BackfillRunInput,
   EnableRuleInput,
   LinkOnlyBackfillContext,
@@ -133,8 +129,20 @@ async function buildBackfillRunInput(
   // on a non-scoped rule (no confirmed `sourceScopeRef` → no capture; no scope bindings →
   // `resolveScopedContainer` returns nothing), so a non-scoped backfill is unchanged.
   const sourceScopeRef = confirmedSourceScopeRef(artifacts);
-  const resolveScopeRef = async (change: DetectedChange): Promise<RecordLinkScopeRef | undefined> =>
-    (await resolveScopedContainer(change, artifacts.targetBinding, scopeLinks)).scopeRefForNewLink;
+  const resolveScopeRef = async (change: DetectedChange): Promise<BackfillContainerResolution> => {
+    const container = await resolveScopedContainer({
+      capturedScope: change.capturedScope,
+      resourcePairRef: change.resourcePairRef,
+      sourceAppId: change.sourceAppId,
+      targetAppId: change.targetAppId,
+      scopePathBindings: artifacts.targetBinding.scopePathBindings ?? [],
+      scopeLinks,
+    });
+    return stripUndefined({
+      scopeRef: container.scopeRefForNewLink,
+      targetContainerScope: container.targetContainerScope,
+    });
+  };
 
   const linkOnly: LinkOnlyBackfillContext = stripUndefined({
     ruleId: artifacts.rule.id,

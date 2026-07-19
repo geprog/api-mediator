@@ -367,6 +367,15 @@ export interface SourceReadBindingInput {
   readonly sourceCapabilities: AppCapabilities;
   readonly sourceGroup: IrResourceGroup;
   readonly sourceBinding: ResourceBinding;
+  /**
+   * SS-14.1 — a pre-resolved `{ parameterName → value }` **container** scope fill. The
+   * SS-14 scoped identity lookup passes the target container's scope key here so the
+   * collection read's container `{…}` is filled (searching **only within** that container);
+   * the Poller's own source read passes none (a `scope-link`/`record-derived` param then
+   * stays unfilled → the whole binding unresolves, exactly as before — SS-4.4 / SS-13's
+   * per-scope read fills its container path in the reader instead).
+   */
+  readonly scopeValues?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -468,13 +477,15 @@ export function resolveSourceReadBinding(
 
   // SS-4.1 — a collection/source read has NO record-id path parameter (the record id is
   // a response field), so EVERY path parameter is a scope parameter: fill each from the
-  // SOURCE resource's confirmed `constant` bindings. An unconfirmed scope param → the
-  // whole binding unresolves (SS-4.4), never a fabricated URL; the composed path then
-  // carries no `{…}`.
+  // resource's confirmed `constant` bindings OR (SS-14.1) the caller's pre-resolved
+  // `scopeValues` **container** fill (the scoped identity lookup's target container key).
+  // An unfilled scope param → the whole binding unresolves (SS-4.4), never a fabricated
+  // URL; the composed path then carries no `{…}`.
   const path = fillScopePathParameters(
     operation.path,
     input.sourceBinding.scopePathBindings ?? [],
     undefined,
+    input.scopeValues,
   );
   if (path === undefined) {
     return undefined;

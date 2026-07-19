@@ -118,6 +118,17 @@ export interface ResolutionContext {
    * (a later delete/no-capture read parks for manual container linking, never mis-writes).
    */
   readonly scopeRefForNewLink?: RecordLinkScopeRef;
+  /**
+   * SS-14.1 — the **target-side** container scope path-param fill (`{ parameterName → value }`)
+   * a **scoped** identity lookup fills its collection read with, so a filtered read / a
+   * fetch-and-match searches **only within** the record's resolved target container (project
+   * `42`, `alice/phoenix`), never globally. Resolved by the composition from the change's
+   * captured scope (L3: the matched active `ScopeLink`'s target-side key; L2 `record-derived`:
+   * the resolved fill). **Absent** on a non-scoped rule and whenever the container did not
+   * resolve — the lookup then fails closed (a still-templated container `{…}` refuses the
+   * read) rather than enumerating globally and fabricating a wrong match.
+   */
+  readonly targetContainerScope?: ReadonlyMap<string, string>;
 }
 
 /** A target record a lookup matched: its native id + the record body (for the seed). */
@@ -143,12 +154,24 @@ export interface FilteredReadRequest {
   readonly lookupParamRef: string;
   /** The identity value, used **AS-IS** — no transform is ever applied to it (RL-3.3). */
   readonly value: JsonValue;
+  /**
+   * SS-14.1 — the resolved target **container** scope path-param fill. When present the
+   * filtered read fills its collection read's container `{…}` from it, so it searches **only
+   * within** that container. Absent on a non-scoped rule (a global-within-the-app read).
+   */
+  readonly containerScope?: ReadonlyMap<string, string>;
 }
 
 /** A complete paged fetch of the target resource, for in-memory matching. */
 export interface FetchAllRequest {
   readonly targetAppId: string;
   readonly binding: TargetReadBinding;
+  /**
+   * SS-14.1 — the resolved target **container** scope path-param fill. When present the
+   * fetch enumerates **only** that container (its scoped collection read), never globally.
+   * Absent on a non-scoped rule.
+   */
+  readonly containerScope?: ReadonlyMap<string, string>;
 }
 
 /**

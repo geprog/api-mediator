@@ -59,6 +59,8 @@ export interface TargetCollectionReadResolver {
   resolve(
     targetAppId: string,
     binding: TargetReadBinding,
+    /** SS-14.1 — the target container's scope path-param fill, so the read searches only within it. */
+    containerScope?: ReadonlyMap<string, string>,
   ): Promise<ResolvedTargetCollectionRead | undefined>;
 }
 
@@ -82,6 +84,7 @@ export class RepoTargetCollectionReadResolver implements TargetCollectionReadRes
   public async resolve(
     targetAppId: string,
     binding: TargetReadBinding,
+    containerScope?: ReadonlyMap<string, string>,
   ): Promise<ResolvedTargetCollectionRead | undefined> {
     const app = await this.#repos.registeredApps.getById(targetAppId);
     if (app?.baseUrl === undefined) {
@@ -114,6 +117,9 @@ export class RepoTargetCollectionReadResolver implements TargetCollectionReadRes
           sourceCapabilities: { ...app.capabilities, supportsDeltaQuery: false },
           sourceGroup: group,
           sourceBinding: resourceBinding,
+          // SS-14.1 — fill the target collection read's container `{…}` from the resolved
+          // ScopeLink, so a scoped lookup searches ONLY within the record's target container.
+          ...(containerScope !== undefined ? { scopeValues: containerScope } : {}),
         });
         if (resolved !== undefined) {
           return { binding: resolved, parameters: operation.parameters };
@@ -174,7 +180,13 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
   }
 
   public async filteredRead(request: FilteredReadRequest): Promise<readonly MatchedTargetRecord[]> {
-    const wire = await this.#resolver.resolve(request.targetAppId, request.binding);
+    // SS-14.1 — a scoped lookup fills the collection read's container from `containerScope`,
+    // so the filtered read searches ONLY within the record's resolved target container.
+    const wire = await this.#resolver.resolve(
+      request.targetAppId,
+      request.binding,
+      request.containerScope,
+    );
     if (wire === undefined) {
       // A config error (the collection read did not resolve) — never a fabricated
       // no-match: throw so the queued execution retries rather than creating a duplicate.
@@ -205,7 +217,13 @@ export class RestTargetIdentityLookup implements TargetIdentityLookup {
   }
 
   public async fetchAll(request: FetchAllRequest): Promise<TargetFetchResult> {
-    const wire = await this.#resolver.resolve(request.targetAppId, request.binding);
+    // SS-14.1 — a scoped fetch-and-match enumerates ONLY the record's resolved target
+    // container (the collection read's container `{…}` filled from `containerScope`).
+    const wire = await this.#resolver.resolve(
+      request.targetAppId,
+      request.binding,
+      request.containerScope,
+    );
     if (wire === undefined) {
       // Abort-on-partial: an unresolved binding is an unsound read, not "no records".
       return { complete: false };

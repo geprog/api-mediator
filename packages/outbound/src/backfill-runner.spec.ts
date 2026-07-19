@@ -573,7 +573,7 @@ describe("SS-13 backfill establishes RecordLink.scopeRef (discharges the SS-12 d
       context: {
         ...linkOnlyContext(),
         resolveScopeRef: () =>
-          Promise.resolve({ kind: "resolved" as const, values: { project: "42" } }),
+          Promise.resolve({ scopeRef: { kind: "resolved" as const, values: { project: "42" } } }),
       },
     });
     expect(result.outcome).toBe("completed");
@@ -603,7 +603,7 @@ describe("SS-13 backfill establishes RecordLink.scopeRef (discharges the SS-12 d
       context: {
         ...pushContext(),
         resolveScopeRef: () =>
-          Promise.resolve({ kind: "scope-link" as const, scopeLinkId: "sl-42" }),
+          Promise.resolve({ scopeRef: { kind: "scope-link" as const, scopeLinkId: "sl-42" } }),
       },
     });
     expect(result.outcome).toBe("completed");

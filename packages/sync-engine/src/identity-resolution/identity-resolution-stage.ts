@@ -13,6 +13,7 @@ import { stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore } from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
 
+import { scopeQualifiedIdentityKey } from "../ordering/scoped-queue-key.js";
 import { stringifyIdentityValue, valuesAgree } from "./hash.js";
 import type { IdentityMatchSeeder } from "./field-state-seeder.js";
 import type {
@@ -183,8 +184,7 @@ export class IdentityResolutionStage {
     createdNativeId: string,
   ): Promise<RecordLink> {
     const identityValue = this.#readIdentityValue(change, context);
-    const preLinkKey =
-      identityValue !== undefined ? stringifyIdentityValue(identityValue) : change.sourceNativeId;
+    const preLinkKey = this.#preLinkQueueKey(change, context, identityValue);
     const link = this.#buildLink(change, context, {
       establishedBy: "create-propagation",
       targetNativeId: createdNativeId,
@@ -308,18 +308,27 @@ export class IdentityResolutionStage {
     identityValue: JsonValue,
   ): Promise<readonly MatchedTargetRecord[]> {
     const lookup = context.targetLookup;
+    // SS-14.1 — a scoped rule's lookup fills the target collection read's container `{…}`
+    // from `targetContainerScope`, so it searches ONLY within the record's resolved target
+    // container; a non-scoped rule passes none (the app-wide read, unchanged).
+    const containerScope =
+      context.targetContainerScope !== undefined
+        ? { containerScope: context.targetContainerScope }
+        : {};
     if (lookup.kind === "filtered-read") {
       return this.#lookup.filteredRead({
         targetAppId: change.targetAppId,
         binding: lookup.binding,
         lookupParamRef: lookup.lookupParamRef,
         value: identityValue,
+        ...containerScope,
       });
     }
     if (lookup.kind === "fetch-and-match") {
       const result = await this.#lookup.fetchAll({
         targetAppId: change.targetAppId,
         binding: lookup.binding,
+        ...containerScope,
       });
       if (!result.complete) {
         throw new IncompleteTargetFetchError(change.targetAppId);
@@ -345,7 +354,7 @@ export class IdentityResolutionStage {
       targetNativeId: matched.nativeId,
       establishingQueueKey: {
         kind: "identity-value",
-        value: stringifyIdentityValue(identityValue),
+        value: this.#preLinkQueueKey(change, context, identityValue),
       },
     });
     await this.#links.insert(link);
@@ -452,6 +461,29 @@ export class IdentityResolutionStage {
       // scope. Absent on a non-scoped rule (and when the container did not resolve).
       ...(context.scopeRefForNewLink !== undefined ? { scopeRef: context.scopeRefForNewLink } : {}),
     };
+  }
+
+  /**
+   * SS-14.2 — the establishing **pre-link ordering-queue key** retained on the new link, so
+   * the OQ-4 continuation gate recognizes the pre-link queue as this link's establishing
+   * queue. Recomputes the **exact same** string the `QueueKeyResolver` produced at enqueue:
+   * the stringified identity value, **scope-qualified** by the record's resolved container
+   * (`context.scopeRefForNewLink`, resolved from the same captured scope → same `ScopeLink`)
+   * on a scoped rule; the record's own native id when it carries no identity value (the
+   * OQ-3.2 fallback, never scope-qualified).
+   */
+  #preLinkQueueKey(
+    change: DetectedChange,
+    context: ResolutionContext,
+    identityValue: JsonValue | undefined,
+  ): string {
+    if (identityValue === undefined) {
+      return change.sourceNativeId;
+    }
+    const identityKey = stringifyIdentityValue(identityValue);
+    return context.scopeRefForNewLink !== undefined
+      ? scopeQualifiedIdentityKey(context.scopeRefForNewLink, identityKey)
+      : identityKey;
   }
 
   #readIdentityValue(change: DetectedChange, context: ResolutionContext): JsonValue | undefined {

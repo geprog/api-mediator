@@ -3,13 +3,18 @@ import { describe, expect, it } from "vitest";
 
 import { FakeRecordLinkStore } from "../identity-resolution/fakes.js";
 import { canonicalJson } from "../identity-resolution/hash.js";
-import { QueueKeyResolver, type QueueKeyChange } from "./queue-key-resolver.js";
+import {
+  QueueKeyResolver,
+  type QueueKeyChange,
+  type QueueKeyResolution,
+} from "./queue-key-resolver.js";
 
 /**
  * OQ-3 (and the keying half of OQ-2) — `QueueKeyResolver.resolve`: the cheap
  * pre-enqueue lookup that keys a change by its active `RecordLink` id, else its shared
  * identity-key value, else its native id
- * (`docs/requirements/phase-4-ordering-queue.md` OQ-2.1, OQ-3.1..3.4).
+ * (`docs/requirements/phase-4-ordering-queue.md` OQ-2.1, OQ-3.1..3.4). The scope-qualified
+ * SS-14 variant + the unresolved-container park live in `scoped-queue-key.spec.ts`.
  */
 
 const RESOURCE_PAIR = "rp:users";
@@ -38,36 +43,50 @@ function change(overrides: Partial<QueueKeyChange> = {}): QueueKeyChange {
   return {
     resourcePairRef: RESOURCE_PAIR,
     sourceAppId: APP_A,
+    targetAppId: APP_B,
     sourceNativeId: "a1",
     ...overrides,
   };
+}
+
+/** Narrow a resolution to its enqueued key (the non-scoped cases never park). */
+function queued(resolution: QueueKeyResolution): { queueKey: string; basis: string } {
+  if (resolution.outcome !== "queue") {
+    throw new Error(`expected an enqueued key, got ${resolution.outcome}`);
+  }
+  return { queueKey: resolution.queueKey, basis: resolution.basis };
 }
 
 describe("QueueKeyResolver", () => {
   describe("OQ-2.1 — a linked record keys by its RecordLink id (both directions → one queue)", () => {
     it("keys a linked change by the link id, from EITHER side of the pair", async () => {
       const links = new FakeRecordLinkStore();
-      const link = activeLink();
-      await links.insert(link);
+      await links.insert(activeLink());
       const resolver = new QueueKeyResolver(links);
 
       // Direction A→B: source is app A's record a1.
-      const forward = await resolver.resolve(
-        change({
-          sourceAppId: APP_A,
-          sourceNativeId: "a1",
-          observedRecord: { email: "jane@example.test" },
-        }),
-        { identitySourcePath: "email" },
+      const forward = queued(
+        await resolver.resolve(
+          change({
+            sourceAppId: APP_A,
+            targetAppId: APP_B,
+            sourceNativeId: "a1",
+            observedRecord: { email: "jane@example.test" },
+          }),
+          { identitySourcePath: "email" },
+        ),
       );
       // Direction B→A: source is app B's record b1 — the SAME shared link.
-      const reverse = await resolver.resolve(
-        change({
-          sourceAppId: APP_B,
-          sourceNativeId: "b1",
-          observedRecord: { mail: "jane@example.test" },
-        }),
-        { identitySourcePath: "mail" },
+      const reverse = queued(
+        await resolver.resolve(
+          change({
+            sourceAppId: APP_B,
+            targetAppId: APP_A,
+            sourceNativeId: "b1",
+            observedRecord: { mail: "jane@example.test" },
+          }),
+          { identitySourcePath: "mail" },
+        ),
       );
 
       expect(forward).toStrictEqual({ queueKey: "link-1", basis: "record-link" });
@@ -81,9 +100,10 @@ describe("QueueKeyResolver", () => {
       await links.insert(activeLink());
       const resolver = new QueueKeyResolver(links);
 
-      const resolved = await resolver.resolve(
-        change({ observedRecord: { email: "jane@example.test" } }),
-        { identitySourcePath: "email" },
+      const resolved = queued(
+        await resolver.resolve(change({ observedRecord: { email: "jane@example.test" } }), {
+          identitySourcePath: "email",
+        }),
       );
       expect(resolved.basis).toBe("record-link");
       expect(resolved.queueKey).toBe("link-1");
@@ -96,21 +116,27 @@ describe("QueueKeyResolver", () => {
       const resolver = new QueueKeyResolver(links);
 
       // A→B reads the identity value at path `email`; B→A reads it at a different path.
-      const forward = await resolver.resolve(
-        change({
-          sourceAppId: APP_A,
-          sourceNativeId: "a1",
-          observedRecord: { email: "jane@example.test" },
-        }),
-        { identitySourcePath: "email" },
+      const forward = queued(
+        await resolver.resolve(
+          change({
+            sourceAppId: APP_A,
+            targetAppId: APP_B,
+            sourceNativeId: "a1",
+            observedRecord: { email: "jane@example.test" },
+          }),
+          { identitySourcePath: "email" },
+        ),
       );
-      const reverse = await resolver.resolve(
-        change({
-          sourceAppId: APP_B,
-          sourceNativeId: "b1",
-          observedRecord: { profile: { mail: "jane@example.test" } },
-        }),
-        { identitySourcePath: "profile.mail" },
+      const reverse = queued(
+        await resolver.resolve(
+          change({
+            sourceAppId: APP_B,
+            targetAppId: APP_A,
+            sourceNativeId: "b1",
+            observedRecord: { profile: { mail: "jane@example.test" } },
+          }),
+          { identitySourcePath: "profile.mail" },
+        ),
       );
 
       expect(forward).toStrictEqual({ queueKey: "jane@example.test", basis: "identity-value" });
@@ -123,9 +149,11 @@ describe("QueueKeyResolver", () => {
       const links = new FakeRecordLinkStore();
       const resolver = new QueueKeyResolver(links);
 
-      const resolved = await resolver.resolve(change({ observedRecord: { orderNo: 42 } }), {
-        identitySourcePath: "orderNo",
-      });
+      const resolved = queued(
+        await resolver.resolve(change({ observedRecord: { orderNo: 42 } }), {
+          identitySourcePath: "orderNo",
+        }),
+      );
       expect(resolved.basis).toBe("identity-value");
       expect(resolved.queueKey).toBe(canonicalJson(42));
     });
@@ -140,7 +168,7 @@ describe("QueueKeyResolver", () => {
         change({ sourceNativeId: "a1" /* no observedRecord — a delete */ }),
         { identitySourcePath: "email" },
       );
-      expect(resolved).toStrictEqual({ queueKey: "a1", basis: "native-id" });
+      expect(resolved).toStrictEqual({ outcome: "queue", queueKey: "a1", basis: "native-id" });
     });
 
     it("keys by native id when the observed record has no identity field value", async () => {
@@ -151,7 +179,7 @@ describe("QueueKeyResolver", () => {
         change({ sourceNativeId: "a1", observedRecord: { name: "no email here" } }),
         { identitySourcePath: "email" },
       );
-      expect(resolved).toStrictEqual({ queueKey: "a1", basis: "native-id" });
+      expect(resolved).toStrictEqual({ outcome: "queue", queueKey: "a1", basis: "native-id" });
     });
   });
 
@@ -167,7 +195,11 @@ describe("QueueKeyResolver", () => {
         change({ observedRecord: { email: "new@example.test" } }),
         { identitySourcePath: "email" },
       );
-      expect(resolved).toStrictEqual({ queueKey: "new@example.test", basis: "identity-value" });
+      expect(resolved).toStrictEqual({
+        outcome: "queue",
+        queueKey: "new@example.test",
+        basis: "identity-value",
+      });
     });
   });
 
@@ -178,9 +210,10 @@ describe("QueueKeyResolver", () => {
       await links.tombstone("link-old", "observed-delete", CLOCK);
       const resolver = new QueueKeyResolver(links);
 
-      const resolved = await resolver.resolve(
-        change({ observedRecord: { email: "jane@example.test" } }),
-        { identitySourcePath: "email" },
+      const resolved = queued(
+        await resolver.resolve(change({ observedRecord: { email: "jane@example.test" } }), {
+          identitySourcePath: "email",
+        }),
       );
       // findActiveByRecord returns nothing → pre-link keying, not the tombstoned link id.
       expect(resolved.basis).toBe("identity-value");
