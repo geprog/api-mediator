@@ -185,6 +185,7 @@ export {
   BackfillRunner,
   FakeBackfillMetrics,
   type BackfillCounts,
+  type BackfillContainerResolution,
   type BackfillFieldStateReader,
   type BackfillIdentityResolution,
   type BackfillLoopPrevention,

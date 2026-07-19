@@ -97,11 +97,14 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
     // create op's fill + the new link's `scopeRef`. Absent on a delete (no captured scope) —
     // a linked delete routes from the stored `scopeRef` in the handler instead. Shared with
     // the initial-backfill discharge (SS-13) via `resolveScopedContainer`.
-    const container = await resolveScopedContainer(
-      change,
-      artifacts.targetBinding,
-      this.#scopeLinks,
-    );
+    const container = await resolveScopedContainer({
+      capturedScope: change.capturedScope,
+      resourcePairRef: change.resourcePairRef,
+      sourceAppId: change.sourceAppId,
+      targetAppId: change.targetAppId,
+      scopePathBindings: artifacts.targetBinding.scopePathBindings ?? [],
+      scopeLinks: this.#scopeLinks,
+    });
 
     // SS-8.3 — thread the change's captured scope so each `record-derived` target scope
     // param is filled from it (by the binding's `sourceScopeKey`) alongside the constants;
@@ -125,6 +128,9 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
       ...buildResolutionContext(artifacts, identityField, operations.create !== undefined),
       // SS-12.2/12.7 — freeze the resolved container onto the new link at establishment.
       scopeRefForNewLink: container.scopeRefForNewLink,
+      // SS-14.1 — the target container scope fill so the identity lookup searches ONLY within
+      // the record's resolved target container (never a global read that could cross-match).
+      targetContainerScope: container.targetContainerScope,
     });
     const loopPrevention = buildLoopPreventionContext(
       artifacts,

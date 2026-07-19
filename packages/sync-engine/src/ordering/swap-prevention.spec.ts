@@ -4,7 +4,11 @@ import { describe, expect, it } from "vitest";
 import { FakeOrderingQueue } from "../fake-ordering-queue.js";
 import { FakeRecordLinkStore } from "../identity-resolution/fakes.js";
 import { OrderingQueueDispatcher, type QueueHandler } from "../ordering-queue-dispatcher.js";
-import { QueueKeyResolver, type QueueKeyChange } from "./queue-key-resolver.js";
+import {
+  QueueKeyResolver,
+  type QueueKeyChange,
+  type QueueKeyResolution,
+} from "./queue-key-resolver.js";
 
 /**
  * **OQ-2.3 — the swap-prevention hard test.** Both directions of a bidirectional pair
@@ -110,15 +114,25 @@ const CLOCK = (): Date => new Date("2026-07-13T00:00:00.000Z");
 const forwardChange: QueueKeyChange = {
   resourcePairRef: RESOURCE_PAIR,
   sourceAppId: APP_A,
+  targetAppId: APP_B,
   sourceNativeId: "a1",
   observedRecord: { email: IDENTITY },
 };
 const reverseChange: QueueKeyChange = {
   resourcePairRef: RESOURCE_PAIR,
   sourceAppId: APP_B,
+  targetAppId: APP_A,
   sourceNativeId: "b1",
   observedRecord: { email: IDENTITY },
 };
+
+/** Narrow a resolution to its enqueued key (these OQ-2 cases never park). */
+function queued(resolution: QueueKeyResolution): { queueKey: string; basis: string } {
+  if (resolution.outcome !== "queue") {
+    throw new Error(`expected an enqueued key, got ${resolution.outcome}`);
+  }
+  return { queueKey: resolution.queueKey, basis: resolution.basis };
+}
 
 describe("OQ-2 cross-direction swap prevention", () => {
   it("the bug is real: two queues (per-(mapping,resourceId)) + concurrency → both write (swap)", async () => {
@@ -152,8 +166,12 @@ describe("OQ-2 cross-direction swap prevention", () => {
     const resolver = new QueueKeyResolver(links);
 
     // OQ-2.1: resolve BOTH directions' keys — they must be the SAME shared link id.
-    const forwardKey = await resolver.resolve(forwardChange, { identitySourcePath: "email" });
-    const reverseKey = await resolver.resolve(reverseChange, { identitySourcePath: "email" });
+    const forwardKey = queued(
+      await resolver.resolve(forwardChange, { identitySourcePath: "email" }),
+    );
+    const reverseKey = queued(
+      await resolver.resolve(reverseChange, { identitySourcePath: "email" }),
+    );
     expect(forwardKey.basis).toBe("record-link");
     expect(reverseKey.queueKey).toBe(forwardKey.queueKey);
 
@@ -184,8 +202,12 @@ describe("OQ-2 cross-direction swap prevention", () => {
     const links = new FakeRecordLinkStore();
     await links.insert(activeLink());
     const resolver = new QueueKeyResolver(links);
-    const forwardKey = await resolver.resolve(forwardChange, { identitySourcePath: "email" });
-    const reverseKey = await resolver.resolve(reverseChange, { identitySourcePath: "email" });
+    const forwardKey = queued(
+      await resolver.resolve(forwardChange, { identitySourcePath: "email" }),
+    );
+    const reverseKey = queued(
+      await resolver.resolve(reverseChange, { identitySourcePath: "email" }),
+    );
 
     const queue = new FakeOrderingQueue();
     const shared: SharedFieldState = { baselineGeneration: 0, writes: [], conflicts: [] };

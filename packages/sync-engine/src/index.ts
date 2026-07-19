@@ -32,15 +32,25 @@ export { FakeOrderingQueue } from "./fake-ordering-queue.js";
 // ── Ordering-queue keying + continuation handoff (OQ-2 / OQ-3 / OQ-4) ─────────
 
 // OQ-2 / OQ-3: what the opaque queue_key IS for a change (link id → identity value →
-// native id), resolved by the cheap pre-enqueue lookup SP calls before enqueue.
+// native id), resolved by the cheap pre-enqueue lookup SP calls before enqueue. SS-14 —
+// the pre-link identity-value key is scope-qualified (and parks an unresolved container)
+// for a scoped rule.
 export {
   QueueKeyResolver,
   type ActiveRecordLinkLookup,
+  type PreLinkScopeInput,
+  type PreLinkScopeResolution,
+  type PreLinkScopeResolver,
   type QueueKeyBasis,
   type QueueKeyChange,
   type QueueKeyContext,
-  type ResolvedQueueKey,
+  type QueueKeyResolution,
+  type QueueKeyScopeContext,
 } from "./ordering/queue-key-resolver.js";
+
+// SS-14.2 — the scope prefix + scope-qualified pre-link key helpers, shared by the pre-enqueue
+// QueueKeyResolver and Identity Resolution's retained `establishingQueueKey` (same string).
+export { scopePrefixOf, scopeQualifiedIdentityKey } from "./ordering/scoped-queue-key.js";
 
 // OQ-4: the continuation handoff — a decorator over the OQ-1 worker ops that holds a
 // link-keyed entry until its establishing pre-link queue drains (one record, one queue).
@@ -218,6 +228,8 @@ export { contentHashOfRecord } from "./poller/content-hash.js";
 export { buildChangePayload } from "./poller/types.js";
 export type {
   ChangeEnqueue,
+  ContainerParkRecord,
+  ContainerParkSink,
   DeltaOutcome,
   EnqueuedChange,
   NotPollableReason,

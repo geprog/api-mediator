@@ -11,11 +11,13 @@ import {
   UniqueActiveLinkViolation,
 } from "./fakes.js";
 import { IdentityMatchSeeder } from "./field-state-seeder.js";
+import { stringifyIdentityValue } from "./hash.js";
 import {
   IdentityResolutionStage,
   IncompleteTargetFetchError,
 } from "./identity-resolution-stage.js";
 import type { DetectedChange, MatchedTargetRecord, ResolutionContext } from "./types.js";
+import { scopeQualifiedIdentityKey } from "../ordering/scoped-queue-key.js";
 
 /**
  * Unit tests for the Identity Resolution stage (RL-1..RL-5), against the fakes that
@@ -617,5 +619,114 @@ describe("fake mirrors the DB unique-active-link invariant", () => {
     await links.insert(activeLink({ id: "l1" }));
     await links.tombstone("l1", "observed-delete", T0);
     await expect(links.insert(activeLink({ id: "l2" }))).resolves.toBeUndefined();
+  });
+});
+
+describe("SS-14 — scoped record identity", () => {
+  const SCOPE_REF = { kind: "scope-link" as const, scopeLinkId: "sl-1" };
+  const CONTAINER = new Map([["id", "42"]]);
+
+  it("SS-14.1 — forwards the target container scope into the filtered-read lookup", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", { identityFieldPath: "email", records: [] });
+    await h.stage.resolve(makeChange(), makeContext({ targetContainerScope: CONTAINER }));
+    // The scoped lookup searches ONLY within the record's resolved container (SS-14.1).
+    expect(h.lookup.filteredReadCalls[0]?.containerScope).toBe(CONTAINER);
+  });
+
+  it("SS-14.1 — forwards the container scope into the fetch-and-match lookup (enumerate only the container)", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", { identityFieldPath: "email", records: [] });
+    await h.stage.resolve(
+      makeChange(),
+      makeContext({
+        targetLookup: {
+          kind: "fetch-and-match",
+          binding: { collectionReadOperationId: "listCustomers", nativeIdPath: "id" },
+        },
+        targetContainerScope: CONTAINER,
+      }),
+    );
+    expect(h.lookup.fetchAllCalls[0]?.containerScope).toBe(CONTAINER);
+  });
+
+  it("SS-14.1 — a NON-scoped rule forwards no container scope (unchanged)", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", { identityFieldPath: "email", records: [] });
+    await h.stage.resolve(makeChange(), makeContext());
+    expect(h.lookup.filteredReadCalls[0]?.containerScope).toBeUndefined();
+  });
+
+  it("SS-14.2/14.6 — an identity-match link retains a SCOPE-QUALIFIED establishing queue key + frozen scopeRef", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", {
+      identityFieldPath: "email",
+      records: [target("tgtN1", { id: "tgtN1", email: "a@x.com" })],
+    });
+    const outcome = await h.stage.resolve(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: SCOPE_REF, targetContainerScope: CONTAINER }),
+    );
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      // SS-14.2 — the retained key matches what the poller's QueueKeyResolver computes.
+      expect(outcome.link.establishingQueueKey).toStrictEqual({
+        kind: "identity-value",
+        value: scopeQualifiedIdentityKey(SCOPE_REF, stringifyIdentityValue("a@x.com")),
+      });
+      // SS-14.6 — the container resolved from the captured scope is frozen onto the new link.
+      expect(outcome.link.scopeRef).toStrictEqual(SCOPE_REF);
+    }
+  });
+
+  it("SS-14.2 — a create-propagation link retains the SAME scope-qualified key", async () => {
+    const h = makeHarness();
+    const link = await h.stage.recordCreatePropagation(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: SCOPE_REF }),
+      "tgtNew",
+    );
+    expect(link.establishingQueueKey).toStrictEqual({
+      kind: "identity-value",
+      value: scopeQualifiedIdentityKey(SCOPE_REF, stringifyIdentityValue("a@x.com")),
+    });
+    expect(link.scopeRef).toStrictEqual(SCOPE_REF);
+  });
+
+  it("SS-14.2 — a NON-scoped link keeps the plain identity-value key (regression)", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", {
+      identityFieldPath: "email",
+      records: [target("tgtN1", { id: "tgtN1", email: "a@x.com" })],
+    });
+    const outcome = await h.stage.resolve(makeChange(), makeContext());
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind === "resolved") {
+      expect(outcome.link.establishingQueueKey).toStrictEqual({
+        kind: "identity-value",
+        value: stringifyIdentityValue("a@x.com"),
+      });
+      expect(outcome.link.scopeRef).toBeUndefined();
+    }
+  });
+
+  it("SS-14.4 — an ambiguous match WITHIN the container parks (RL-4), never auto-picked", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", {
+      identityFieldPath: "email",
+      records: [
+        target("t1", { id: "t1", email: "a@x.com" }),
+        target("t2", { id: "t2", email: "a@x.com" }),
+      ],
+    });
+    const outcome = await h.stage.resolve(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: SCOPE_REF, targetContainerScope: CONTAINER }),
+    );
+    expect(outcome.kind).toBe("ambiguous-failure");
+    // The RL-4 guard ran in the SCOPED domain (the candidate set was container-scoped).
+    expect(h.lookup.filteredReadCalls[0]?.containerScope).toBe(CONTAINER);
+    // Zero link side effects (RL-4): never auto-links one of the ambiguous candidates.
+    expect(h.links.all()).toHaveLength(0);
   });
 });

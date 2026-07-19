@@ -6,6 +6,8 @@ import { contentHashOfRecord } from "./content-hash.js";
 import {
   buildChangePayload,
   type ChangeEnqueue,
+  type ContainerParkRecord,
+  type ContainerParkSink,
   type CrossScopePollPlan,
   type EnqueuedChange,
   type PerScopePollPlan,
@@ -70,17 +72,34 @@ export interface PollerOptions {
    * Default 100_000.
    */
   readonly maxPages?: number;
+  /**
+   * SS-14.3 — the container-link park sink a **scoped** rule routes an unresolved-container
+   * record to (parked before enqueue, never enqueued under a guessed key). Required for
+   * scoped rules (a park with no sink throws — never a silent drop); omit for non-scoped-only
+   * deployments.
+   */
+  readonly containerPark?: ContainerParkSink;
 }
 
 const DEFAULT_MAX_PAGES = 100_000;
 
 /** A detected change with its pre-resolved queue key + payload, ready to enqueue (SP-5). */
-interface PreparedChange {
+interface PreparedEnqueue {
+  readonly kind: "enqueue";
   readonly queueKey: string;
   readonly changeKind: ChangeKind;
   readonly sourceNativeId: string;
   readonly payload: Record<string, unknown>;
 }
+
+/** SS-14.3 — a scoped change whose container did not resolve: parked, never enqueued. */
+interface PreparedPark {
+  readonly kind: "park";
+  readonly park: ContainerParkRecord;
+}
+
+/** One prepared detected change: enqueue it, or (SS-14.3) park its unresolved container. */
+type PreparedChange = PreparedEnqueue | PreparedPark;
 
 export class Poller {
   readonly #reader: SourceReader;
@@ -91,6 +110,7 @@ export class Poller {
   readonly #now: () => Date;
   readonly #metrics: PollerMetrics | undefined;
   readonly #maxPages: number;
+  readonly #containerPark: ContainerParkSink | undefined;
 
   public constructor(
     reader: SourceReader,
@@ -108,6 +128,7 @@ export class Poller {
     this.#now = options.now ?? ((): Date => new Date());
     this.#metrics = options.metrics;
     this.#maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
+    this.#containerPark = options.containerPark;
   }
 
   /**
@@ -215,8 +236,8 @@ export class Poller {
       prepared.push(await this.#prepareChange(plan, deletedNativeId, undefined, true, false));
     }
 
-    // SP-5: durably enqueue every change BEFORE advancing.
-    await this.#enqueueAll(prepared);
+    // SP-5: durably enqueue every change (SS-14.3: or park it) BEFORE advancing.
+    await this.#persistChanges(prepared);
     // SP-5: advance the cursor (with `lastRunAt`) atomically, and only now — keyed to
     // this scope in per-scope mode (SS-13.3), the whole rule cross-scope.
     const advance: { ruleId: string; scopeKey?: string; lastRunAt: Date; cursor?: string } = {
@@ -299,8 +320,8 @@ export class Poller {
       }
     }
 
-    // SP-5: durably enqueue every change BEFORE advancing.
-    await this.#enqueueAll(prepared);
+    // SP-5: durably enqueue every change (SS-14.3: or park it) BEFORE advancing.
+    await this.#persistChanges(prepared);
     // SP-5: replace the snapshot + set `lastRunAt` atomically, and only now — keyed to
     // this scope in per-scope mode (SS-13.3).
     const capturedAt = this.#now();
@@ -340,25 +361,11 @@ export class Poller {
     isDelete: boolean,
     inSnapshot: boolean,
   ): Promise<PreparedChange> {
-    const resolved = await this.#queueKeys.resolve(
-      {
-        resourcePairRef: plan.resourcePairRef,
-        sourceAppId: plan.sourceAppId,
-        sourceNativeId,
-        observedRecord,
-      },
-      { identitySourcePath: plan.identitySourcePath },
-    );
-    const changeKind: ChangeKind = isDelete
-      ? "delete"
-      : resolved.basis === "record-link" || inSnapshot
-        ? "update"
-        : "create";
-
     // SS-8.2 — when the source resource has a confirmed `sourceScopeRef`, capture THIS
     // record's scope from the record already fetched (the cross-scope collection read
     // needs no special handling — one call, single cursor; the NEW work is purely the
-    // per-record capture). A partial record yields a partial map (SS-7's helper omits an
+    // per-record capture). Captured FIRST because SS-14.2 scope-qualifies the pre-link
+    // queue key from it. A partial record yields a partial map (SS-7's helper omits an
     // absent component) which a `record-derived` fill later refuses on rather than
     // fabricating (SS-8.3). No capture without a confirmed ref, or on a delete (the record
     // is gone) — constant rules unaffected. An empty capture is treated as "no scope".
@@ -369,6 +376,48 @@ export class Poller {
         capturedScope = captured;
       }
     }
+
+    const resolved = await this.#queueKeys.resolve(
+      {
+        resourcePairRef: plan.resourcePairRef,
+        sourceAppId: plan.sourceAppId,
+        targetAppId: plan.targetAppId,
+        sourceNativeId,
+        ...(observedRecord !== undefined ? { observedRecord } : {}),
+        ...(capturedScope !== undefined ? { capturedScope } : {}),
+      },
+      {
+        identitySourcePath: plan.identitySourcePath,
+        // SS-14.2/14.3 — a scoped rule qualifies the pre-link key by container (and parks an
+        // unresolved one); a non-scoped rule passes no scope config → key unchanged.
+        ...(plan.targetScopePathBindings !== undefined
+          ? { scope: { targetScopePathBindings: plan.targetScopePathBindings } }
+          : {}),
+      },
+    );
+
+    if (resolved.outcome === "park-container") {
+      // SS-14.3 — the container did not resolve, so the record cannot be safely scope-keyed:
+      // park it for manual container linking BEFORE enqueue, never enqueue under a guessed key.
+      return {
+        kind: "park",
+        park: {
+          ruleId: plan.ruleId,
+          mappingId: plan.mappingId,
+          sourceAppId: plan.sourceAppId,
+          sourceNativeId,
+          resourcePairRef: plan.resourcePairRef,
+          capturedScope,
+          reason: resolved.reason,
+        },
+      };
+    }
+
+    const changeKind: ChangeKind = isDelete
+      ? "delete"
+      : resolved.basis === "record-link" || inSnapshot
+        ? "update"
+        : "create";
 
     const change: DetectedChange = {
       ruleId: plan.ruleId,
@@ -382,6 +431,7 @@ export class Poller {
       ...(capturedScope !== undefined ? { capturedScope } : {}),
     };
     return {
+      kind: "enqueue",
       queueKey: resolved.queueKey,
       changeKind,
       sourceNativeId,
@@ -389,20 +439,41 @@ export class Poller {
     };
   }
 
-  /** SP-5: durably enqueue every prepared change (each a committed insert) before the advance. */
-  async #enqueueAll(prepared: readonly PreparedChange[]): Promise<void> {
+  /**
+   * SP-5 — durably persist every detected change (each a committed insert) before the
+   * advance: an `enqueue` change is enqueued onto its ordering queue; a `park` change
+   * (SS-14.3) is recorded on the container-park surface (never enqueued). Both are durable
+   * before the cursor/snapshot advances, so a crash before the advance re-detects them.
+   */
+  async #persistChanges(prepared: readonly PreparedChange[]): Promise<void> {
     for (const change of prepared) {
+      if (change.kind === "park") {
+        await this.#recordPark(change.park);
+        continue;
+      }
       await this.#enqueue.enqueue(change.queueKey, change.payload);
     }
+  }
+
+  /** SS-14.3 — record a container-link park (fail loud when a scoped rule has no sink wired). */
+  async #recordPark(park: ContainerParkRecord): Promise<void> {
+    if (this.#containerPark === undefined) {
+      throw new Error(
+        `container-link park for record ${park.sourceNativeId} but no ContainerParkSink is configured`,
+      );
+    }
+    await this.#containerPark.park(park);
   }
 }
 
 function toEnqueued(prepared: readonly PreparedChange[]): EnqueuedChange[] {
-  return prepared.map((change) => ({
-    queueKey: change.queueKey,
-    changeKind: change.changeKind,
-    sourceNativeId: change.sourceNativeId,
-  }));
+  return prepared
+    .filter((change): change is PreparedEnqueue => change.kind === "enqueue")
+    .map((change) => ({
+      queueKey: change.queueKey,
+      changeKind: change.changeKind,
+      sourceNativeId: change.sourceNativeId,
+    }));
 }
 
 function describeError(error: unknown): string {

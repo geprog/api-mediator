@@ -1,5 +1,10 @@
-import type { ApprovedMappingStatus, SourceScopeRef, SyncRule } from "@mediator/domain";
-import type { JsonRecord } from "@mediator/transform";
+import type {
+  ApprovedMappingStatus,
+  ScopePathBinding,
+  SourceScopeRef,
+  SyncRule,
+} from "@mediator/domain";
+import type { CapturedScope, JsonRecord } from "@mediator/transform";
 
 import type { ChangeKind, DetectedChange } from "../identity-resolution/types.js";
 
@@ -152,6 +157,14 @@ export interface PollPlanCommon {
    * unaffected).
    */
   readonly sourceScopeRef?: SourceScopeRef | undefined;
+  /**
+   * SS-14 — the **target** resource's scope path bindings when the rule is **scoped** (has a
+   * confirmed `record-derived`/`scope-link` container binding). Its presence flips the
+   * pre-link ordering-queue key to the scope-qualified form (SS-14.2) and enables the
+   * unresolved-container park (SS-14.3). **Absent** on a non-scoped rule (keying unchanged),
+   * so the plan and the resolved key stay byte-for-byte identical for those rules.
+   */
+  readonly targetScopePathBindings?: readonly ScopePathBinding[] | undefined;
 }
 
 /**
@@ -287,6 +300,33 @@ export interface PollStateStore {
  */
 export interface ChangeEnqueue {
   enqueue(queueKey: string, payload: Record<string, unknown>): Promise<string>;
+}
+
+/**
+ * SS-14.3 — the per-record **container-link park** sink. When the Poller's pre-enqueue scope
+ * resolution cannot resolve a scoped record's container (no active `ScopeLink`), the record
+ * **cannot be safely scope-keyed**, so it is **parked for manual container linking BEFORE it
+ * is enqueued** (routed to the SS-11.5 parked-container surface, never enqueued under a
+ * guessed / un-scoped key — SS-12.6 consistent). The real implementation records a
+ * container-park `SyncEvent` (deduped across polls); a fake mirrors it in tests. Injected via
+ * {@link PollerOptions}; a scoped rule that reaches a park with no sink wired is a **fail-loud**
+ * configuration error (the Poller throws rather than silently drop a record).
+ */
+export interface ContainerParkSink {
+  park(park: ContainerParkRecord): Promise<void>;
+}
+
+/** One record whose container did not resolve at queue-key time (SS-14.3) — parked, not enqueued. */
+export interface ContainerParkRecord {
+  readonly ruleId: string;
+  readonly mappingId: string;
+  readonly sourceAppId: string;
+  readonly sourceNativeId: string;
+  readonly resourcePairRef: string;
+  /** The record's captured scope — the impl derives the container's scope key from it (SS-11.5 dedup). */
+  readonly capturedScope: CapturedScope | undefined;
+  /** The unresolved-container reason (a non-secret note — scope keys are operator config). */
+  readonly reason: string;
 }
 
 /**

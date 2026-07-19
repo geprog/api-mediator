@@ -15,6 +15,7 @@ import type {
   PollScopeUnresolved,
 } from "@mediator/sync-engine";
 
+import { hasConfirmedScopePathBinding } from "./container-routing.js";
 import { derivePollScopeMode } from "./poll-scope-mode.js";
 import {
   confirmedValue,
@@ -225,6 +226,12 @@ function buildCommon(
   identityField: { readonly sourcePath: string },
 ): PollPlanCommon {
   const sourceScopeRef = confirmedSourceScopeRef(artifacts.sourceBinding);
+  // SS-14 — carry the TARGET resource's scope path bindings only when the rule is **scoped**
+  // (a confirmed record-derived/scope-link container binding), so the pre-link queue key is
+  // scope-qualified (SS-14.2) and an unresolved container parks (SS-14.3). Absent → non-scoped
+  // rule → the resolver keeps the exact byte-for-byte key.
+  const targetScopePathBindings = artifacts.targetBinding.scopePathBindings ?? [];
+  const scoped = hasConfirmedScopePathBinding(targetScopePathBindings);
   return {
     ruleId: artifacts.rule.id,
     mappingId: artifacts.mapping.id,
@@ -234,6 +241,7 @@ function buildCommon(
     mode,
     identitySourcePath: identityField.sourcePath,
     ...(sourceScopeRef !== undefined ? { sourceScopeRef } : {}),
+    ...(scoped ? { targetScopePathBindings } : {}),
   };
 }
 

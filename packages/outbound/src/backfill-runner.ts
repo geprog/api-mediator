@@ -153,16 +153,26 @@ export interface LinkOnlyBackfillContext {
    */
   readonly sourceScopeRef?: SourceScopeRef;
   /**
-   * SS-13 (discharges the SS-12 deferral) — resolve the record's **container** at link
-   * establishment on a **scoped** rule, so a backfilled record's later scoped delete
-   * routes from stored `RecordLink.scopeRef` instead of parking. Called per record with
-   * its `DetectedChange` (carrying the captured scope); returns the `scopeRef` to freeze
-   * on the new link (L3 `{ kind: "scope-link", scopeLinkId }` resolved through the active
-   * `ScopeLink`, or L2 `{ kind: "resolved", values }`), or `undefined` when the container
-   * does not resolve (leaves the link scopeRef-less, the pre-SS-13 fail-safe). **Absent**
-   * on a non-scoped rule — the link carries no `scopeRef`, exactly as before.
+   * SS-13/SS-14 — resolve the record's **container** at link establishment on a **scoped**
+   * rule. Called per record with its `DetectedChange` (carrying the captured scope); returns
+   * the `scopeRef` to freeze on the new link so a later scoped delete routes from stored
+   * `RecordLink.scopeRef` (SS-13/SS-12 discharge — L3 `{ kind: "scope-link", scopeLinkId }`
+   * or L2 `{ kind: "resolved", values }`), **and** the `targetContainerScope` fill a scoped
+   * identity match searches **only within** (SS-14.1 — else the scoped target read cannot be
+   * composed and the backfill match fails closed). Both **absent** when the container does not
+   * resolve (link scopeRef-less, the fail-safe) or on a non-scoped rule — exactly as before.
    */
-  readonly resolveScopeRef?: (change: DetectedChange) => Promise<RecordLinkScopeRef | undefined>;
+  readonly resolveScopeRef?: (change: DetectedChange) => Promise<BackfillContainerResolution>;
+}
+
+/**
+ * SS-13/SS-14 — a backfilled record's resolved **container**: the `scopeRef` frozen onto the
+ * new `RecordLink` (SS-12) and the `targetContainerScope` fill a scoped identity match
+ * searches within (SS-14.1). Both absent when the container did not resolve.
+ */
+export interface BackfillContainerResolution {
+  readonly scopeRef?: RecordLinkScopeRef;
+  readonly targetContainerScope?: ReadonlyMap<string, string>;
 }
 
 /** The push context — everything the dedicated push write path needs on top of {@link LinkOnlyBackfillContext} (BE-5). */
@@ -466,7 +476,7 @@ export class BackfillRunner {
             noBaselineFields(await this.#fieldState.findByLink(link.id))
           : // A pre-existing link (the bidirectional second direction / a re-run): seed
             // THIS direction's baselines monotonically (BE-4.5 — the store never erases).
-            await this.#seedExistingLink(context, change, link);
+            await this.#seedExistingLink(context, change, link, resolution);
         return {
           kind: "matched",
           sourceNativeId: change.sourceNativeId,
@@ -489,10 +499,13 @@ export class BackfillRunner {
     context: LinkOnlyBackfillContext,
     change: DetectedChange,
     link: RecordLink,
+    resolution: ResolutionContext,
   ): Promise<readonly SideField[]> {
-    const matched = await this.#lookupCounterpart(context.resolution, change);
+    // SS-14.1 — use the per-record (container-scoped) resolution so the counterpart lookup
+    // searches only within the record's target container, never globally.
+    const matched = await this.#lookupCounterpart(resolution, change);
     if (matched !== undefined) {
-      const { sourceSide, targetSide } = sidesOf(change, context.resolution);
+      const { sourceSide, targetSide } = sidesOf(change, resolution);
       // Monotone: the store's `seed` (ON CONFLICT DO NOTHING) never erases the first
       // run's baseline; it only adds baselines to rows that have none (BE-4.5).
       await this.#seeder.seed({
@@ -524,6 +537,12 @@ export class BackfillRunner {
       return undefined;
     }
     const lookup = resolution.targetLookup;
+    // SS-14.1 — a scoped resolution fills the target read's container so the counterpart
+    // lookup searches only within it; a non-scoped resolution passes none (unchanged).
+    const containerScope =
+      resolution.targetContainerScope !== undefined
+        ? { containerScope: resolution.targetContainerScope }
+        : {};
     let matches: readonly MatchedTargetRecord[];
     if (lookup.kind === "filtered-read") {
       matches = await this.#lookup.filteredRead({
@@ -531,11 +550,13 @@ export class BackfillRunner {
         binding: lookup.binding,
         lookupParamRef: lookup.lookupParamRef,
         value: identity.value,
+        ...containerScope,
       });
     } else if (lookup.kind === "fetch-and-match") {
       const result = await this.#lookup.fetchAll({
         targetAppId: change.targetAppId,
         binding: lookup.binding,
+        ...containerScope,
       });
       if (!result.complete) {
         return undefined;
@@ -814,11 +835,15 @@ export class BackfillRunner {
     if (context.resolveScopeRef === undefined) {
       return context.resolution;
     }
-    const scopeRef = await context.resolveScopeRef(change);
-    if (scopeRef === undefined) {
-      return context.resolution;
-    }
-    return { ...context.resolution, scopeRefForNewLink: scopeRef };
+    const container = await context.resolveScopeRef(change);
+    // SS-13 — freeze the container onto the new link; SS-14.1 — scope the identity match to it.
+    return {
+      ...context.resolution,
+      ...(container.scopeRef !== undefined ? { scopeRefForNewLink: container.scopeRef } : {}),
+      ...(container.targetContainerScope !== undefined
+        ? { targetContainerScope: container.targetContainerScope }
+        : {}),
+    };
   }
 
   #changeOf(context: LinkOnlyBackfillContext, record: ObservedRecord): DetectedChange {

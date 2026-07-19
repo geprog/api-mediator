@@ -7,7 +7,11 @@ import {
   type ProtocolClient,
   type RestSourceReadBinding,
 } from "@mediator/outbound";
-import type { FilteredReadRequest, TargetReadBinding } from "@mediator/sync-engine";
+import type {
+  FetchAllRequest,
+  FilteredReadRequest,
+  TargetReadBinding,
+} from "@mediator/sync-engine";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -94,5 +98,117 @@ describe("RestTargetIdentityLookup.filteredRead — fail closed on a non-query f
     expect(protocol.requests).toHaveLength(1);
     expect(protocol.requests[0]?.url).toContain("code=W-100");
     expect(matches).toStrictEqual([{ nativeId: "b1", record: { id: "b1", code: "W-100" } }]);
+  });
+});
+
+/**
+ * SS-14.1 — a scoped identity lookup fills the target collection read's **container** path
+ * parameter from the resolved `ScopeLink`, so it searches **only within** that container.
+ * Proven container-local: two projects each hold a task titled "Bug", and a scoped read for
+ * project 42 returns **only** project 42's task — never project 99's (no cross-match).
+ */
+const TASK_BINDING: TargetReadBinding = {
+  collectionReadOperationId: "listTasks",
+  nativeIdPath: "id",
+};
+
+/** Returns each project's own tasks, keyed off the container the URL addresses. */
+class ContainerProtocol implements ProtocolClient {
+  public readonly urls: string[] = [];
+  public send(request: OutboundRequest): Promise<OutboundResponse> {
+    this.urls.push(request.url);
+    const body = request.url.includes("/projects/42/")
+      ? [{ id: "t42", title: "Bug" }]
+      : request.url.includes("/projects/99/")
+        ? [{ id: "t99", title: "Bug" }]
+        : [];
+    return Promise.resolve({ status: 200, headers: {}, body });
+  }
+}
+
+/** Models `RepoTargetCollectionReadResolver`: fills `/projects/{id}/tasks` from the containerScope. */
+class ContainerResolver implements TargetCollectionReadResolver {
+  public lastContainerScope: ReadonlyMap<string, string> | undefined = undefined;
+  public resolve(
+    targetAppId: string,
+    _binding: TargetReadBinding,
+    containerScope?: ReadonlyMap<string, string>,
+  ): Promise<ResolvedTargetCollectionRead | undefined> {
+    this.lastContainerScope = containerScope;
+    const id = containerScope?.get("id");
+    if (id === undefined) {
+      // SS-14.1 fail-closed: an unfilled container param → the binding does not resolve.
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve({
+      binding: {
+        sourceAppId: targetAppId,
+        baseUrl: "https://app-b.test",
+        method: "GET",
+        path: `/projects/${id}/tasks`,
+        nativeIdPath: "id",
+        pagination: { kind: "single-page" },
+      },
+      parameters: [{ name: "title", location: "query", required: false, type: "string" }],
+    });
+  }
+}
+
+describe("RestTargetIdentityLookup — SS-14.1 container-scoped read", () => {
+  it("filteredRead fills the container path from the ScopeLink and matches ONLY within it", async () => {
+    const protocol = new ContainerProtocol();
+    const resolver = new ContainerResolver();
+    const lookup = lookupOf(resolver, protocol);
+
+    const matches = await lookup.filteredRead({
+      targetAppId: "app-b",
+      binding: TASK_BINDING,
+      lookupParamRef: "tasks/listTasks#title",
+      value: "Bug",
+      containerScope: new Map([["id", "42"]]),
+    });
+
+    // Searched ONLY within project 42 — never a global read, never project 99's "Bug".
+    expect(resolver.lastContainerScope).toStrictEqual(new Map([["id", "42"]]));
+    expect(protocol.urls[0]).toContain("/projects/42/tasks");
+    expect(matches).toStrictEqual([{ nativeId: "t42", record: { id: "t42", title: "Bug" } }]);
+  });
+
+  it("fetch-and-match enumerates ONLY the resolved container, never globally", async () => {
+    const protocol = new ContainerProtocol();
+    const lookup = lookupOf(new ContainerResolver(), protocol);
+
+    const request: FetchAllRequest = {
+      targetAppId: "app-b",
+      binding: TASK_BINDING,
+      containerScope: new Map([["id", "99"]]),
+    };
+    const result = await lookup.fetchAll(request);
+
+    expect(protocol.urls[0]).toContain("/projects/99/tasks");
+    expect(result).toStrictEqual({
+      complete: true,
+      records: [{ nativeId: "t99", record: { id: "t99", title: "Bug" } }],
+    });
+  });
+
+  it("fail-closed: a scoped read with NO resolved container issues no request", async () => {
+    const protocol = new ContainerProtocol();
+    const lookup = lookupOf(new ContainerResolver(), protocol);
+
+    // fetch-and-match: an unresolved binding aborts (never a fabricated empty "no match").
+    const result = await lookup.fetchAll({ targetAppId: "app-b", binding: TASK_BINDING });
+    expect(result).toStrictEqual({ complete: false });
+
+    // filtered-read: refuses (throws) rather than an unscoped global read.
+    await expect(
+      lookup.filteredRead({
+        targetAppId: "app-b",
+        binding: TASK_BINDING,
+        lookupParamRef: "tasks/listTasks#title",
+        value: "Bug",
+      }),
+    ).rejects.toThrow(/did not resolve/);
+    expect(protocol.urls).toHaveLength(0);
   });
 });
