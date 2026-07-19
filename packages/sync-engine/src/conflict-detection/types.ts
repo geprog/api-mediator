@@ -122,6 +122,15 @@ export interface SingleRecordReadRequest {
    * for an unscoped / constant-only read; the resolver then fills constants only.
    */
   readonly capturedScope?: CapturedScope | undefined;
+  /**
+   * SS-12.3 — a **linked** read's container fill (`{ parameterName → value }`) resolved from
+   * the record's stored `RecordLink.scopeRef`, so a `read-before-write` drift-read / PUT
+   * read-carry of a *scoped* record routes to the **stored** container (the arbitrary
+   * target id) even when the change carries no captured scope (a delete). Takes precedence
+   * over `capturedScope`; absent for an unscoped read. Resolved once by the pipeline
+   * handler, which parks (`ContainerUnresolvedError`) when it cannot resolve.
+   */
+  readonly resolvedScopeValues?: ReadonlyMap<string, string> | undefined;
 }
 
 /**
@@ -212,6 +221,12 @@ export interface ConflictDetectionInput {
    * other CF invariants still hold. See {@link FieldConflictOverride}.
    */
   readonly overrides?: readonly FieldConflictOverride[];
+  /**
+   * SS-12.3 — the linked record's container fill resolved from `RecordLink.scopeRef`, so a
+   * PUT read-carry routes to the stored container. Absent on an unscoped rule; the handler
+   * resolves it once and parks (`ContainerUnresolvedError`) before CF when unresolvable.
+   */
+  readonly resolvedContainerScopeValues?: ReadonlyMap<string, string>;
 }
 
 // ── The per-field write plan + stage outcome (write path) ─────────────────────
@@ -323,6 +338,14 @@ export interface DeletionConflictInput {
    * drift park and proceeds to delete. See {@link DeletionConflictOverride}.
    */
   readonly override?: DeletionConflictOverride;
+  /**
+   * SS-12.3/12.4 — the linked record's container fill resolved from `RecordLink.scopeRef`,
+   * so a `read-before-write` drift-read of a scoped delete routes to the stored container
+   * (a delete carries no captured scope). Absent on an unscoped rule; the handler resolves
+   * it once and parks (`ContainerUnresolvedError`) before CF when unresolvable — closing the
+   * L2/L3 record-derived-delete gap where the drift-read threw a generic transient today.
+   */
+  readonly resolvedContainerScopeValues?: ReadonlyMap<string, string>;
 }
 
 /**

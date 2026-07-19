@@ -140,7 +140,13 @@ export class ConflictDetectionStage {
     const targetSide = opposite(sourceSide);
     const rowMap = indexRows(await this.#fieldState.findByLink(link.id));
 
-    const readTarget = this.#memoizedReader(change, link, sourceSide, context.targetReadBinding);
+    const readTarget = this.#memoizedReader(
+      change,
+      link,
+      sourceSide,
+      context.targetReadBinding,
+      input.resolvedContainerScopeValues,
+    );
     // CF-6: `read-before-write` reads the target up front (detection needs the live value).
     const liveRead =
       context.targetDriftCheck === "read-before-write" ? await readTarget() : undefined;
@@ -291,7 +297,13 @@ export class ConflictDetectionStage {
     const targetSide = opposite(sourceSide);
     const rowMap = indexRows(await this.#fieldState.findByLink(link.id));
 
-    const readTarget = this.#memoizedReader(change, link, sourceSide, context.targetReadBinding);
+    const readTarget = this.#memoizedReader(
+      change,
+      link,
+      sourceSide,
+      context.targetReadBinding,
+      input.resolvedContainerScopeValues,
+    );
     let liveRead: SingleRecordReadResult | undefined;
     if (context.targetDriftCheck === "read-before-write") {
       liveRead = await readTarget(); // CF-7.1 — read the target first, catching unobserved edits.
@@ -352,6 +364,7 @@ export class ConflictDetectionStage {
     link: RecordLink,
     sourceSide: SyncFieldStateSide,
     binding: SingleRecordReadBinding | undefined,
+    resolvedScopeValues: ReadonlyMap<string, string> | undefined,
   ): () => Promise<SingleRecordReadResult> {
     let cached: SingleRecordReadResult | undefined;
     return async (): Promise<SingleRecordReadResult> => {
@@ -372,6 +385,10 @@ export class ConflictDetectionStage {
           // write fills its `record-derived` scope param from the value the source record
           // carried (the shared value-space). Absent on an unscoped read.
           capturedScope: change.capturedScope,
+          // SS-12.3 — carry the linked container resolved from `RecordLink.scopeRef` so a
+          // scoped read routes to the STORED container even with no captured scope (a delete);
+          // it takes precedence over the captured-scope fill in the resolver.
+          resolvedScopeValues,
         }),
       );
       return cached;

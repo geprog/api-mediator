@@ -7,7 +7,11 @@ import type {
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
-import { resolveWriteOperationBinding } from "./binding-resolvers.js";
+import {
+  resolveSingleRecordRead,
+  resolveWriteOperationBinding,
+  type SingleRecordReadBinding,
+} from "./binding-resolvers.js";
 import {
   containerScopeParamNames,
   fillContainerScopeParams,
@@ -360,5 +364,114 @@ describe("SS-12.8 — resolveWriteOperationBinding composes the true multi-scope
     );
     // `{id}` (scope) deferred for the handler; `{taskId}` (record id) always templated.
     expect(binding?.pathTemplate).toBe("/projects/{id}/tasks/{taskId}");
+  });
+});
+
+// ── SS-12.3 — a LINKED single-record read routes via scopeRef, not the captured scope ─────
+
+/** Gitea `issues` by-id read `/repos/{owner}/{repo}/issues/{index}` — owner/repo scope, index id. */
+function issuesReadGroup(): IrResourceGroup {
+  return {
+    resourceRef: "issues",
+    name: "issues",
+    operations: [
+      {
+        operationId: "getIssue",
+        method: "get",
+        path: "/repos/{owner}/{repo}/issues/{index}",
+        parameters: [
+          { name: "owner", location: "path", required: true },
+          { name: "repo", location: "path", required: true },
+          { name: "index", location: "path", required: true },
+        ],
+      },
+    ],
+    schemas: [],
+    crossResourceRefs: [],
+  };
+}
+
+function recordDerivedBinding(parameterName: string, sourceScopeKey: string): ScopePathBinding {
+  return {
+    kind: "record-derived",
+    parameterName,
+    sourceScopeKey,
+    confirmedBy: "operator",
+    confirmedAt: CONFIRMED_AT,
+  };
+}
+
+function issuesReadBinding(scope: ScopePathBinding[]): ResourceBinding {
+  return {
+    id: "rb-issues",
+    apiSpecId: "spec-gitea",
+    resourceRef: "issues",
+    scopePathBindings: scope,
+  };
+}
+
+describe("SS-12.3 — resolveSingleRecordRead routes a linked read via the scopeRef container", () => {
+  const READ: SingleRecordReadBinding = { readOperationId: "getIssue", idParamRef: "index" };
+  const CONTAINER = new Map<string, string>([
+    ["owner", "alice"],
+    ["repo", "phoenix"],
+  ]);
+
+  it("(a) scope-link container: fills {owner}/{repo} from resolvedScopeValues, id {index} templated", () => {
+    const resolved = resolveSingleRecordRead({
+      binding: READ,
+      targetGroup: issuesReadGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: issuesReadBinding([
+        scopeLinkBinding("owner", "owner"),
+        scopeLinkBinding("repo", "repo"),
+      ]),
+      resolvedScopeValues: CONTAINER,
+    });
+    // Routed to the stored container; the record-id param stays templated for the reader (id × scope).
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+
+  it("(b) record-derived container with NO captured scope (a delete): still routes via scopeRef", () => {
+    const resolved = resolveSingleRecordRead({
+      binding: READ,
+      targetGroup: issuesReadGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: issuesReadBinding([
+        recordDerivedBinding("owner", "owner"),
+        recordDerivedBinding("repo", "repo"),
+      ]),
+      // capturedScope OMITTED — the container comes from RecordLink.scopeRef, not the (gone) source record.
+      resolvedScopeValues: CONTAINER,
+    });
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+
+  it("takes precedence over a captured scope (both agree for a value-preserving rule)", () => {
+    const resolved = resolveSingleRecordRead({
+      binding: READ,
+      targetGroup: issuesReadGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: issuesReadBinding([
+        recordDerivedBinding("owner", "owner"),
+        recordDerivedBinding("repo", "repo"),
+      ]),
+      capturedScope: { owner: "alice", repo: "phoenix" },
+      resolvedScopeValues: CONTAINER,
+    });
+    expect(resolved?.pathTemplate).toBe("/repos/alice/phoenix/issues/{index}");
+  });
+
+  it("unresolvable (no captured scope, no resolvedScopeValues) → undefined (the handler parks upstream)", () => {
+    const resolved = resolveSingleRecordRead({
+      binding: READ,
+      targetGroup: issuesReadGroup(),
+      baseUrl: "https://gitea.test",
+      targetBinding: issuesReadBinding([
+        scopeLinkBinding("owner", "owner"),
+        scopeLinkBinding("repo", "repo"),
+      ]),
+    });
+    expect(resolved).toBeUndefined();
   });
 });

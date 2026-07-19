@@ -1452,4 +1452,56 @@ describe("SyncPipelineHandler — SS-12 scoped write container routing", () => {
     expect(h.protocol.requests).toHaveLength(0);
     expect(h.links.all()).toHaveLength(0); // no link established against a guessed container
   });
+
+  const READ_BINDING = { readOperationId: "getTask", idParamRef: "taskId" };
+
+  it("read-before-write delete: the drift-read AND the delete both route via scopeRef (SS-12.3)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink({ kind: "scope-link", scopeLinkId: "link-42" }));
+    // Undrifted target: the live drift-read returns values matching the seeded baselines.
+    h.targetReader.setRecord(APP_B, B_NATIVE, { email: "e@x", name: "Old" });
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: SCOPED_DELETE_OP,
+      scopePathBindings: SCOPE_LINK_BINDINGS,
+      deletion: {
+        ...baseContext().deletion,
+        targetDriftCheck: "read-before-write",
+        targetReadBinding: READ_BINDING,
+      },
+    });
+
+    await runHandle(h, deleteChange());
+
+    // The read-before-write drift-read carried the container resolved from RecordLink.scopeRef
+    // (project 42) — NOT a captured scope (a delete has none).
+    expect(h.targetReader.calls).toHaveLength(1);
+    expect(Object.fromEntries(h.targetReader.calls[0]?.resolvedScopeValues ?? new Map())).toEqual({
+      project: "42",
+    });
+    expect(h.targetReader.calls[0]?.capturedScope).toBeUndefined();
+    // The delete write routed to the SAME container (resolved once, shared with the read).
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/projects/42/tasks/${B_NATIVE}`);
+  });
+
+  it("read-before-write delete with ABSENT scopeRef parks BEFORE the drift-read (SS-12.4)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink(undefined));
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: SCOPED_DELETE_OP,
+      scopePathBindings: SCOPE_LINK_BINDINGS,
+      deletion: {
+        ...baseContext().deletion,
+        targetDriftCheck: "read-before-write",
+        targetReadBinding: READ_BINDING,
+      },
+    });
+
+    // The container is resolved (and parks) BEFORE the drift-read — never read a guessed container.
+    await expect(runHandle(h, deleteChange())).rejects.toBeInstanceOf(ContainerUnresolvedError);
+    expect(h.targetReader.calls).toHaveLength(0);
+    expect(h.protocol.requests).toHaveLength(0);
+  });
 });
