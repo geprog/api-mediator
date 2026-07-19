@@ -5,6 +5,7 @@ import type {
   AuditLogStatus,
   RecordLink,
   RecordLinkEstablishingQueueKey,
+  RecordLinkScopeRef,
   SyncFieldStateSide,
   TombstoneReason,
 } from "@mediator/domain";
@@ -82,6 +83,12 @@ export interface ManualLinkParams {
    * marker (the link-keyed queue opens only after both sides' native-id queues drain).
    */
   readonly identityValue?: string;
+  /**
+   * SS-12 — the record's resolved container, frozen onto `RecordLink.scopeRef` at
+   * establishment on a **scoped** rule (so a later delete routes from stored state).
+   * Absent on a non-scoped rule; the container-linking UI that supplies it is SS-15.
+   */
+  readonly scopeRef?: RecordLinkScopeRef;
 }
 
 /** Thrown when a fetch-and-match target fetch aborts on a partial page — never inferred. */
@@ -209,6 +216,8 @@ export class IdentityResolutionStage {
       establishingQueueKey,
       createdAt: this.#clock(),
       tombstonedAt: null,
+      // SS-12 — freeze the record's container (scoped rule) so a later delete routes from it.
+      ...(params.scopeRef !== undefined ? { scopeRef: params.scopeRef } : {}),
     };
     await this.#links.insert(link);
     return link;
@@ -438,6 +447,10 @@ export class IdentityResolutionStage {
       establishingQueueKey: opts.establishingQueueKey,
       createdAt: this.#clock(),
       tombstonedAt: null,
+      // SS-12.2/12.7 — freeze the record's resolved container onto the new link (scoped
+      // rule) so a linked delete/no-capture read routes from `scopeRef`, not a captured
+      // scope. Absent on a non-scoped rule (and when the container did not resolve).
+      ...(context.scopeRefForNewLink !== undefined ? { scopeRef: context.scopeRefForNewLink } : {}),
     };
   }
 

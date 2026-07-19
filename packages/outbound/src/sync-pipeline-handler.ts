@@ -12,6 +12,7 @@ import type {
   ParkedConflictKind,
   ParkedConflictResolutionChoice,
   RecordLink,
+  ScopePathBinding,
   SyncFieldState,
   SyncFieldStateSide,
   TombstoneReason,
@@ -49,7 +50,17 @@ import {
 } from "@mediator/sync-engine";
 import type { ConflictDetectionContext, DeletionConflictContext } from "@mediator/sync-engine";
 
-import { PermanentOutboundError, settleOutboundResult } from "./errors.js";
+import {
+  containerScopeParamNames,
+  fillContainerScopeParams,
+  resolveScopeRefFillValues,
+  type ScopeLinkReader,
+} from "./container-scope.js";
+import {
+  ContainerUnresolvedError,
+  PermanentOutboundError,
+  settleOutboundResult,
+} from "./errors.js";
 import type {
   OutboundCall,
   OutboundCallCommon,
@@ -235,6 +246,14 @@ export interface SyncPipelineContext {
   readonly sourceChangeTimestampRef?: string;
   /** The **target** resource's `ResourceBinding.changeTimestampRef` — the written representation's change timestamp. */
   readonly targetChangeTimestampRef?: string;
+  /**
+   * SS-12 — the **target** resource's `scopePathBindings` (its `record-derived`/`scope-link`
+   * container parameters), so a **linked delete** fills the delete op's still-templated
+   * container `{…}` from the record's stored `RecordLink.scopeRef` — routing to the right
+   * container even though a delete carries no captured scope. Absent / empty on a non-scoped
+   * rule (the delete op is already fully composed at load, so no per-record fill runs).
+   */
+  readonly scopePathBindings?: readonly ScopePathBinding[];
 }
 
 /**
@@ -262,6 +281,14 @@ export interface SyncPipelineHandlerDeps {
   readonly events: SyncEventRecorder;
   /** SA-4 — the structured parked-conflict store the handler records parks into + resolves re-runs against. */
   readonly parkedConflicts: ParkedConflictWriter;
+  /**
+   * SS-12 — the `ScopeLink` read port a **scoped** rule's linked delete/update fills its
+   * target container parameter from (via the record's stored `RecordLink.scopeRef`).
+   * Absent on a non-scoped deployment (the real `ScopeLinkRepository` satisfies it); a
+   * scoped delete reaching the write path with no reader parks (container-unresolved),
+   * never mis-writes.
+   */
+  readonly scopeLinks?: ScopeLinkReader;
 }
 
 export interface SyncPipelineHandlerOptions {
@@ -356,6 +383,7 @@ export class SyncPipelineHandler {
   readonly #contextLoader: SyncPipelineContextLoader;
   readonly #events: SyncEventRecorder;
   readonly #parkedConflicts: ParkedConflictWriter;
+  readonly #scopeLinks: ScopeLinkReader | undefined;
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => StageTraceContext | null;
@@ -371,6 +399,7 @@ export class SyncPipelineHandler {
     this.#contextLoader = deps.contextLoader;
     this.#events = deps.events;
     this.#parkedConflicts = deps.parkedConflicts;
+    this.#scopeLinks = deps.scopeLinks;
     this.#clock = options.clock ?? ((): Date => new Date());
     this.#newId = options.newId ?? ((): string => randomUUID());
     this.#readTraceContext = options.readTraceContext ?? ((): null => null);
@@ -503,7 +532,19 @@ export class SyncPipelineHandler {
     // CF-7.4 — undrifted target (or SA-4.3 propagate override): call the `delete`
     // operation (id filled per `targetIdParamRef` from the `RecordLink`), then tombstone
     // `propagated-delete`.
-    const operation = this.#requireOperation(context.deleteOperation, "delete");
+    //
+    // SS-12.3/12.4/12.7 — a **scoped** delete carries no captured scope (the source record
+    // is gone), so its still-templated container `{…}` is filled from the record's stored
+    // `RecordLink.scopeRef` (the authoritative container, whichever layer): an absent /
+    // unresolvable / unsafe container parks for manual container linking (throws
+    // `ContainerUnresolvedError` → dead-letter park), never a generic transient and never a
+    // guessed container.
+    const operation = await this.#resolveScopedWriteOperation(
+      this.#requireOperation(context.deleteOperation, "delete"),
+      change,
+      context,
+      link,
+    );
     const call: OutboundCall = {
       ...this.#commonCall(change, context, operation, link.id),
       action: "delete",
@@ -607,8 +648,15 @@ export class SyncPipelineHandler {
     // written fields) so the idempotency key distinguishes a revert from a duplicate.
     const priorReconciledState = buildPriorReconciledState(rows, targetSide, writeSet);
 
-    // Step 3.6 — the Outbound Call Executor issues the `update`.
-    const operation = this.#requireOperation(context.updateOperation, "update");
+    // Step 3.6 — the Outbound Call Executor issues the `update`. SS-12.3 — a scoped update
+    // routes to the container the record's stored `RecordLink.scopeRef` names, not a
+    // captured scope; an absent/unresolvable container parks for manual linking.
+    const operation = await this.#resolveScopedWriteOperation(
+      this.#requireOperation(context.updateOperation, "update"),
+      change,
+      context,
+      link,
+    );
     const call: OutboundCall = {
       ...this.#commonCall(change, context, operation, link.id),
       action: "update",
@@ -661,7 +709,15 @@ export class SyncPipelineHandler {
       return;
     }
 
-    const operation = this.#requireOperation(context.createOperation, "create");
+    // SS-12.2/12.6 — a scoped create's container parameter is filled at composition time
+    // from the captured scope's active `ScopeLink`; a still-templated one means no active
+    // link resolved → park for manual container linking (never a guessed container).
+    const operation = await this.#resolveScopedWriteOperation(
+      this.#requireOperation(context.createOperation, "create"),
+      change,
+      context,
+      undefined,
+    );
     const call: OutboundCall = {
       ...this.#commonCall(change, context, operation, undefined),
       action: "create",
@@ -888,6 +944,65 @@ export class SyncPipelineHandler {
     throw new PermanentOutboundError(
       "write succeeded but returned no object representation to re-baseline from — the no-body follow-up read (EP-3.1) is deferred to the composition slice",
     );
+  }
+
+  /**
+   * SS-12 — resolve a write op's still-templated **container** scope parameters
+   * (`record-derived`/`scope-link`), returning the op with its `pathTemplate` filled, or
+   * parking (a {@link ContainerUnresolvedError} → the dispatcher dead-letters it for manual
+   * container linking — SS-12.4, never a generic transient and never a guessed container):
+   *
+   *  - a **create** (`link === undefined`) is filled at composition time from the captured
+   *    scope's **active** `ScopeLink`; a container parameter still templated here means **no
+   *    active `ScopeLink`** resolved (SS-12.6) → park;
+   *  - a **linked** update/delete is filled from the record's authoritative stored
+   *    `RecordLink.scopeRef` (SS-12.3) — so a delete, which carries no captured scope,
+   *    routes from stored state, and both L2 (`{ resolved, values }`) and L3
+   *    (`{ scope-link, scopeLinkId }`) unify here (SS-12.7). An absent / unresolvable /
+   *    unsafe container parks.
+   *
+   * A non-scoped op (no container parameter left templated) is returned unchanged — the
+   * record-id substitution + the outbound backstop handle it exactly as before.
+   */
+  async #resolveScopedWriteOperation(
+    operation: ResolvedTargetOperation,
+    change: DetectedChange,
+    context: SyncPipelineContext,
+    link: RecordLink | undefined,
+  ): Promise<ResolvedTargetOperation> {
+    const scopePathBindings = context.scopePathBindings ?? [];
+    const containerParams = containerScopeParamNames(scopePathBindings);
+    const pathTemplate = operation.operation.pathTemplate;
+    const templated = containerParams.filter((name) => pathTemplate.includes(`{${name}}`));
+    if (templated.length === 0) {
+      // Fully composed at load (unscoped / constant-only / create filled from its ScopeLink).
+      return operation;
+    }
+    if (link === undefined) {
+      // A create whose captured scope matched no active ScopeLink (SS-12.6) — park for
+      // manual container linking rather than write to a guessed container.
+      throw new ContainerUnresolvedError(
+        `create could not resolve container parameter(s) [${templated.join(", ")}] — no active ScopeLink for the captured scope; link a container and replay`,
+      );
+    }
+    if (this.#scopeLinks === undefined) {
+      throw new ContainerUnresolvedError(
+        "a scoped write reached the pipeline with a templated container parameter but no ScopeLink reader is wired",
+      );
+    }
+    const fillValues = await resolveScopeRefFillValues({
+      scopeRef: link.scopeRef,
+      targetAppId: change.targetAppId,
+      scopePathBindings,
+      reader: this.#scopeLinks,
+    });
+    const filled = fillContainerScopeParams(pathTemplate, containerParams, fillValues);
+    if (filled.unfilled.length > 0) {
+      throw new ContainerUnresolvedError(
+        `could not resolve container parameter(s) [${filled.unfilled.join(", ")}] from RecordLink.scopeRef — link a container and replay`,
+      );
+    }
+    return { ...operation, operation: { ...operation.operation, pathTemplate: filled.path } };
   }
 
   #requireOperation(

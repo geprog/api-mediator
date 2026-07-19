@@ -1,4 +1,10 @@
-import type { AuditLogEntry, RecordLink, SyncFieldState, TombstoneReason } from "@mediator/domain";
+import type {
+  AuditLogEntry,
+  RecordLink,
+  RecordLinkScopeRef,
+  SyncFieldState,
+  TombstoneReason,
+} from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore, SyncFieldStateStore } from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
@@ -101,6 +107,16 @@ export class FakeRecordLinkStore implements RecordLinkStore {
     const index = this.#links.findIndex((entry) => entry.id === id);
     if (index >= 0) {
       this.#links.splice(index, 1);
+    }
+    return Promise.resolve();
+  }
+
+  public setScopeRef(id: string, scopeRef: RecordLinkScopeRef): Promise<void> {
+    // Mirror the real `RecordLinkRepository.setScopeRef` — a targeted UPDATE of the
+    // `scope_ref` column, whole-union overwrite, no-op on an unknown id.
+    const link = this.#links.find((entry) => entry.id === id);
+    if (link !== undefined) {
+      link.scopeRef = scopeRef;
     }
     return Promise.resolve();
   }

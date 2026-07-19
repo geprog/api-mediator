@@ -47,8 +47,11 @@ export type ResourceBindingRefDto = z.infer<typeof resourceBindingRefDtoSchema>;
  * - `record-derived` — carries `sourceScopeKey` (which captured-scope component fills the
  *   parameter — SS-8) and `transform` (present only when set — its value-preserving
  *   transform); it carries **no** constant literal.
- *
- * The Layer-3 `scope-link` member slots into the same union without reshaping.
+ * - `scope-link` — carries `scopeKeyRef` (which target-container key of the record's
+ *   resolved `ScopeLink` fills the parameter — SS-12); no literal, no transform (the
+ *   value-space bridge is the `ScopeLink` itself). SS-12 is the first slice that persists a
+ *   `scope-link` binding, so this member makes the bindings GET **lossless** (the
+ *   container-linking screen that reads it is SS-15).
  */
 export const resourceBindingScopeConstantDtoSchema = z.object({
   parameterName: z.string(),
@@ -73,9 +76,22 @@ export type ResourceBindingScopeRecordDerivedDto = z.infer<
   typeof resourceBindingScopeRecordDerivedDtoSchema
 >;
 
+export const resourceBindingScopeScopeLinkDtoSchema = z.object({
+  parameterName: z.string(),
+  kind: z.literal("scope-link"),
+  /** Which target-container key of the resolved `ScopeLink` fills this parameter (SS-12). */
+  scopeKeyRef: z.string(),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: isoDateTimeSchema.nullable(),
+});
+export type ResourceBindingScopeScopeLinkDto = z.infer<
+  typeof resourceBindingScopeScopeLinkDtoSchema
+>;
+
 export const resourceBindingScopeDtoSchema = z.discriminatedUnion("kind", [
   resourceBindingScopeConstantDtoSchema,
   resourceBindingScopeRecordDerivedDtoSchema,
+  resourceBindingScopeScopeLinkDtoSchema,
 ]);
 export type ResourceBindingScopeDto = z.infer<typeof resourceBindingScopeDtoSchema>;
 

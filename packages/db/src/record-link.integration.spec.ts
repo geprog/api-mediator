@@ -335,4 +335,37 @@ suite("Phase-4 record_link + sync_field_state integration (requires Postgres)", 
     expect(row?.lastSyncedHash).toBe("h2"); // reconcile columns updated
     expect(row?.lastWrittenByMappingId).toBe(priorWriter); // preserved via COALESCE
   });
+
+  it("scopeRef (SS-12): setScopeRef persists the scope-link union and round-trips via getById", async () => {
+    const repo = new RecordLinkRepository(db);
+    const link = makeLink();
+    await repo.insert(link);
+    // Absent on a link established before its container was resolved.
+    expect((await repo.getById(link.id))?.scopeRef).toBeUndefined();
+
+    // The SS-12 port method — a targeted `scope_ref` jsonb UPDATE (the real mutation a fake
+    // must mirror). The union round-trips verbatim (no Date inside the jsonb).
+    await repo.setScopeRef(link.id, { kind: "scope-link", scopeLinkId: "scope-link-42" });
+    expect((await repo.getById(link.id))?.scopeRef).toEqual({
+      kind: "scope-link",
+      scopeLinkId: "scope-link-42",
+    });
+  });
+
+  it("scopeRef (SS-12.7): insert-with-scopeRef freezes the resolved-values union (establishment path)", async () => {
+    const repo = new RecordLinkRepository(db);
+    // The identity-resolution stage establishes a scoped link carrying its frozen container.
+    const link = makeLink({
+      id: randomUUID(),
+      appANativeId: "a-scoped",
+      appBNativeId: "b-scoped",
+      scopeRef: { kind: "resolved", values: { owner: "alice", name: "phoenix" } },
+    });
+    await repo.insert(link);
+
+    expect((await repo.getById(link.id))?.scopeRef).toEqual({
+      kind: "resolved",
+      values: { owner: "alice", name: "phoenix" },
+    });
+  });
 });

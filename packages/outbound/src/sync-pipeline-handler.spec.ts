@@ -3,7 +3,13 @@ import type {
   UsableCredentialSecret,
   WithCredentialResult,
 } from "@mediator/credentials";
-import type { FieldMapping, ParkedConflict, RecordLink, SyncFieldState } from "@mediator/domain";
+import type {
+  FieldMapping,
+  ParkedConflict,
+  RecordLink,
+  ScopeLink,
+  SyncFieldState,
+} from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import {
   buildChangePayload,
@@ -24,7 +30,9 @@ import {
 import { applyFieldMappings, type JsonRecord } from "@mediator/transform";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import type { ScopeLinkReader } from "./container-scope.js";
 import {
+  ContainerUnresolvedError,
   PermanentOutboundError,
   RetryableOutboundError,
   ThrottledOutboundError,
@@ -125,6 +133,76 @@ const DELETE_OP: ResolvedTargetOperation = {
     targetIdParamRef: "idParam",
   },
 };
+
+// ── SS-12 scoped fixtures (Layer 3 scope-link) ───────────────────────────────────
+
+/** The scenario container link: source `alice/phoenix` ↔ target project id `42` (arbitrary value-spaces). */
+function scopedLink(): ScopeLink {
+  return {
+    id: "link-42",
+    scopeCorrespondenceId: "corr-1",
+    appAId: APP_A,
+    appAScopeKey: { owner: "alice", name: "phoenix" },
+    appBId: APP_B,
+    appBScopeKey: { id: "42" },
+    resourcePairRef: PAIR,
+    establishedBy: "manual",
+    status: "active",
+    createdAt: T0,
+  };
+}
+
+/** A `ScopeLinkReader` fake mirroring `ScopeLinkRepository.getById` (resolves any status). */
+class FakeScopeLinkReader implements ScopeLinkReader {
+  readonly #byId = new Map<string, ScopeLink>();
+  public constructor(links: readonly ScopeLink[]) {
+    for (const link of links) {
+      this.#byId.set(link.id, link);
+    }
+  }
+  public getById(id: string): Promise<ScopeLink | undefined> {
+    return Promise.resolve(this.#byId.get(id));
+  }
+}
+
+/** A scoped delete op: `{project}` is a scope-link container param, `{taskId}` the record id. */
+const SCOPED_DELETE_OP: ResolvedTargetOperation = {
+  operation: {
+    method: "DELETE",
+    pathTemplate: "/projects/{project}/tasks/{taskId}",
+    parameterLocations: { idParam: { name: "taskId", in: "path" } },
+  },
+  operationMapping: {
+    id: "op-delete-scoped",
+    mappingId: MAP_AB,
+    sourceOperationRef: "a.get",
+    targetOperationRef: "b.delete",
+    action: "delete",
+    targetIdParamRef: "idParam",
+  },
+};
+
+/** A scoped create op whose `{project}` container param the loader would fill from the ScopeLink. */
+const SCOPED_CREATE_OP: ResolvedTargetOperation = {
+  operation: { method: "PUT", pathTemplate: "/projects/{project}/tasks", parameterLocations: {} },
+  operationMapping: {
+    id: "op-create-scoped",
+    mappingId: MAP_AB,
+    sourceOperationRef: "a.list",
+    targetOperationRef: "b.create",
+    action: "create",
+  },
+};
+
+const SCOPE_LINK_BINDINGS = [
+  {
+    kind: "scope-link" as const,
+    parameterName: "project",
+    scopeKeyRef: "id",
+    confirmedBy: "operator",
+    confirmedAt: T0,
+  },
+];
 
 // ── Protocol / credential fakes (no network) ──────────────────────────────────
 
@@ -341,6 +419,9 @@ function setup(): Harness {
   );
 
   const parkedConflicts = new FakeParkedConflictStore();
+  // SS-12 — a ScopeLink reader carrying the scenario container link (alice/phoenix ↔ 42);
+  // consulted only when a scoped rule's write op leaves a container `{…}` templated.
+  const scopeLinks = new FakeScopeLinkReader([scopedLink()]);
   const handler = new SyncPipelineHandler(
     {
       identityResolution,
@@ -352,6 +433,7 @@ function setup(): Harness {
       contextLoader: { load: (change) => Promise.resolve(state.loader(change)) },
       events,
       parkedConflicts,
+      scopeLinks,
     },
     { clock, newId: nextId },
   );
@@ -1269,5 +1351,105 @@ describe("SyncPipelineHandler — SA-4 resolution re-run consumes the directive"
     const row = h.parkedConflicts.rows.find((candidate) => candidate.id === "pc-del");
     expect(row?.status).toBe("resolved");
     expect(row?.resolutionChoice).toBe("propagate");
+  });
+});
+
+// ── SS-12 scoped write routing (Layer 3 scope-link + Layer 2 unified delete) ─────
+
+describe("SyncPipelineHandler — SS-12 scoped write container routing", () => {
+  function scopedActiveLink(scopeRef: RecordLink["scopeRef"]): RecordLink {
+    return stripUndefined({
+      id: LINK_ID,
+      appAId: APP_A,
+      appANativeId: A_NATIVE,
+      appBId: APP_B,
+      appBNativeId: B_NATIVE,
+      resourcePairRef: PAIR,
+      establishedBy: "manual" as const,
+      status: "active" as const,
+      establishingQueueKey: { kind: "identity-value" as const, value: "e@x" },
+      createdAt: T0,
+      tombstonedAt: null,
+      scopeRef,
+    });
+  }
+
+  /** Undrifted target baselines so the deletion drift check yields `delete` (not a conflict park). */
+  async function seedUndrifted(h: Harness): Promise<void> {
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "Old" }),
+    ]);
+  }
+
+  it("L3 linked delete fills {project} from RecordLink.scopeRef → /projects/42/tasks/b1 (SS-12.3)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink({ kind: "scope-link", scopeLinkId: "link-42" }));
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: SCOPED_DELETE_OP,
+      scopePathBindings: SCOPE_LINK_BINDINGS,
+    });
+
+    await runHandle(h, deleteChange());
+
+    expect(h.protocol.requests).toHaveLength(1);
+    expect(h.protocol.requests[0]?.method).toBe("DELETE");
+    // {project}=42 from the ScopeLink's target side; {taskId}=b1 from the RecordLink (id × scope never crossed).
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/projects/42/tasks/${B_NATIVE}`);
+    expect((await h.links.getById(LINK_ID))?.status).toBe("tombstoned");
+  });
+
+  it("L2 linked delete routes from the frozen resolved values (SS-12.7 — unified delete fix)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink({ kind: "resolved", values: { project: "77" } }));
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: SCOPED_DELETE_OP,
+      scopePathBindings: [
+        {
+          kind: "record-derived",
+          parameterName: "project",
+          sourceScopeKey: "project",
+          confirmedBy: "operator",
+          confirmedAt: T0,
+        },
+      ],
+    });
+
+    await runHandle(h, deleteChange());
+
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/projects/77/tasks/${B_NATIVE}`);
+  });
+
+  it("a linked delete whose scopeRef is ABSENT parks for manual container linking (SS-12.4)", async () => {
+    const h = setup();
+    await h.links.insert(scopedActiveLink(undefined)); // scoped op, but the link never captured its container
+    await seedUndrifted(h);
+    h.loader = () => ({
+      ...baseContext(),
+      deleteOperation: SCOPED_DELETE_OP,
+      scopePathBindings: SCOPE_LINK_BINDINGS,
+    });
+
+    // A container park is a dead-letter throw (not a silent done), routed to the container queue.
+    await expect(runHandle(h, deleteChange())).rejects.toBeInstanceOf(ContainerUnresolvedError);
+    expect(h.protocol.requests).toHaveLength(0); // never a guessed-container write
+  });
+
+  it("a scoped create whose captured scope matched no active ScopeLink parks (SS-12.6)", async () => {
+    const h = setup();
+    // The loader left {project} templated (no active ScopeLink resolved) — the create must park.
+    h.loader = () => ({
+      ...baseContext(),
+      createOperation: SCOPED_CREATE_OP,
+      scopePathBindings: SCOPE_LINK_BINDINGS,
+    });
+
+    await expect(runHandle(h, createChange())).rejects.toBeInstanceOf(ContainerUnresolvedError);
+    expect(h.protocol.requests).toHaveLength(0);
+    expect(h.links.all()).toHaveLength(0); // no link established against a guessed container
   });
 });
