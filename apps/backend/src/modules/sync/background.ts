@@ -359,9 +359,12 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     transform: applyFieldMappings,
     outbound: executor,
     fieldState: syncFieldState,
-    contextLoader: new RepoSyncPipelineContextLoader(ruleArtifactRepos),
+    contextLoader: new RepoSyncPipelineContextLoader(ruleArtifactRepos, scopeLinks),
     events: syncEventStore,
     parkedConflicts,
+    // SS-12 — the ScopeLink read port a linked delete/update fills its container from
+    // (via the record's stored RecordLink.scopeRef).
+    scopeLinks,
   });
   const queueDispatcher = new OrderingQueueDispatcher(orderingQueue, pipelineHandler.handle, {
     // OC-4: park a transform/permanent failure immediately, defer a throttle, retry-then-park the rest.

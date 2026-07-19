@@ -50,12 +50,23 @@ import type { IrOperation, ScopePathBinding } from "@mediator/domain";
  * when it shares a bare name across a *different* operation (the caller keys the fill to
  * the operation's role, so `recordIdPathParamName` is that operation's own id parameter);
  * a record-derived value is likewise **never** substituted into the record-id parameter.
+ *
+ * `deferParamNames` (SS-12) names scope parameters to leave **templated** (like the record
+ * id) when they have no fill value here, instead of unresolving the whole op — so the
+ * pipeline handler can fill them **per record** from the record's stored
+ * `RecordLink.scopeRef` (a `scope-link` create/update, a `record-derived`/`scope-link`
+ * delete which carries no captured scope). A parameter **with** a value fills normally even
+ * when named; a `constant` still fills from its literal (a caller never defers one); a
+ * deferred `{…}` left unfilled downstream is caught by that per-record fill or, defense-in-
+ * depth, by {@link findUnfilledPathParam} before the wire — never sent templated. A
+ * parameter **not** named that has no value still unresolves (SS-4.4 / SS-8.3 fail-loud).
  */
 export function fillScopePathParameters(
   pathTemplate: string,
   scopePathBindings: readonly ScopePathBinding[],
   recordIdPathParamName: string | undefined,
   recordDerivedValues?: ReadonlyMap<string, string>,
+  deferParamNames?: ReadonlySet<string>,
 ): string | undefined {
   let path = pathTemplate;
   for (const name of new Set(pathParameterNames(pathTemplate))) {
@@ -64,9 +75,15 @@ export function fillScopePathParameters(
       // (constant or record-derived): the record-id-vs-scope split holds (SS-4.2/SS-8.3).
       continue;
     }
-    // Prefer a confirmed `constant` literal; else a pre-resolved `record-derived` value.
+    // Prefer a confirmed `constant` literal; else a pre-resolved `record-derived` /
+    // `scope-link` value the caller resolved through the container.
     const value = confirmedConstantValue(scopePathBindings, name) ?? recordDerivedValues?.get(name);
     if (value === undefined) {
+      if (deferParamNames?.has(name) === true) {
+        // SS-12 — a container parameter the caller defers to the pipeline handler's
+        // per-record `RecordLink.scopeRef` fill: leave templated, never fabricated.
+        continue;
+      }
       // SS-4.4 / SS-8.3 — an unconfirmed / absent scope binding, or a `record-derived`
       // param whose captured component is missing, never fabricates a URL.
       return undefined;

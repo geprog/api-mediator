@@ -539,6 +539,67 @@ describe("side assignment is direction-agnostic (source app B)", () => {
   });
 });
 
+describe("SS-12 — the resolved container (scopeRef) is frozen onto the new link at establishment", () => {
+  const SCOPE_LINK_REF = { kind: "scope-link", scopeLinkId: "link-phoenix-42" } as const;
+  const RESOLVED_REF = { kind: "resolved", values: { owner: "alice", name: "phoenix" } } as const;
+
+  it("create-propagation persists scopeRef from context.scopeRefForNewLink (SS-12.2, L3)", async () => {
+    const h = makeHarness();
+    const link = await h.stage.recordCreatePropagation(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: SCOPE_LINK_REF }),
+      "tgtNEW",
+    );
+    expect(link.scopeRef).toEqual(SCOPE_LINK_REF);
+    // Persisted at insert — re-reading the stored link carries the frozen container.
+    expect((await h.links.getById(link.id))?.scopeRef).toEqual(SCOPE_LINK_REF);
+  });
+
+  it("identity-match persists scopeRef from context.scopeRefForNewLink", async () => {
+    const h = makeHarness();
+    h.lookup.setTarget("appB", {
+      identityFieldPath: "email",
+      records: [target("tgtN1", { id: "tgtN1", email: "a@x.com", name: "Alice" })],
+    });
+    const outcome = await h.stage.resolve(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: SCOPE_LINK_REF }),
+    );
+    expect(outcome.kind).toBe("resolved");
+    if (outcome.kind !== "resolved") return;
+    expect(outcome.link.scopeRef).toEqual(SCOPE_LINK_REF);
+  });
+
+  it("L2 record-derived rule persists the frozen resolved values (SS-12.7)", async () => {
+    const h = makeHarness();
+    const link = await h.stage.recordCreatePropagation(
+      makeChange(),
+      makeContext({ scopeRefForNewLink: RESOLVED_REF }),
+      "tgtNEW",
+    );
+    expect(link.scopeRef).toEqual(RESOLVED_REF);
+  });
+
+  it("linkManually freezes the operator-supplied scopeRef", async () => {
+    const h = makeHarness();
+    const link = await h.stage.linkManually({
+      resourcePairRef: PAIR,
+      appAId: "appA",
+      appANativeId: "srcN1",
+      appBId: "appB",
+      appBNativeId: "tgtN1",
+      scopeRef: SCOPE_LINK_REF,
+    });
+    expect(link.scopeRef).toEqual(SCOPE_LINK_REF);
+  });
+
+  it("a non-scoped rule (no scopeRefForNewLink) establishes a link with NO scopeRef", async () => {
+    const h = makeHarness();
+    const link = await h.stage.recordCreatePropagation(makeChange(), makeContext(), "tgtNEW");
+    expect(link.scopeRef).toBeUndefined();
+  });
+});
+
 describe("fake mirrors the DB unique-active-link invariant", () => {
   let links: FakeRecordLinkStore;
   beforeEach(() => {

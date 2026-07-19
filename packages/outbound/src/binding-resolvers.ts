@@ -11,6 +11,7 @@ import type {
   OutboundLoadLimits,
   RegisteredApp,
   ResourceBinding,
+  ScopePathBinding,
   SyncRule,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
@@ -542,12 +543,69 @@ export function resolveSourceReadBinding(
  *
  * `capturedScope` is omitted for a non-scoped / constant-only rule and on a delete (no
  * source record was captured) — the fill is then constant-only, unchanged from SS-4.
+ *
+ * SS-12 — {@link WriteOperationScopeOptions} carry the Layer-3 `scope-link` fill. A
+ * `scopeLinkValues` map is the container fill the caller resolved through the record's
+ * **active** `ScopeLink` (target container key, verbatim), used on the **create** op where
+ * the container is looked up from the captured scope (SS-12.2). `deferMode` leaves an
+ * **unfilled** container parameter **templated** for the pipeline handler to fill per
+ * record from `RecordLink.scopeRef` (SS-12.3): `"scope-link"` defers only `scope-link`
+ * parameters (a create with no active `ScopeLink` → parked; an update routes from
+ * `scopeRef`), `"container"` also defers `record-derived` parameters (the **delete** op,
+ * which carries no captured scope, so both layers route from stored `scopeRef`). Both
+ * default off, so a Layer-1/2 create/update composes exactly as before.
  */
+export interface WriteOperationScopeOptions {
+  /** SS-12 — the `{ parameterName → value }` container fill resolved through the record's active `ScopeLink`. */
+  readonly scopeLinkValues?: ReadonlyMap<string, string>;
+  /** SS-12 — which unfilled container parameters to leave templated for the handler's `scopeRef` fill. */
+  readonly deferMode?: "scope-link" | "container";
+}
+
+/** The scope parameter names to leave templated for the handler's per-record `scopeRef` fill (SS-12). */
+function deferredScopeParamNames(
+  scopePathBindings: readonly ScopePathBinding[],
+  deferMode: WriteOperationScopeOptions["deferMode"],
+): ReadonlySet<string> | undefined {
+  if (deferMode === undefined) {
+    return undefined;
+  }
+  const names = new Set<string>();
+  for (const binding of scopePathBindings) {
+    if (
+      binding.kind === "scope-link" ||
+      (deferMode === "container" && binding.kind === "record-derived")
+    ) {
+      names.add(binding.parameterName);
+    }
+  }
+  return names;
+}
+
+/** Merge the `record-derived` and `scope-link` pre-resolved fills into one map (disjoint by param). */
+function mergeScopeValues(
+  recordDerived: ReadonlyMap<string, string> | undefined,
+  scopeLink: ReadonlyMap<string, string> | undefined,
+): ReadonlyMap<string, string> | undefined {
+  if (recordDerived === undefined) {
+    return scopeLink;
+  }
+  if (scopeLink === undefined) {
+    return recordDerived;
+  }
+  const merged = new Map(recordDerived);
+  for (const [name, value] of scopeLink) {
+    merged.set(name, value);
+  }
+  return merged;
+}
+
 export function resolveWriteOperationBinding(
   operationMapping: OperationMapping,
   targetGroup: IrResourceGroup,
   targetBinding: ResourceBinding,
   capturedScope?: CapturedScope,
+  scopeOptions?: WriteOperationScopeOptions,
 ): RestOperationBinding | undefined {
   const parsed = parseOperationRef(operationMapping.targetOperationRef);
   if (parsed === undefined || parsed.resourceRef !== targetGroup.resourceRef) {
@@ -567,11 +625,16 @@ export function resolveWriteOperationBinding(
     capturedScope !== undefined
       ? resolveRecordDerivedScopeValues(scopePathBindings, capturedScope)
       : undefined;
+  // SS-12 — merge the caller's resolved `scope-link` container fill (create/update, where
+  // the loader looked the `ScopeLink` up) with the `record-derived` fill; a scope parameter
+  // is a single kind (constant XOR record-derived XOR scope-link), so they never collide.
+  const preResolved = mergeScopeValues(recordDerivedValues, scopeOptions?.scopeLinkValues);
   const pathTemplate = fillScopePathParameters(
     operation.path,
     scopePathBindings,
     writeRecordIdPathParam(operationMapping, operation),
-    recordDerivedValues,
+    preResolved,
+    deferredScopeParamNames(scopePathBindings, scopeOptions?.deferMode),
   );
   if (pathTemplate === undefined) {
     // SS-4.4 / SS-8.3 — an unconfirmed scope constant or a missing captured component
@@ -768,6 +831,15 @@ export function resolveSingleRecordRead(input: {
   readonly targetBinding?: ResourceBinding;
   /** The change's captured scope — fills a `record-derived` scope param by its `sourceScopeKey` (SS-8.3). */
   readonly capturedScope?: CapturedScope;
+  /**
+   * SS-12.3 — a **linked** read's container fill resolved from the record's stored
+   * `RecordLink.scopeRef` (the target container key, verbatim). It fills a `scope-link`
+   * container param and takes precedence over the captured-scope `record-derived` fill, so a
+   * `read-before-write` drift-read / PUT read-carry routes to the **stored** container even
+   * when the change carries no captured scope (a delete). Resolved once upstream (the
+   * pipeline handler), which parks via `ContainerUnresolvedError` when it cannot resolve.
+   */
+  readonly resolvedScopeValues?: ReadonlyMap<string, string>;
 }): ResolvedSingleRecordRead | undefined {
   const operation = findOperationById(input.targetGroup, input.binding.readOperationId);
   if (operation === undefined) {
@@ -790,13 +862,16 @@ export function resolveSingleRecordRead(input: {
     input.capturedScope !== undefined
       ? resolveRecordDerivedScopeValues(scopePathBindings, input.capturedScope)
       : undefined;
+  // SS-12.3 — the linked `scopeRef` container fill takes precedence over the captured-scope
+  // fill (both agree for a value-preserving L2 rule; a delete carries no captured scope).
+  const preResolved = mergeScopeValues(recordDerivedValues, input.resolvedScopeValues);
   const pathTemplate = fillScopePathParameters(
     operation.path,
     scopePathBindings,
     // The record-id parameter stays templated only when it is IN the path (a query/header
     // id leaves ALL path params as scope); the reader fills the id location downstream.
     idLocation.in === "path" ? input.binding.idParamRef : undefined,
-    recordDerivedValues,
+    preResolved,
   );
   if (pathTemplate === undefined) {
     // SS-4.4 / SS-8.3 — an unconfirmed scope constant or a missing captured component
@@ -995,6 +1070,8 @@ export interface SingleRecordReadResolver {
     binding: SingleRecordReadBinding,
     /** The change's captured scope — fills a `record-derived` scope param on a scoped read (SS-8.3). */
     capturedScope?: CapturedScope,
+    /** SS-12.3 — a linked read's container fill from `RecordLink.scopeRef` (takes precedence). */
+    resolvedScopeValues?: ReadonlyMap<string, string>,
   ): Promise<ResolvedSingleRecordRead | undefined>;
 }
 
@@ -1023,6 +1100,7 @@ export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
     targetAppId: string,
     binding: SingleRecordReadBinding,
     capturedScope?: CapturedScope,
+    resolvedScopeValues?: ReadonlyMap<string, string>,
   ): Promise<ResolvedSingleRecordRead | undefined> {
     const app = await this.#registeredApps.getById(targetAppId);
     if (app?.baseUrl === undefined) {
@@ -1047,6 +1125,7 @@ export class RepoSingleRecordReadResolver implements SingleRecordReadResolver {
             limits: app.outboundLimits,
             targetBinding: resourceBinding,
             capturedScope,
+            resolvedScopeValues,
           }),
         );
         if (resolved !== undefined) {

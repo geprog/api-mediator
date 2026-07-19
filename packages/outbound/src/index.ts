@@ -94,7 +94,21 @@ export {
   type SingleRecordReadResolver,
   type SourceReadBindingInput,
   type SyncRuleReader,
+  type WriteOperationScopeOptions,
 } from "./binding-resolvers.js";
+
+// SS-12 — the write-side `scope-link` (Layer 3) container resolution: fill a target scope
+// parameter from the record's resolved `ScopeLink` (create → captured scope→link; linked
+// delete/update → the stored `RecordLink.scopeRef`), parking (ContainerUnresolvedError) on
+// an absent/unresolvable/unsafe container rather than fabricating one.
+export {
+  containerScopeParamNames,
+  fillContainerScopeParams,
+  resolveScopeLinkScopeValues,
+  resolveScopeRefFillValues,
+  targetScopeKeyOf,
+  type ScopeLinkReader,
+} from "./container-scope.js";
 
 // Scope path-parameter substitution (SS-4) + the backstop: fill a scoped operation's
 // non-record-id path params from confirmed `constant` bindings; detect an unfilled `{…}`

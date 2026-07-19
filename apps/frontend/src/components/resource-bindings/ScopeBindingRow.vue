@@ -61,9 +61,12 @@ const stateSeverity = computed<"success" | "warn">(() =>
 );
 
 // The kind to confirm INTO — seeded from the entry's current DTO kind (SS-2 defaults it to
-// `constant`), operator-switchable. The DTO union is only ever `constant`/`record-derived`,
-// so it is always a selectable kind.
-const selectedKind = ref<SelectableScopeBindingKind>(props.scope.kind);
+// `constant`), operator-switchable. A persisted `scope-link` entry (SS-12) is displayed
+// read-only but is not a **selectable** confirm kind here (the container-linking confirm UI
+// is SS-15), so the selector seeds to `constant`; the operator switches to a real kind.
+const selectedKind = ref<SelectableScopeBindingKind>(
+  props.scope.kind === "scope-link" ? "constant" : props.scope.kind,
+);
 
 // Per-kind drafts, seeded from the matching DTO member so a confirmed entry shows as stored
 // (SS-9.3); blank for the other kind and while unconfirmed (SS-2 derives a `constant` blank).
@@ -82,6 +85,10 @@ const currentDatum = computed<string>(() => {
       return props.scope.value;
     case "record-derived":
       return props.scope.sourceScopeKey;
+    case "scope-link":
+      // SS-12 — the target-container key the resolved `ScopeLink` fills this parameter from;
+      // shown read-only (the container-linking confirm UI is SS-15).
+      return props.scope.scopeKeyRef;
   }
 });
 

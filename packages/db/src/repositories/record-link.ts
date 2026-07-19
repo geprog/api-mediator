@@ -63,6 +63,16 @@ export interface RecordLinkStore {
    * mis-link wants the records re-linkable/re-matchable, not resurrection-blocked.
    */
   unlink(id: string): Promise<void>;
+  /**
+   * Persist a link's `scopeRef` (SS-10/SS-12) — the record's stored container, captured
+   * at establishment on a **scoped** rule, so a later delete / no-captured-scope read
+   * routes from stored state instead of a (missing) captured scope. On the port because
+   * SS-12 persists it here (a link may be established before its container is resolved),
+   * and the fake **mirrors** it ([[fakes-must-mirror-real-repos]]). The `jsonb` union is
+   * written whole; reading it back is via {@link getById} (the mapper collapses a NULL
+   * column to an absent `scopeRef`).
+   */
+  setScopeRef(id: string, scopeRef: RecordLinkScopeRef): Promise<void>;
   /** One link by id (observability / tests / re-reading after a mutation). */
   getById(id: string): Promise<RecordLink | undefined>;
 }

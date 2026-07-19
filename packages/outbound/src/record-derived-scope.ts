@@ -131,8 +131,12 @@ function applyScopeTransform(
  *  - a value containing a path separator `/` — would inject extra path segments;
  *  - `.` or `..` — path traversal (`/repos/../x`).
  * A finite number / boolean is always a safe single segment.
+ *
+ * Exported so the SS-12 `scope-link` fill ({@link resolveScopeLinkScopeValues}) reuses the
+ * **same** value-safety guard on a target container addressing value resolved through a
+ * `ScopeLink` — an unsafe target key parks the write too, never mis-writes.
  */
-function toScopeParamString(value: JsonValue): string | undefined {
+export function toScopeParamString(value: JsonValue): string | undefined {
   if (typeof value === "number") {
     return Number.isFinite(value) ? String(value) : undefined;
   }

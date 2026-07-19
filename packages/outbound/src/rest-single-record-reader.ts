@@ -71,11 +71,15 @@ export class RestSingleRecordTargetReader implements SingleRecordTargetReader {
 
   public async readRecord(request: SingleRecordReadRequest): Promise<SingleRecordReadResult> {
     // SS-8b — thread the captured scope so a scoped read fills its `record-derived` scope
-    // param; the resolver's SS-4.5 backstop still refuses an unfilled `{owner}`.
+    // param; SS-12.3 — thread the linked container resolved from `RecordLink.scopeRef` so a
+    // `read-before-write` drift-read / PUT read-carry routes to the STORED container (a
+    // delete carries no captured scope). The resolver's SS-4.5 backstop still refuses an
+    // unfilled `{owner}` (defense-in-depth; the handler parks first when unresolvable).
     const resolved = await this.#resolver.resolve(
       request.targetAppId,
       request.binding,
       request.capturedScope,
+      request.resolvedScopeValues,
     );
     if (resolved === undefined) {
       // A config error (the read op / id param does not resolve) — not a "not found".

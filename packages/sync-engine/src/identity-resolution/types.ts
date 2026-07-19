@@ -1,4 +1,10 @@
-import type { AuditLogEntry, FieldMapping, RecordLink, TombstoneReason } from "@mediator/domain";
+import type {
+  AuditLogEntry,
+  FieldMapping,
+  RecordLink,
+  RecordLinkScopeRef,
+  TombstoneReason,
+} from "@mediator/domain";
 import type { CapturedScope, JsonRecord, JsonValue } from "@mediator/transform";
 
 /**
@@ -102,6 +108,16 @@ export interface ResolutionContext {
   readonly hasApprovedCreateOperation: boolean;
   /** This direction's `FieldMapping`s — the identity-match seed's pairings (RL-3.4 / BE-4). */
   readonly fieldMappings: readonly FieldMapping[];
+  /**
+   * SS-12.2/12.7 — the record's **container**, resolved by the composition for a **scoped**
+   * rule from this change's captured scope (L3: the matched active `ScopeLink`'s id, as
+   * `{ kind: "scope-link", scopeLinkId }`; L2 `record-derived`: the frozen resolved fill,
+   * as `{ kind: "resolved", values }`), to be **frozen onto the new `RecordLink.scopeRef`**
+   * at establishment (create-propagation / identity-match). Absent on a non-scoped rule and
+   * whenever the container did not resolve — the link is then established with no `scopeRef`
+   * (a later delete/no-capture read parks for manual container linking, never mis-writes).
+   */
+  readonly scopeRefForNewLink?: RecordLinkScopeRef;
 }
 
 /** A target record a lookup matched: its native id + the record body (for the seed). */

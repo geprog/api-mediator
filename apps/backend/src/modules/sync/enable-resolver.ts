@@ -105,6 +105,12 @@ async function buildBackfillRunInput(
   repos: RuleArtifactRepos,
 ): Promise<BackfillRunInput> {
   const identityField = findIdentityField(artifacts.fieldMappings) ?? PLACEHOLDER_IDENTITY;
+  // SS-12 note: the enable-resolver intentionally omits the `containerRouting` option, so
+  // backfill resolves ops with the pre-SS-12 behaviour and a backfill-established `RecordLink`
+  // carries **no** `scopeRef`. A backfilled record's later scoped delete therefore parks for
+  // manual container linking (fail-safe — never a wrong/guessed container), and scoped push
+  // backfill create is not fully wired here. Threading the resolved container into backfill /
+  // per-scope seeding is deferred to **SS-13** (scoped backfill), not this slice.
   const operations = resolveTargetOperations(
     artifacts.operationMappings,
     artifacts.targetGroup,

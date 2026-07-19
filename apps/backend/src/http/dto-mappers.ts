@@ -106,11 +106,20 @@ export function toResourceBindingDto(
           },
         ];
       }
-      // `scope-link` (SS-10 domain member): its wire/DTO exposure and the container-
-      // linking UI are SS-15. No `scope-link` binding is persisted before SS-11/SS-12,
-      // so this branch is unreachable today; skip rather than pull the SS-15 contract +
-      // frontend surface into this domain/persistence slice.
-      return [];
+      // `scope-link` (SS-12): report its `scopeKeyRef` (which target-container key of the
+      // record's resolved `ScopeLink` fills this parameter) — no literal, no transform (the
+      // value-space bridge is the `ScopeLink`). SS-12 is the first slice to persist a
+      // `scope-link` binding, so serializing it keeps the bindings GET lossless; the
+      // container-linking screen that renders it is SS-15.
+      return [
+        {
+          parameterName: entry.parameterName,
+          kind: "scope-link",
+          scopeKeyRef: entry.scopeKeyRef,
+          confirmedBy: entry.confirmedBy,
+          confirmedAt,
+        },
+      ];
     },
   );
   // `sourceScopeRef` (SS-7): null when absent (no container field), else the

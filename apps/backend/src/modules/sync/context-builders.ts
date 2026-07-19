@@ -6,7 +6,11 @@ import type {
   SyncFieldStateSide,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
-import { resolveWriteOperationBinding, type ResolvedTargetOperation } from "@mediator/outbound";
+import {
+  resolveWriteOperationBinding,
+  type ResolvedTargetOperation,
+  type WriteOperationScopeOptions,
+} from "@mediator/outbound";
 import type {
   ConflictField,
   LoopPreventionContext,
@@ -37,6 +41,19 @@ export interface ResolvedTargetOperations {
 }
 
 /**
+ * SS-12 — the per-record container routing the steady-state loader threads into
+ * {@link resolveTargetOperations}: the create op's `scope-link` container fill (resolved by
+ * the loader through the record's active `ScopeLink`), plus the opt-in that leaves an
+ * unfilled container parameter **templated** for the pipeline handler's `RecordLink.scopeRef`
+ * fill. **Absent** for the enable-resolver / backfill caller, which keeps the Layer-1/2
+ * behaviour exactly (a scoped op that cannot be fully composed is skipped, as before).
+ */
+export interface ContainerRoutingOptions {
+  /** The create op's `{ parameterName → value }` fill resolved through the active `ScopeLink` (SS-12.2). */
+  readonly createScopeLinkValues?: ReadonlyMap<string, string>;
+}
+
+/**
  * Resolve each `OperationMapping` to its `RestOperationBinding` and index by `action`
  * (the first that resolves per action wins). A stale/foreign `targetOperationRef`, or a
  * scoped op whose scope binding cannot be filled (an unconfirmed `constant` — SS-4.4 —
@@ -45,12 +62,21 @@ export interface ResolvedTargetOperations {
  * throws → the dispatcher parks) rather than mis-scoping. `targetBinding` supplies the
  * scope `constant`s (SS-4.2); `capturedScope` — the change's captured scope, present only
  * on a scoped rule's create/update — fills each `record-derived` scope param (SS-8.3).
+ *
+ * SS-12 — when `containerRouting` is supplied (the steady-state loader), each write op is
+ * routed through the record's `ScopeLink`: the **create** op fills its `scope-link`
+ * container from `createScopeLinkValues` (else its `{…}` is left templated → the handler
+ * parks for manual container linking, SS-12.6); the **update** and **delete** ops leave
+ * their container parameters templated for the handler to fill from the record's stored
+ * `RecordLink.scopeRef` (SS-12.3/12.7 — a delete carries no captured scope). Omitted for
+ * the enable-resolver, which keeps the pre-SS-12 behaviour.
  */
 export function resolveTargetOperations(
   operationMappings: readonly OperationMapping[],
   targetGroup: IrResourceGroup,
   targetBinding: ResourceBinding,
   capturedScope?: CapturedScope,
+  containerRouting?: ContainerRoutingOptions,
 ): ResolvedTargetOperations {
   const resolved: {
     create?: ResolvedTargetOperation;
@@ -58,11 +84,16 @@ export function resolveTargetOperations(
     delete?: ResolvedTargetOperation;
   } = {};
   for (const operationMapping of operationMappings) {
+    const scopeOptions =
+      containerRouting !== undefined
+        ? scopeOptionsForAction(operationMapping.action, containerRouting)
+        : undefined;
     const binding = resolveWriteOperationBinding(
       operationMapping,
       targetGroup,
       targetBinding,
       capturedScope,
+      scopeOptions,
     );
     if (binding === undefined) {
       continue;
@@ -77,6 +108,26 @@ export function resolveTargetOperations(
     }
   }
   return resolved;
+}
+
+/**
+ * SS-12 — the per-action write-op scope routing: a **create** fills its `scope-link`
+ * container from the loader-resolved active `ScopeLink` and defers any still-unfilled
+ * `scope-link` param (→ handler parks, SS-12.6); an **update** defers its `scope-link`
+ * param (routes from `RecordLink.scopeRef`, SS-12.3); a **delete** defers **both**
+ * `scope-link` and `record-derived` params (no captured scope → both route from stored
+ * `scopeRef`, SS-12.7).
+ */
+function scopeOptionsForAction(
+  action: OperationMapping["action"],
+  routing: ContainerRoutingOptions,
+): WriteOperationScopeOptions {
+  if (action === "create") {
+    return routing.createScopeLinkValues !== undefined
+      ? { scopeLinkValues: routing.createScopeLinkValues, deferMode: "scope-link" }
+      : { deferMode: "scope-link" };
+  }
+  return { deferMode: action === "delete" ? "container" : "scope-link" };
 }
 
 /** RL's per-rule context: canonical A/B, confirmed identity paths, target lookup, create policy, pairings. */
