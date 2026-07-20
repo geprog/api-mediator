@@ -253,6 +253,16 @@ export class RuleEnabler {
           }),
         );
       }
+      // BE-6 — stamp the RULE's own `lastRunAt` as well, still BEFORE flipping
+      // `completed`. Every per-scope seed above carries a `scopeKey`, so it writes only
+      // `poll_scope_state`; without this the rule goes live with `SyncRule.lastRunAt`
+      // NULL, which the Scheduler's SP-1 gate reads as "never polled → due now" and polls
+      // on the very next tick regardless of the interval. The cross-scope seed below has
+      // always stamped it — this is the same `scopeKey`-routing gap, closed for parity.
+      // Same `seededAt` as the per-scope seeds, so the rule-level and per-scope stamps
+      // agree. An all-scopes-failed fan-out returned above: it seeds nothing and stamps
+      // nothing, so SP-1 keeps polling held exactly like a single-scope abort.
+      await this.#pollState.advanceRuleRun(ruleId, seededAt);
       await this.#rules.applyEnableTransition(ruleId, { backfillStatus: "completed" });
       return {
         kind: "enabled",
