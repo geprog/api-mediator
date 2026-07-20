@@ -482,3 +482,200 @@ Each has a recommended default the stories adopt; confirm or override.
     header/field where the target API supports write metadata" without fixing values. *Recommended:*
     implementation-defined; correctness is independent of both (EP-2), so they are tuning knobs, not
     contracts. (EP-2)
+
+### Deferred feature (post-Phase-4, phase-sized)
+
+- [scoped-resource-sync.md](scoped-resource-sync.md) — SS-1 … SS-18, in three layers (L1 constants, L2
+  record-derived scope, L3 `ScopeLink` + discovery + scoped identity). Shipped alongside Phase 4's tail; its
+  open question 3 (adapter fallback to a scope binding) is **resolved in Phase 5** — see Phase-5 open
+  question 8 below.
+
+---
+
+## Phase 5 — The Adapter/Gateway Engine (the on-demand half)
+
+The product's second capability, and the first inbound surface: a newly introduced app's `CONSUMER` spec is
+**hosted as a live server** and its calls resolved on demand against real backends, using the same
+`ApprovedMapping`s, Transformation Executor, Outbound Call Executor, and Credential Store access pattern the
+Sync Engine uses. Where Phase 4 pushes proactively, Phase 5 resolves on request — the mediator as a **virtual
+provider**, which never calls the consumer.
+
+Phase 5 completes what Phase 3 deliberately left non-serving: AI-2 instantiated `AdapterEndpoint`s with
+`proposed` `AdapterBinding`s and no composition state, because there was no runtime. Phase 5 adds the runtime,
+the Auth Gateway, the planner/executor/aggregator pipeline, writes, caching, and the human **composition**
+decision — under the same core safety promise: **nothing serves that a human has not approved and (where it is
+ambiguous) composed.** A single approved backend auto-activates because one backend leaves nothing to decide;
+a *second* one always waits for a human.
+
+**What already exists vs. what Phase 5 adds** (checked against `packages/db/src/schema.ts` +
+`packages/domain/src`): `adapter_endpoint` / `adapter_binding` exist with the `adapter_endpoint_status`
+(incl. `composition-required`), `adapter_binding_role`, and `adapter_binding_status` enums, and
+`Credential.type` already owns `adapterToken`; `AuditLog.type` already owns `adapter-request`. All of these
+carry **only approval-derived data** — no aggregation strategy, ordering, chaining, post-merge semantics, or
+caching. Phase 5 **extends** them (AD-*), and **adds** the write-outcome store and `audit_log.related_binding_id`.
+`packages/adapter-engine` and `apps/backend/src/http/adapter-runtime` are unbuilt.
+
+| File | Stories | Realizes (concept component) |
+|---|---|---|
+| [phase-5-adapter-domain.md](phase-5-adapter-domain.md) | AD-1 … AD-6 | `@mediator/domain` + **the one Phase-5 migration** (composition/serving state, `adapterToken`, write-outcome store) |
+| [phase-5-adapter-runtime.md](phase-5-adapter-runtime.md) | RT-1 … RT-5 | Adapter Server Runtime (dynamic mount, `not-yet-mapped`, lifecycle, tracing) |
+| [phase-5-auth-gateway.md](phase-5-auth-gateway.md) | AT-1 … AT-4 | Auth Gateway + adapter token (shown once, salted hash, rotation) |
+| [phase-5-router-planner.md](phase-5-router-planner.md) | RP-1 … RP-5 | Request Router + inbound validation + Resolution Planner (+ the six-cause invariant) |
+| [phase-5-transform-execution.md](phase-5-transform-execution.md) | TE-1 … TE-5 | Transformation Executor (request/response phases, `ParameterMapping`s) + Outbound execution + chaining |
+| [phase-5-response-aggregation.md](phase-5-response-aggregation.md) | AG-1 … AG-7 | Response Aggregator (four strategies) + consumer-schema response validation |
+| [phase-5-write-operations.md](phase-5-write-operations.md) | WR-1 … WR-5 | Adapter writes (single-target, idempotency + write-outcome store, not loop-tagged) |
+| [phase-5-caching.md](phase-5-caching.md) | CH-1 … CH-5 | Response cache + coarse invalidation (`SyncEvent` / adapter write / TTL / config change) |
+| [phase-5-endpoint-composition.md](phase-5-endpoint-composition.md) | CO-1 … CO-7 | Endpoint composition (derivation, validation, recomposition, successor adoption) |
+| [phase-5-adapter-api.md](phase-5-adapter-api.md) | AP-1 … AP-5 | API Layer (read/compose/enable/token/history) |
+| [phase-5-adapter-ui.md](phase-5-adapter-ui.md) | CU-1 … CU-5 | UI Layer (composition, union panel, token panel, health + capstone e2e) |
+
+59 stories total.
+
+### Phase-4 lessons → owning criteria (encoded, not retold)
+
+Every serious Phase-4 defect lived at a seam between individually-correct components, or in a silent
+approximation. Those three lessons are carried here as testable criteria:
+
+| Lesson | Owning criteria |
+|---|---|
+| **Failures are loud, never plausible-but-wrong** | RP-5 (six causes mutually distinguishable + never a fabricated body), RT-3 (`not-yet-mapped` / `endpoint-disabled` / 404), RP-2 (reject unserviceable inputs before any backend), AG-5.2 (fail, never truncate a union), AG-7 (`mediator-transform-error`), TE-1.3 / TE-3.4 (refuse rather than send an unfilled/guessed parameter), WR-3.3 (recorded outcome, never a fabricated success) |
+| **Derive-then-confirm, never auto-confirm** | CO-3.5 (`postMergeSorts`/`postMergePagination` pre-filled, composer-confirmed), CO-3.1 ("no dedup" is an explicit choice), CO-4.3 (strict/degraded is a decision, not an inference), CO-5.5 (input-coverage acknowledged, not assumed), AT-1 (token shown once — issuance is an explicit act) |
+| **Pin every cross-component contract** | RP-4 (planner → executor plan is an explicit, pure value), TE-5 (executor → aggregator envelope, pure aggregation), AG-7.5 (aggregator → validator seam), CH-3.2 / CH-4.3 / CH-5.6 (one invalidation seam, two key kinds), WR-4.2 (adapter-write → Sync Engine: *not* `skipped-loop`) |
+
+### Suggested implementation order (Phase 5, blocking edges)
+
+Layered per the plan (types → persistence → logic → HTTP → UI), sliced so each step is independently
+reviewable and demonstrable:
+
+1. **AD-1 … AD-6 — the *only* migration slice of the phase.** All composition/serving columns, the
+   write-outcome store, and `audit_log.related_binding_id` land in one migration; every column nullable with no
+   DB default so Phase-3 rows keep loading. **No later Phase-5 slice should need a migration** — if one appears
+   to, that is a finding for a human, not a second migration in flight.
+2. **RT-1 … RT-4** ∥ **AT-1 … AT-4** — the runtime on its own port serving the full consumer surface as
+   `not-yet-mapped` behind a validated token. Demonstrable on its own (call scenario-3's `/todos`, get
+   `not-yet-mapped`; call it without a token, get rejected). **RT-5** (trace + audit row) lands with them.
+3. **CO-1** — derivation from `MappingApproved` + first-binding auto-activation. Small, and it unblocks
+   everything that serves.
+4. **The thin end-to-end slice:** **RP-1 → RP-2 → RP-3 → RP-4** → **TE-1 → TE-2 → TE-4 → TE-5** →
+   **AG-1** → **AG-7**. At the end of this step, scenario-3's `GET /todos` returns real Vikunja data and every
+   failure has a distinct cause. **RP-5** is written here as the phase's loudness regression net.
+5. **CO-2** (composition + validation) → **CO-4** (supplement analysis) → **CO-5** (input coverage) — the human
+   decision, before the strategies that consume it.
+6. **AG-2** (fanout-merge) + **TE-3** (chaining) — parallelizable with each other's tests.
+7. **CO-3** (union configuration) → **AG-3** → **AG-4** → **AG-5** (materialization bound) → **AG-6**
+   (first-success).
+8. **WR-1 … WR-5** — writes; depends on CO-2 (single-binding rule) and Phase-4 OC-2 (idempotency).
+9. **CH-1 … CH-4**, then **CH-5** (config/health invalidation, which needs CO-6).
+10. **CO-6** (recomposition/enable/disable) → **CO-7** (successor adoption; its live trigger arrives with
+    Phase 6 — Phase 5 unit-tests the adoption behavior against a simulated succession).
+11. **AP-1 … AP-5** — thin HTTP over the composition/auth services, gated by Phase-3 OA-2.
+12. **CU-1 … CU-4** → **CU-5** (capstone e2e against running scenario-3/4 landscapes).
+
+**What can parallelize:** step 2's two files (RT ∥ AT); TE-3 ∥ AG-2; the AG-* strategy suites once TE-5's
+envelope exists; the CU-* screens once their backing AP-* endpoint lands. **What must not:** any second
+migration alongside AD.
+
+### Phase boundary map (Phase 5 → owning phase)
+
+| Deferred concern | Owning phase |
+|---|---|
+| `SpecDiff`, additional spec versions, re-pinning, marking mappings `stale`, producing the **successor** mapping and its re-review | **Phase 6** ([extensibility.md](../architecture/extensibility.md)) — Phase 5 *consumes* `stale`/`suspended` as runtime conditions (RP-3) and specifies the **adapter side** of successor adoption (CO-7); it never sets those states |
+| Graph **rendering**, Grafana dashboards/alert rules | **Phase 6** ([graph-overview.md](../flows/graph-overview.md), [observability.md](../architecture/observability.md)) — Phase 5 upserts adapter-dependency edges (CO-1.5) and emits the metrics those panels read |
+| App **deregistration** cascade UI/flow (Phase 5 specifies only the adapter-side effects: torn-down surface, `not-yet-mapped` on binding-less endpoints, token deletion) | **Phase 6** ([extensibility.md](../architecture/extensibility.md) *App lifecycle*) |
+| Webhook/push change detection, GraphQL/gRPC protocols, multi-tenancy, high availability, inbound rate limiting | **Out of scope / later** ([extensibility.md](../architecture/extensibility.md), [overview.md](../architecture/overview.md), [security.md](../architecture/security.md)) |
+
+Phase 5 operates on **version-1 specs only**, like Phases 1-4.
+
+### Open questions for a human (Phase 5 — concept silent, underspecified, or in tension)
+
+Each has a recommended default the stories adopt; confirm or override. Items 3, 4, 7, 10, 11, 13 are **concept
+gaps** — a name or rule the docs use but do not define.
+
+1. **How do several consumer apps share one adapter listener?** The concept names one Adapter Server Runtime
+   and one token per consumer app, but never says how two consumer specs declaring `/todos` coexist (the
+   scenario fixtures declare bare paths at `servers: http://localhost:1<scenario>900`). *Recommended:*
+   **token-derived routing** — the Auth Gateway resolves the consumer app from the token, and routing happens
+   within that app's surface, so consumer paths stay verbatim and collisions are impossible. Alternatives: a
+   per-app path prefix (breaks the fixtures' `servers` URLs) or one listener per consumer app (port sprawl).
+   (RT-2.3, AT-2.3, AT-3.2)
+2. **HTTP status codes per error cause.** The concept fixes the *causes*, never the codes. *Recommended:* the
+   machine-readable **cause token** is the contract; status codes implementation-defined with a suggested
+   mapping (`not-yet-mapped` → 501, `endpoint-disabled`/`mapping-stale`/`mapping-suspended`/`backend-disabled`
+   → 503, `mediator-transform-error` → 500, upstream → 502, auth → 401/403, request-validation → 400).
+   (RT-3.5, RP-5.1)
+3. **Two `AdapterEndpoint` fields are named in prose but absent from the data model.** *Concept gap:*
+   [adapter-engine.md](../architecture/adapter-engine.md) and
+   [adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md) both require a **strict vs.
+   degraded** partial-failure mode and a union **dedup configuration** (link-based / dedup key / none), but
+   [data-model.md](../architecture/data-model.md)'s `AdapterEndpoint` lists neither. *Recommended:* add both to
+   the data model (e.g. `partialFailureMode: strict | degraded` and a `dedup` union); the stories use
+   descriptive placeholders until a human fixes the canonical names. (AD-1.4, AD-1.5)
+4. **Adapter-token rotation overlap has no modeled field.** *Concept gap:* `Credential` carries
+   `lastRotatedAt` but nothing bounding an overlap window, and "old and new both valid" implies two
+   simultaneously-valid rows. *Recommended:* two `adapterToken` rows with a bounded validity end on the
+   superseded one (a nullable column in the AD migration) + an explicit confirm-cutover action; default window
+   config-defined. Also confirm that a consumer app registered **before** Phase 5 gets its token issued on
+   demand (the concept says "generated at registration"). (AD-3.3, AT-1.5, AT-4)
+5. **Write dedup lookback window length.** Concept says "a bounded lookback window" without a value.
+   *Recommended:* config-defined, sharing the Phase-4 idempotency window's configuration; never unbounded.
+   (AD-4.3, WR-3)
+6. **Inbound rate limiting on the adapter surface.** The concept specifies *outbound* ceilings only.
+   *Recommended:* none in Phase 5 (single-tenant, token-gated); note it as a future hardening item rather than
+   inventing a policy. (AT-2)
+7. **Unmapped consumer inputs are rejected only for unions in the concept.** *Concept gap / carried-over
+   evaluation finding:* [adapter-engine.md](../architecture/adapter-engine.md) rejects an unconfigured union
+   filter/sort/pagination parameter, but says nothing about a **non-union** endpoint whose consumer parameter
+   maps to no backend — today that would be silently dropped and answered with a plausible-but-wrong result.
+   *Recommended:* generalize the same discipline — composition derives the unmapped-input set, the composer
+   must **acknowledge** each one, and a request *using* an unacknowledged unmapped parameter is rejected; a
+   **required** consumer input that reaches no backend is a blocking composition finding. (CO-5, RP-2.4)
+8. **[RESOLVED here — scoped-resource-sync open question 3] Should the adapter fall back to a scope binding
+   for a scope parameter the consumer omits?** **No.** Three concept anchors: (a)
+   [data-model.md](../architecture/data-model.md) `ParameterMapping` states scope filling is an
+   *operational/identity* binding "deliberately kept distinct" from a request-driven `ParameterMapping`, and
+   `scopePathBindings` are explicitly "not sourced from an inbound request"; (b) falling back would make the
+   adapter serve one silent scope while the consumer believes the call is unscoped — precisely the
+   plausible-but-wrong answer the phase forbids; (c) the scenario-4 fixture already documents the intended
+   behavior ("the Gitea/Forgejo creates are **rejected bindings** — their `{owner}`/`{repo}` path params have
+   no consumer counterpart"). *Adopted:* a backend operation with a **required** parameter that has no
+   `ParameterMapping` and no `chainInput` is **not composable**, rejected loudly at composition (CO-2.6) and
+   refused at execution if it ever reaches it (TE-1.3). **Residual for the human:** if operators later want a
+   fixed backend scope for adapter calls, the honest expression is a **constant `ParameterMapping`**
+   (operator-authored, composition-time, reviewed) — which the data model does not currently support
+   (`ParameterMapping` requires a `sourceParamRef`). Confirm whether to leave that as a documented limitation
+   or open it as a future concept change. (TE-1.4, CO-2.6)
+9. **Read-side retry bound for a live adapter request.** The Phase-4 executor retries and parks; an adapter
+   read has a live caller and must not park. *Recommended:* a bounded, config-defined retry for adapter calls,
+   with the park/dead-letter path explicitly not applicable. (TE-2.6)
+10. **Union row provenance: the scenario-4 fixture contradicts the concept.**
+    [adapter-engine.md](../architecture/adapter-engine.md) states that **no per-row source annotation is
+    injected into the body** (provenance lives in the trace; a response header names contributors), but
+    [task-dashboard.yaml](../../scenarios/scenario-4-mixed/specs/consumer/task-dashboard.yaml) declares a
+    `source` field "annotated by the mediator". *Recommended:* the concept wins — `source` is **optional** in
+    that schema, so leaving it absent stays schema-valid; either update the fixture's comment or (a human
+    decision) revisit whether a composer-configured provenance field is a wanted feature. (AG-3.6)
+11. **Union materialization has no bound in the concept.** *Carried-over evaluation finding:* "a union endpoint
+    materializes the complete (filtered) merged collection per request" with no ceiling. *Recommended:* a
+    config-defined per-request row ceiling that **fails** the request (naming the backend and ceiling) rather
+    than truncating. **Residual:** whether this deserves its own named cause in
+    [glossary.md](../glossary.md) alongside the six, or should be reported as an upstream-shaped error.
+    (AG-5)
+12. **A backend write that returns no body.** *Carried-over evaluation finding (no-body-204).* *Recommended:*
+    do not fabricate a response; fail as `mediator-transform-error` when the consumer schema requires a body.
+    **Residual:** whether a follow-up read (as the sync side does for echo baselines) should be performed
+    instead — a small behavioral addition the concept does not describe. (WR-2.3)
+13. **Cache lifecycle on configuration/health changes.** *Concept gap / carried-over evaluation finding:*
+    invalidation lists only sync activity, adapter writes, and TTL — nothing for recomposition, binding
+    enable/disable, a mapping going `stale`/`suspended`, successor adoption, or backend disable. *Recommended:*
+    all of them drop the affected endpoint's entries, as a direct extension of the documented "coarse
+    invalidation never costs correctness" principle. (CH-5)
+14. **No `fanout-merge` fixture exists.** Scenarios 3/4 give a single call, a union, and a write — but no
+    consumer operation whose fields naturally come from two backends. *Recommended:* cover `fanout-merge`
+    (chaining, degradation, load-bearing supplement) deterministically with a stubbed backend, **or** approve a
+    small merge-shaped operation added to a consumer fixture spec so the capstone can exercise all four
+    strategies live. (CU-5.10)
+15. **"Composer" is not a role.** [adapter-endpoint-composition.md](../flows/adapter-endpoint-composition.md)
+    says "the composer"; [security.md](../architecture/security.md) lists only `operator`/`viewer`, with
+    "compose endpoints" as an operator mutation. *Adopted (not open):* composer = an `operator` performing
+    composition; **no new role is coined**. Flagged only so a human can confirm the glossary needs no line.
+    (CO-*, CU-*)
