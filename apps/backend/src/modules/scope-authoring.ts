@@ -692,11 +692,21 @@ function findBinding(
  * A multi-part source container (Gitea's `{owner}` + `{repo}`) has one component per
  * parameter, and filling the wrong one is **not** a loud failure: `alice/alice` is a
  * perfectly valid repository path, so a mis-derived key can address a real-but-wrong
- * container instead of erroring. So when a parameter matches no component by name, nothing
- * is offered for it — the same fail-safe discipline the multi-correspondence case uses.
- * The single exception is a source whose captured scope has exactly **one** component:
- * there is then only one possible container key, so the pairing is unambiguous whatever
- * the parameter is called.
+ * container instead of erroring. Every branch below therefore withholds rather than
+ * guesses — the same fail-safe discipline the multi-correspondence case uses:
+ *
+ * - **no component names the parameter** -> nothing offered for it;
+ * - **several components name it** -> nothing offered. Two components can legitimately
+ *   match one parameter (`namesMatch` treats `org`/`organization` and `repo`/`repository`
+ *   as one noun, and SS-7 lets an operator key components freely), and picking the first
+ *   would make the answer depend on array order — `[organization, org]` and
+ *   `[org, organization]` must not disagree about `{org}`;
+ * - **exactly one component AND exactly one scope parameter** -> paired regardless of the
+ *   names, since there is then exactly one possible container key and one slot to fill.
+ *   Both halves of that condition are load-bearing: a source that captures one component
+ *   but polls a two-segment path (`GET /repos/{owner}/{repo}/issues`) cannot fill both
+ *   parameters from it, and spreading the one component across both is the same
+ *   wrong-container hazard.
  */
 export function deriveScopeKeyRefCandidates(input: {
   readonly correspondence: ScopeCorrespondence;
@@ -726,10 +736,21 @@ export function deriveScopeKeyRefCandidates(input: {
 
   if (correspondence.sourceContainerRef?.appId === appId) {
     const components = binding.sourceScopeRef?.components ?? [];
-    const only = components.length === 1 ? components[0] : undefined;
+    // The single-component fallback holds ONLY when the resource also has exactly one
+    // scope parameter. With more parameters than components the captured scope cannot fill
+    // them all, and spreading the one component across every parameter is the
+    // wrong-container hazard again: a source capturing only `repo` but polling
+    // `GET /repos/{owner}/{repo}/issues` would pre-fill `{owner}` from the repo component.
+    const soleComponent =
+      components.length === 1 && parameterNames.length === 1 ? components[0] : undefined;
     for (const parameterName of parameterNames) {
-      const matched = components.find((component) => namesMatch(component.key, parameterName));
-      const component = matched ?? only;
+      // `filter`, not `find`: two components can legitimately match one parameter now that
+      // `namesMatch` treats `org`/`organization` and `repo`/`repository` as one noun, and
+      // SS-7 lets an operator key components freely. Picking the first would make the
+      // answer depend on array order, so an ambiguous match is withheld instead — the same
+      // fail-safe as the multi-correspondence case.
+      const matches = components.filter((component) => namesMatch(component.key, parameterName));
+      const component = matches.length === 1 ? matches[0] : soleComponent;
       if (component !== undefined) {
         candidates[parameterName] = component.key;
       }

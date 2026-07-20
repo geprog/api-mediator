@@ -553,6 +553,126 @@ describe("deriveScopeKeyRefCandidates (SS-18.4)", () => {
     ).toStrictEqual({});
   });
 
+  it.each([
+    ["organization-first", ["organization", "org"]],
+    ["org-first", ["org", "organization"]],
+  ])(
+    "withholds when SEVERAL components name one parameter (%s) — never array order",
+    (_label, keys) => {
+      // `namesMatch` treats org/organization (and repo/repository) as one noun, and SS-7
+      // lets an operator key components freely — so both can legitimately match `{org}`.
+      // Picking the first would make the derived key depend on component ordering.
+      const ambiguous: ResourceBinding = {
+        ...giteaIssuesBinding,
+        sourceScopeRef: {
+          components: keys.map((key) => ({ key, fieldPath: `owner.${key}` })),
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+        scopePathBindings: [
+          {
+            kind: "constant",
+            parameterName: "org",
+            value: "",
+            confirmedBy: null,
+            confirmedAt: null,
+          },
+        ],
+      };
+      expect(
+        deriveScopeKeyRefCandidates({
+          correspondence,
+          appId: GITEA,
+          binding: ambiguous,
+          targetContainerBinding: vikunjaProjectsBinding,
+        }),
+      ).toStrictEqual({});
+    },
+  );
+
+  it("never spreads a SINGLE component across two scope parameters — the unnamed one is withheld", () => {
+    // A source capturing only `repo` but polling `GET /repos/{owner}/{repo}/issues`: the
+    // captured scope cannot fill both slots, and pre-filling `{owner}` from the `repo`
+    // component composes a real-but-wrong container (`alice/alice` is a valid repo path).
+    // `{repo}` is still offered — it is paired by NAME (the strongest signal), not by the
+    // one-component fallback, which is off entirely here. A partly pre-filled resource is
+    // safe: each row confirms independently and an empty `scopeKeyRef` cannot be submitted
+    // (`canSupplyScopeKeyRef` disables the action; the server 400s it), so the blank
+    // `{owner}` row blocks any container from being composed until the operator fills it.
+    const oneComponentTwoParams: ResourceBinding = {
+      ...giteaIssuesBinding,
+      sourceScopeRef: {
+        components: [{ key: "repo", fieldPath: "repository.name" }],
+        confirmedBy: null,
+        confirmedAt: null,
+      },
+      scopePathBindings: [
+        {
+          kind: "constant",
+          parameterName: "owner",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+        {
+          kind: "constant",
+          parameterName: "repo",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+      ],
+    };
+
+    const candidates = deriveScopeKeyRefCandidates({
+      correspondence,
+      appId: GITEA,
+      binding: oneComponentTwoParams,
+      targetContainerBinding: vikunjaProjectsBinding,
+    });
+
+    // The hazard: `{owner}` must NOT be pre-filled from the `repo` component.
+    expect(candidates["owner"]).toBeUndefined();
+    expect(candidates).toStrictEqual({ repo: "repo" });
+  });
+
+  it("withholds every parameter when a single component names NONE of two scope parameters", () => {
+    // Same shape, but the component names neither parameter, so the one-component fallback
+    // (off with >1 parameter) is the only thing that could have filled them — nothing does.
+    const noNameMatch: ResourceBinding = {
+      ...giteaIssuesBinding,
+      sourceScopeRef: {
+        components: [{ key: "project", fieldPath: "project_id" }],
+        confirmedBy: null,
+        confirmedAt: null,
+      },
+      scopePathBindings: [
+        {
+          kind: "constant",
+          parameterName: "owner",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+        {
+          kind: "constant",
+          parameterName: "repo",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+      ],
+    };
+    expect(
+      deriveScopeKeyRefCandidates({
+        correspondence,
+        appId: GITEA,
+        binding: noNameMatch,
+        targetContainerBinding: vikunjaProjectsBinding,
+      }),
+    ).toStrictEqual({});
+  });
+
   it("pairs a SINGLE-component source container whatever the parameter is called — unambiguous", () => {
     const single: ResourceBinding = {
       ...giteaIssuesBinding,
