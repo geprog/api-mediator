@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { expect } from "@playwright/test";
 import { CredentialStore, DbCredentialPersistence, EnvKeyProvider } from "@mediator/credentials";
 import {
   ApiSpecRepository,
@@ -52,7 +53,7 @@ import type {
   ScopePathBinding,
   SyncRule,
 } from "@mediator/domain";
-import { eq, inArray, or, sql } from "drizzle-orm";
+import { eq, inArray, like, or, sql } from "drizzle-orm";
 
 import { getTestDb } from "../db.js";
 import { CREDENTIAL_MASTER_KEY } from "../env.js";
@@ -610,10 +611,76 @@ export async function getActiveDirectionalMapping(
 
 // ── Cleanup ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * Wait until the ordering queue has drained before deleting anything.
+ *
+ * The dispatcher processes enqueued changes **asynchronously**, so this journey's last
+ * polls can still be mid-flight when `afterAll` starts. Deleting the scaffold underneath a
+ * live pipeline makes it fail against half-removed state — in particular, severing the
+ * `ScopeLink`s while a record is being routed parks that record and writes a `failure`
+ * `SyncEvent` *after* the audit sweep already ran. That row then shows up in
+ * `GET /api/scope-links/parked` for **every later run**, because SS-11.5 reads the parked
+ * queue globally (`querySyncEvents({ status: "failure" })`), not per rule. Quiescing first
+ * removes the race at its source rather than mopping up after it.
+ */
+async function quiesceOrderingQueue(): Promise<void> {
+  const db = await getTestDb();
+  await expect
+    .poll(
+      async () =>
+        (
+          await db
+            .select({ id: orderingQueue.id })
+            .from(orderingQueue)
+            // `done`/`parked` are terminal — a completed entry is retained as a tombstone and
+            // a parked one waits on an operator, so neither is work still in flight. Only
+            // `pending`/`processing` mean the dispatcher may still write.
+            .where(inArray(orderingQueue.status, ["pending", "processing"]))
+        ).length,
+      {
+        timeout: 60_000,
+        message: "in-flight ordering-queue work should finish before the scaffold is deleted",
+      },
+    )
+    .toBe(0);
+}
+
+/**
+ * Delete every audit row this run produced and return how many were removed.
+ *
+ * Matches on all four ties a run's rows can carry: the rule/mapping/proposal refs, the
+ * `originAppId` of a `sync-execution` row, and — for the SS-11.5 parked-container rows,
+ * whose only run-specific content is inside the text blob — the run's `resourcePairRef`.
+ * Matching on `relatedMappingId` alone (as this used to) leaves both of the latter behind.
+ */
+async function purgeRunAuditRows(
+  scaffold: ScopedSyncScaffold,
+  ruleIds: readonly string[],
+  mappingIds: readonly string[],
+): Promise<number> {
+  const db = await getTestDb();
+  const appIds = [scaffold.giteaAppId, scaffold.vikunjaAppId];
+  const conditions = [
+    inArray(auditLog.originAppId, appIds),
+    eq(auditLog.relatedProposalId, scaffold.proposalId),
+    like(auditLog.details, `%${scaffold.resourcePairRef}%`),
+    ...(ruleIds.length > 0 ? [inArray(auditLog.relatedRuleId, ruleIds)] : []),
+    ...(mappingIds.length > 0 ? [inArray(auditLog.relatedMappingId, mappingIds)] : []),
+  ];
+  const deleted = await db
+    .delete(auditLog)
+    .where(or(...conditions))
+    .returning({ id: auditLog.id });
+  return deleted.length;
+}
+
 /** Remove everything the scaffold (and any sync run it drove) created, in FK-safe order. */
 export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): Promise<void> {
   const db = await getTestDb();
   const appIds = [scaffold.giteaAppId, scaffold.vikunjaAppId];
+
+  // Let in-flight dispatch finish against intact state before anything is removed.
+  await quiesceOrderingQueue();
 
   // The runtime tables this journey is the only writer of.
   await db.delete(orderingQueue);
@@ -639,8 +706,16 @@ export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): P
       ),
     );
   const mappingIds = mappingRows.map((row) => row.id);
+  const ruleIds =
+    mappingIds.length === 0
+      ? []
+      : (await Promise.all(mappingIds.map(async (id) => listSyncRulesForMapping(id)))).flatMap(
+          (rules) => rules.map((rule) => rule.id),
+        );
+
+  await purgeRunAuditRows(scaffold, ruleIds, mappingIds);
+
   if (mappingIds.length > 0) {
-    await db.delete(auditLog).where(inArray(auditLog.relatedMappingId, mappingIds));
     // Break the counterpart self-reference before deleting the mappings.
     const mappings = new ApprovedMappingRepository(db);
     for (const id of mappingIds) {
@@ -651,7 +726,6 @@ export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): P
     await db.delete(approvedMapping).where(inArray(approvedMapping.id, mappingIds));
   }
 
-  await db.delete(auditLog).where(eq(auditLog.relatedProposalId, scaffold.proposalId));
   await db.delete(mappingProposal).where(eq(mappingProposal.id, scaffold.proposalId));
 
   await db.delete(credential).where(inArray(credential.appId, appIds));
@@ -679,4 +753,14 @@ export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): P
     .delete(graphEdge)
     .where(or(inArray(graphEdge.sourceNodeId, appIds), inArray(graphEdge.targetNodeId, appIds)));
   await db.delete(registeredApp).where(inArray(registeredApp.id, appIds));
+
+  // Converge: keep purging until a purge removes nothing. A non-zero count means a writer
+  // was still active during the deletes, so the sweep repeats rather than leaving a parked
+  // `failure` row behind for the next run's `GET /api/scope-links/parked` to surface.
+  await expect
+    .poll(async () => purgeRunAuditRows(scaffold, ruleIds, mappingIds), {
+      timeout: 30_000,
+      message: "no audit row from this run may survive cleanup (SS-11.5 parked queue is global)",
+    })
+    .toBe(0);
 }
