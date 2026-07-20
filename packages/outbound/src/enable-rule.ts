@@ -11,7 +11,11 @@ import {
   type SourceReader,
 } from "@mediator/sync-engine";
 
-import type { BackfillRunInput, BackfillRunResult } from "./backfill-runner.js";
+import type {
+  BackfillRunInput,
+  BackfillRunResult,
+  BackfillScopeResult,
+} from "./backfill-runner.js";
 
 /**
  * **`SyncRule` enable orchestration** (BE-3, BE-5.3, BE-6;
@@ -104,8 +108,10 @@ export type EnableBackfillOutcome =
  * The enable action's verdict — a discriminated union (no boolean soup):
  *  - `blocked` — the gate refused; `stillNeeds` drives the enablement checklist (SU-1);
  *  - `rejected` — BE-5.3: both directions of a bidirectional pair would `push`;
- *  - `backfill-aborted` — the backfill's enumeration aborted on a partial fetch: the
- *    rule is left `enabled`+`running` (SP-1 keeps polling held), retriable by re-enabling;
+ *  - `backfill-aborted` — the backfill's enumeration aborted on a partial fetch, **or**
+ *    (per-scope) every one of its scopes failed: the rule is left `enabled`+`running`
+ *    (SP-1 keeps polling held), retriable by re-enabling. A per-scope run in which at
+ *    least one scope completed is `enabled`, not this (SS-17.5 per-scope isolation);
  *  - `enabled` — the rule is live: its backfill ran (or was explicitly skipped) and the
  *    poll state is seeded.
  */
@@ -212,6 +218,18 @@ export class RuleEnabler {
     }
 
     if (result.outcome === "completed-per-scope") {
+      // A fan-out where NO scope completed is a failed backfill, not a completed one: it
+      // seeds nothing at all, so flipping `completed` would take the rule live over an
+      // entirely unseeded poll state and make total failure indistinguishable from
+      // success. Report it exactly like a single-scope abort (left enabled+running, SP-1
+      // keeps polling held, a re-enable retries). Per-scope isolation (SS-17.5) is about
+      // one bad scope among good ones — it is preserved below, where a partial run still
+      // goes live.
+      const failure = allScopesFailed(result.scopes);
+      if (failure !== undefined) {
+        return { kind: "backfill-aborted", reason: failure.reason, enumeratedCount: failure.count };
+      }
+
       // SS-17.5 — seed each COMPLETED scope's OWN poll_scope_state, keyed by its ScopeLink
       // id (BE-6 per scope). An aborted/parked scope seeds nothing — its next poll re-lists
       // + re-seeds (per-scope isolation; SP-4 per scope). The rule still goes live: one
@@ -292,6 +310,44 @@ export class RuleEnabler {
 
 function defaultChangedSinceCursor(at: Date): string {
   return at.toISOString();
+}
+
+/**
+ * The abort summary for a per-scope fan-out in which **no** scope completed — every
+ * branch aborted (SP-4 per scope) and/or parked (an unresolvable container, SS-11.5) — or
+ * `undefined` when at least one scope completed (the SS-17.5 partial run, which still
+ * goes live) or the fan-out had no scopes at all.
+ *
+ * A **zero-scope** fan-out is deliberately *not* a failure: nothing failed, the pair
+ * simply has no linked containers yet, and the SS-17.1 re-list establishes them on the
+ * next poll. It keeps its existing `completed` outcome.
+ *
+ * The reason names every failed scope so the operator sees *why* the whole backfill
+ * failed rather than one sampled cause, and `count` totals what was enumerated before the
+ * branches failed (a parked scope never enumerates, contributing 0).
+ */
+function allScopesFailed(
+  scopes: readonly BackfillScopeResult[],
+): { readonly reason: string; readonly count: number } | undefined {
+  if (scopes.length === 0) {
+    return undefined;
+  }
+  let count = 0;
+  const causes: string[] = [];
+  for (const scope of scopes) {
+    const outcome = scope.outcome;
+    if (outcome.outcome === "completed") {
+      return undefined; // at least one scope completed → the SS-17.5 partial run goes live.
+    }
+    if (outcome.outcome === "aborted") {
+      count += outcome.enumeratedCount;
+    }
+    causes.push(`${scope.scopeLinkId}: ${outcome.reason}`);
+  }
+  return {
+    reason: `all ${String(scopes.length)} scopes failed — ${causes.join("; ")}`,
+    count,
+  };
 }
 
 /**

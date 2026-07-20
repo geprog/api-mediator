@@ -729,9 +729,10 @@ describe("deriveScopeKeyRefCandidates (SS-18.4)", () => {
 /**
  * Mirrors `ScopeCorrespondenceRepository.propose` exactly (the "fakes must mirror real
  * repos" discipline): keyed on `resourcePairRef` so there is never a duplicate; an
- * UNCONFIRMED row is refreshed by a newer candidate; a CONFIRMED row is returned
- * untouched. It never writes `confirmedBy`/`confirmedAt`, exactly as the real
- * `ON CONFLICT DO UPDATE ... WHERE confirmed_by IS NULL` cannot.
+ * UNCONFIRMED row is refreshed by a newer candidate **from the same authoring direction**;
+ * a CONFIRMED row, and one authored by the COUNTERPART direction, are returned untouched.
+ * It never writes `confirmedBy`/`confirmedAt`, exactly as the real
+ * `ON CONFLICT DO UPDATE ... WHERE confirmed_by IS NULL AND <same direction>` cannot.
  */
 class FakeScopeCorrespondenceProposer implements ScopeCorrespondenceProposer {
   public readonly rows = new Map<string, ScopeCorrespondence>();
@@ -750,6 +751,12 @@ class FakeScopeCorrespondenceProposer implements ScopeCorrespondenceProposer {
     }
     if (existing.confirmedBy !== null) {
       return Promise.resolve(existing); // confirmed -> untouched
+    }
+    if (existing.targetContainerRef.appId !== candidate.targetContainerRef.appId) {
+      // The counterpart direction writes into the OTHER app's container: refreshing here
+      // would mirror the pair's container refs (and flip its derived poll-scope mode).
+      // The real repo's `target_container_ref->>'appId'` setWhere skips the update arm.
+      return Promise.resolve(existing);
     }
     // The real repo writes `source_container_ref` unconditionally (the `set` clause names
     // it), so an absent candidate CLEARS a previously-stored ref — it does not preserve it.
@@ -1134,5 +1141,166 @@ describe("namesMatch — singular/plural variation", () => {
     expect(namesMatch("valid", "val")).toBe(false);
     // A field literally named `id` still means `id`.
     expect(namesMatch("id", "id")).toBe(true);
+  });
+});
+
+// ── SS-18.6 — a BIDIRECTIONAL pair: the counterpart approval must not invert it ──
+
+/**
+ * **The regression these tests exist for.** `resource_pair_ref` is direction-agnostic, so
+ * both directions of a bidirectional pair (the canonical scenario-1 setup) land on the
+ * same `ScopeCorrespondence` row — but a derivation is inherently *directional*: it reads
+ * the **target** side's write ops for the container parameter and the **source** side's
+ * `sourceScopeRef` for the identity key. Approving the counterpart direction therefore
+ * re-derives the pair MIRRORED, and the unconditional
+ * `onConflictDoUpdate ... setWhere isNull(confirmedBy)` refresh let it silently swap the
+ * container refs of an existing (unconfirmed) correspondence — flipping the mode
+ * `derivePollScopeMode` reads off them and re-pointing the pair at the wrong containers.
+ */
+
+/** Gitea `issues` as a WRITE target: `POST /repos/{owner}/{repo}/issues` (both are containers). */
+const giteaIssuesWritable = group({
+  resourceRef: "issues",
+  operations: [
+    {
+      operationId: "issues_create",
+      method: "post",
+      path: "/repos/{owner}/{repo}/issues",
+      parameters: [
+        { name: "owner", location: "path", required: true, type: "string" },
+        { name: "repo", location: "path", required: true, type: "string" },
+      ],
+    },
+  ],
+});
+
+/** Vikunja `tasks` as the counterpart SOURCE: it captures its project container per record. */
+const vikunjaTasksSourceBinding = binding({
+  resourceRef: "tasks",
+  scopePathBindings: [
+    { kind: "constant", parameterName: "id", value: "", confirmedBy: null, confirmedAt: null },
+  ],
+  sourceScopeRef: {
+    components: [{ key: "title", fieldPath: "project.title" }],
+    confirmedBy: null,
+    confirmedAt: null,
+  },
+});
+
+/** The counterpart direction's approved create: `tasks_create -> issues_create`. */
+const counterpartOperationMapping: OperationMapping = {
+  id: "om-2",
+  mappingId: "m-2",
+  sourceOperationRef: "tasks/tasks_create",
+  targetOperationRef: "issues/issues_create",
+  action: "create",
+};
+
+const counterpartField: FieldMapping = {
+  id: "fm-2",
+  mappingId: "m-2",
+  sourcePath: "tasks/title",
+  targetPath: "issues/title",
+  transform: "rename",
+};
+
+/** The counterpart `ApprovedMapping` — Vikunja `tasks` -> Gitea `issues`, the same pair. */
+const counterpartMapping: ApprovedMapping = {
+  id: "m-2",
+  sourceSpecId: VIKUNJA_SPEC,
+  targetSpecId: GITEA_SPEC,
+  sourceAppId: VIKUNJA,
+  targetAppId: GITEA,
+  variant: "peer-peer",
+  approvedBy: "operator",
+  approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+  status: "active",
+};
+
+/** Ops over BOTH directions' specs: Gitea `issues` is writable here, so it can be a target. */
+function bidirectionalOps(
+  proposer: FakeScopeCorrespondenceProposer,
+): ScopeCorrespondenceProposalOps {
+  const specs = new Map<string, ApiSpec>([
+    [GITEA_SPEC, specOf(GITEA_SPEC, GITEA, [giteaIssuesWritable, giteaRepos])],
+    [VIKUNJA_SPEC, specOf(VIKUNJA_SPEC, VIKUNJA, VIKUNJA_IR)],
+  ]);
+  const bindings = new Map<string, ResourceBinding[]>([
+    [GITEA_SPEC, [giteaIssuesBinding, giteaReposBinding]],
+    [VIKUNJA_SPEC, [vikunjaTasksSourceBinding, vikunjaProjectsBinding]],
+  ]);
+  return {
+    specs: { getById: (id) => Promise.resolve(specs.get(id)) },
+    bindings: { listByApiSpecId: (id) => Promise.resolve(bindings.get(id) ?? []) },
+    correspondences: proposer,
+  };
+}
+
+describe("proposeScopeCorrespondences — a bidirectional pair stays stable (SS-18.6)", () => {
+  const approveDirectionA = (proposer: FakeScopeCorrespondenceProposer): Promise<unknown> =>
+    proposeScopeCorrespondences({
+      mapping: peerMapping,
+      fields: [titleField],
+      operations: [createOperationMapping],
+      ops: bidirectionalOps(proposer),
+      newId: () => "corr-a",
+    });
+
+  const approveDirectionB = (proposer: FakeScopeCorrespondenceProposer): Promise<unknown> =>
+    proposeScopeCorrespondences({
+      mapping: counterpartMapping,
+      fields: [counterpartField],
+      operations: [counterpartOperationMapping],
+      ops: bidirectionalOps(proposer),
+      newId: () => "corr-b",
+    });
+
+  it("approving direction B after A leaves A's container refs and derived mode untouched", async () => {
+    const proposer = new FakeScopeCorrespondenceProposer();
+
+    await approveDirectionA(proposer);
+    const afterA = proposer.rows.get(PAIR_REF);
+    expect(afterA?.targetContainerRef).toStrictEqual({ appId: VIKUNJA, resourceRef: "projects" });
+    expect(afterA?.sourceContainerRef).toStrictEqual({ appId: GITEA, resourceRef: "repos" });
+    const modeAfterA = derivePollScopeMode(perContainerSourceBinding, afterA);
+
+    // The counterpart direction is approved — it derives the pair mirrored (Gitea `repos`
+    // as the write container). It must not re-point the existing correspondence.
+    await approveDirectionB(proposer);
+    const afterB = proposer.rows.get(PAIR_REF);
+
+    expect(afterB).toStrictEqual(afterA);
+    expect(afterB?.targetContainerRef).toStrictEqual({ appId: VIKUNJA, resourceRef: "projects" });
+    expect(afterB?.sourceContainerRef).toStrictEqual({ appId: GITEA, resourceRef: "repos" });
+    expect(derivePollScopeMode(perContainerSourceBinding, afterB)).toBe(modeAfterA);
+    // Still exactly one correspondence for the pair, still unconfirmed.
+    expect(proposer.rows.size).toBe(1);
+    expect(afterB?.confirmedBy).toBeNull();
+  });
+
+  it("is order-independent: whichever direction is approved FIRST authors the pair", async () => {
+    const proposer = new FakeScopeCorrespondenceProposer();
+
+    await approveDirectionB(proposer);
+    const afterB = proposer.rows.get(PAIR_REF);
+    // Direction B writes into Gitea's `repos` container.
+    expect(afterB?.targetContainerRef).toStrictEqual({ appId: GITEA, resourceRef: "repos" });
+
+    await approveDirectionA(proposer);
+    expect(proposer.rows.get(PAIR_REF)).toStrictEqual(afterB);
+    expect(proposer.rows.size).toBe(1);
+  });
+
+  it("re-approving the SAME direction still re-derives it (SS-18.6 idempotent refresh)", async () => {
+    const proposer = new FakeScopeCorrespondenceProposer();
+
+    await approveDirectionA(proposer);
+    await approveDirectionB(proposer);
+    // A re-ingest/re-approval of the AUTHORING direction is still allowed through.
+    await approveDirectionA(proposer);
+
+    const stored = proposer.rows.get(PAIR_REF);
+    expect(stored?.targetContainerRef).toStrictEqual({ appId: VIKUNJA, resourceRef: "projects" });
+    expect(proposer.calls).toBe(3); // every run really did reach the write.
   });
 });

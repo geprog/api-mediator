@@ -4,6 +4,7 @@ import type {
   ScopeCorrespondence,
   SyncRule,
 } from "@mediator/domain";
+import { hasConfirmedScopeLinkBinding } from "@mediator/outbound";
 
 /**
  * **SS-13.5 — the derive-then-correct poll-enumeration mode.** Shared by the
@@ -36,9 +37,12 @@ export function derivePollScopeMode(
   sourceBinding: ResourceBinding,
   correspondence: ScopeCorrespondence | undefined,
 ): PollScopeMode {
-  const perContainerSourceRead = (sourceBinding.scopePathBindings ?? []).some(
-    (binding) =>
-      binding.kind === "scope-link" && binding.confirmedBy !== null && binding.confirmedAt !== null,
+  // The SHARED per-container predicate the source-read resolver defers its container
+  // params on (`@mediator/outbound`), not a local restatement: the resolver must leave a
+  // `{…}` templated exactly when this derivation says the Poller enumerates scopes, or a
+  // per-scope rule's source read unresolves and the rule cannot poll at all.
+  const perContainerSourceRead = hasConfirmedScopeLinkBinding(
+    sourceBinding.scopePathBindings ?? [],
   );
   if (!perContainerSourceRead) {
     // No per-container source scope param → one cross-scope call (SS-13.1). Covers the

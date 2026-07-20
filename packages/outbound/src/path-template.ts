@@ -15,7 +15,9 @@ import type { IrOperation, ScopePathBinding } from "@mediator/domain";
  *    filled from a scope; and
  *  - every other (**scope**) parameter — a container locator (`{owner}`/`{repo}`, a
  *    project `{id}`, a `{tenant}`) filled at resolution from the resource's confirmed
- *    `constant` scope bindings.
+ *    `constant` scope bindings, **or** — when the rule polls per scope (SS-13.2/SS-17) —
+ *    left templated for the per-scope container fill moments later
+ *    ({@link perScopeDeferredParamNames}).
  *
  * {@link fillScopePathParameters} performs the substitution keyed to the operation's
  * **role** (the caller names which parameter, if any, is the record id) rather than to a
@@ -124,6 +126,72 @@ export function scopeParamNamesOf(
     names.push(name);
   }
   return names;
+}
+
+/**
+ * Whether a resource's scope bindings make its reads **per-container** — i.e. carry at
+ * least one **confirmed** `scope-link` (Layer 3) entry, whose value-space is resolved
+ * through a `ScopeLink` rather than fixed at config time.
+ *
+ * This is the single definition of "per-container" shared by the poll-enumeration mode
+ * derivation (`derivePollScopeMode`, SS-13.5 — a per-container source read polls
+ * per-scope, cross-scope otherwise) and {@link perScopeDeferredParamNames} (which leaves
+ * exactly those parameters templated for the per-scope fill). Sharing it rather than
+ * mirroring it is deliberate: the resolver must defer **exactly** when the Poller polls
+ * per scope, or the two halves disagree and every scope's read unresolves.
+ *
+ * An **unconfirmed** entry counts for nothing (used nowhere until confirmed), so a
+ * half-authored L3 binding still reads as cross-scope and fails loud at the fill.
+ */
+export function hasConfirmedScopeLinkBinding(
+  scopePathBindings: readonly ScopePathBinding[],
+): boolean {
+  return scopePathBindings.some(
+    (binding) =>
+      binding.kind === "scope-link" && binding.confirmedBy !== null && binding.confirmedAt !== null,
+  );
+}
+
+/**
+ * SS-13.2/SS-17 — the scope path parameters a **per-scope** read leaves templated at
+ * resolve time, for the reader to fill per scope from the polled container's
+ * `PollScope.fillValues` (`RestSourceReader`'s `withScopeFill`).
+ *
+ * Exactly the operation's scope parameters ({@link scopeParamNamesOf} — so the record-id
+ * parameter is excluded by the same rule the fill uses, SS-4.2/SS-12.5) that carry a
+ * **confirmed `scope-link`** binding. That set is precisely what a `PollScope` can fill:
+ * its `fillValues` come from `resolveScopeLinkScopeValues`, which resolves confirmed
+ * `scope-link` entries and nothing else. Everything outside it keeps SS-4.4's fail-loud
+ * resolve-time behaviour rather than deferring a `{…}` no one downstream can fill:
+ *
+ *  - a **`constant`** parameter fills from its literal at resolve time (L1 unchanged);
+ *  - a **`record-derived`** parameter is filled from a *record's* captured scope, which a
+ *    collection poll does not have — deferring it would only move the same failure from
+ *    the resolver to the wire-side backstop, later and per scope;
+ *  - an **unbound / unconfirmed** parameter unresolves the whole binding, as before.
+ *
+ * A deferred `{…}` that survives the per-scope fill is still refused by
+ * {@link findUnfilledPathParam} before the wire — never a literal-brace URL.
+ */
+export function perScopeDeferredParamNames(
+  operation: IrOperation,
+  scopePathBindings: readonly ScopePathBinding[],
+  recordIdParamName: string | undefined,
+): ReadonlySet<string> {
+  const deferred = new Set<string>();
+  for (const name of scopeParamNamesOf(operation, recordIdParamName)) {
+    const bound = scopePathBindings.some(
+      (binding) =>
+        binding.kind === "scope-link" &&
+        binding.parameterName === name &&
+        binding.confirmedBy !== null &&
+        binding.confirmedAt !== null,
+    );
+    if (bound) {
+      deferred.add(name);
+    }
+  }
+  return deferred;
 }
 
 /**
