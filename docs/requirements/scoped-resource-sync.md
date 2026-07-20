@@ -849,6 +849,86 @@ the per-scope-enumerated capstone e2e. **No migration.**
 
 ---
 
+## SS-18 — Author / derive a scope-linked resource pair (the L3 configuration entry point)
+
+**As an** operator, **I** have the mediator **propose** that a resource pair is scope-linked — deriving its
+container correspondence and a candidate scope identity key — and let me select `scope-link` as a scope
+parameter's fill source, **so that** a multi-container pair can actually be configured, instead of every L3
+capability being unreachable.
+
+> **Why this story exists.** SS-10..SS-17 built the whole L3 **mechanism** (domain, establishment, resolver
+> + delete routing, per-scope poll, scoped identity, gate, live enumeration, confirm/link UI), but nothing
+> **configures** it: there is **no production writer of `ScopeCorrespondence`** (the SS-15.4 confirm handler
+> 404s unless the row already exists), and `scope-link` is a **disabled** option in the SS-9 kind selector
+> (`SelectableScopeBindingKind` = `constant` | `record-derived`). SS-10.2 specifies "derive-then-confirm
+> (**proposed** by name/type similarity, operator-confirmed)" — the *proposal* half was never built. So an
+> L3 pair cannot be configured end to end and every SS-10..17 capability is unreachable in production.
+> SS-18 is the missing **proposal/derivation + kind-enablement glue**, not a parallel mechanism: it reuses
+> the SS-15.4 confirmation panel, the RB-3 binding-confirm flow, the SS-9 kind selector, and
+> `ScopeCorrespondenceRepository.confirmOrUpdate`. It coins **no new domain term** and needs **no
+> migration**.
+
+### Acceptance criteria
+
+1. **Given** a resource pair whose approved target write operation carries a **container path parameter** (a
+   scope path parameter that is not the record id — SS-4) satisfied by neither a single `constant` container
+   nor a `record-derived` shared value-space, **when** the pair's downstream artifacts are instantiated on
+   `MappingApproved` (the moment source *and* target resources are both known — Phase-3 approval), **then**
+   the mediator **proposes** a `ScopeCorrespondence` for that pair, created **unconfirmed**
+   (`confirmedBy`/`confirmedAt` null), carrying derived `sourceContainerRef`, `targetContainerRef`, and a
+   candidate `scopeIdentityKey` — **one per scoped resource pair** (SS-10.1).
+2. **Given** container-resource derivation, **when** the proposal runs, **then** `targetContainerRef` is the
+   IR resource whose native id addresses the target container path parameter (Vikunja `projects` for
+   `PUT /projects/{id}/tasks`), and `sourceContainerRef` is the IR resource whose identity the source's
+   `sourceScopeRef` components address (Gitea `repos` for `{owner}`/`{repo}`); `sourceContainerRef` is
+   **absent** when the source container is not enumerable (the SS-13.4 pinned case) — which is exactly what
+   makes the rule derive as `per-scope-pinned` rather than `per-scope-enumerated` (SS-13.5).
+3. **Given** the candidate `scopeIdentityKey`, **when** it is derived, **then** each source `sourceScopeRef`
+   component is paired to the target container field of closest **name/type similarity** (source `name` ↔
+   target `title`), restricted to **value-preserving** (`rename`-only) pairings (SS-10.2) — **proposed,
+   never auto-confirmed**; the operator confirms or corrects it in the SS-15.4 panel, which remains the only
+   writer of `confirmedBy`/`confirmedAt`.
+4. **Given** a pair with a proposed `ScopeCorrespondence`, **when** the SS-9 scope-binding kind selector
+   renders for one of that pair's container path parameters, **then** `scope-link` is **selectable** (no
+   longer the disabled "Layer 3 — not yet available" option); **when** the operator selects it, **then** a
+   `scope-link` `scopePathBinding` is written `{ kind, parameterName, scopeKeyRef, confirmedBy,
+   confirmedAt }` with a **derived** `scopeKeyRef` (which target `appXScopeKey` component addresses this
+   parameter), left **unconfirmed** until the operator confirms it (SS-9.2 semantics otherwise unchanged).
+5. **Given** the container list operations SS-11/SS-13/SS-15/SS-17 consume, **when** the correspondence is
+   proposed, **then** `targetContainerRef.collectionReadRef` and — where the source container is enumerable
+   — `sourceContainerRef.collectionReadRef` + `paginationRef` are derived on those container resources and
+   surfaced as **ordinary RB-3 binding-confirmation rows** (reusing the Phase-1 confirm mechanism, not a new
+   one), so the SS-15.2 gate can block on them until confirmed.
+6. **Given** re-derivation (a re-ingested spec, a re-run instantiation, a second approval), **when** it
+   runs, **then** it is **idempotent**: never a duplicate `ScopeCorrespondence` (one per pair), and it
+   **never clobbers a confirmed** `scopeIdentityKey` or a confirmed `scope-link` binding; an **unconfirmed**
+   candidate may be refreshed by a newer derivation.
+7. **Given** a spec change that removes or renames the container path parameter or the target container
+   identity field, **when** it is applied, **then** the affected `scope-link` binding and/or
+   `scopeIdentityKey` return to **unconfirmed** and the dependent `SyncRule`s pause — the SS-16 lifecycle
+   rules apply to these proposed artifacts exactly as to any other derived-then-confirmed binding.
+8. **Given** any authoring surface this story adds, **when** a `viewer` opens it, **then** it renders
+   **read-only** (OA-2); and **given** the whole flow, **when** it completes, **then** nothing is silently
+   auto-confirmed — every proposed artifact is unconfirmed until an operator ratifies it (derive-then-confirm
+   end to end).
+
+### Out of scope
+
+- Establishing `ScopeLink` **instances** (container↔container) — SS-11. Confirming the scope identity key —
+  SS-15.4. Linking/unlinking containers — SS-15.5. Enabling the rule — SS-15.1-3.
+- Proposing a correspondence for a pair that is **not** scoped (no container path parameter): nothing is
+  created and the SS-9 selector keeps `scope-link` unavailable for it.
+
+### Dependencies
+
+Blocked by SS-10 (the entity + `confirmOrUpdate`), SS-4 (record-id-vs-scope classification), SS-7
+(`sourceScopeRef`), SS-9 (the kind selector this extends), Phase-1 **RB-3** (binding confirmation), and
+Phase-3 approval / downstream-artifact instantiation (the proposal trigger). Precedes the **Slice D**
+capstone e2e, which cannot configure an L3 pair without it. **No migration** — `scope_correspondence`,
+`scope_link`, and `resource_binding.scope_path_bindings` all already exist (migrations 0016-0019).
+
+---
+
 ## Out of scope (whole file)
 
 - **The Adapter-Engine `ParameterMapping` path (Phase 5).** Separate mechanism (fills from an inbound
@@ -901,7 +981,13 @@ dependencies below. **None needs a migration** (all reuse `ScopeLink` + `poll_sc
    **Blocked by** Slice A (the gate API + its "still needs" distinctions) and Slice B (the container-linking
    screen also lists SS-17's newly-parked containers, SS-15.5). May proceed in parallel with D once A + B
    land.
-4. **Slice D — Capstone scoped e2e.** A real Gitea↔Vikunja multi-scope round: per-scope enable → backfill →
+4. **Slice C2 — SS-18 authoring / derivation (the L3 configuration entry point).** Propose the
+   `ScopeCorrespondence` on `MappingApproved` (derived container refs + a candidate `scopeIdentityKey` by
+   name/type similarity), surface the container list ops as RB-3 confirm rows, and make `scope-link` a
+   **selectable** SS-9 kind that writes a derived-but-unconfirmed `scope-link` binding. **Blocked by**
+   SS-10/SS-9/RB-3 (built) and Slices A-C (merged). **Unblocks Slice D** — without it no L3 pair can be
+   configured, so every SS-10..17 capability is unreachable. No migration.
+5. **Slice D — Capstone scoped e2e.** A real Gitea↔Vikunja multi-scope round: per-scope enable → backfill →
    poll each container → propagate → **no echo** (mirrors SU-6). **Blocked by** Slices A + B (enable + run)
    and C where the journey is UI-driven. **Fixture caveat — see open question 9:** scenario-1's *trimmed*
    Gitea spec has **no repo-list**, so per-scope-**enumerated** read (SS-17.1) cannot run against it; the
