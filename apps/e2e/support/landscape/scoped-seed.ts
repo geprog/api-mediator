@@ -674,13 +674,26 @@ async function purgeRunAuditRows(
   return deleted.length;
 }
 
+/** Run the quiesce, returning its failure instead of throwing it (see {@link cleanupScopedSyncScaffold}). */
+async function captureQuiesceFailure(): Promise<Error | undefined> {
+  try {
+    await quiesceOrderingQueue();
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
 /** Remove everything the scaffold (and any sync run it drove) created, in FK-safe order. */
 export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): Promise<void> {
   const db = await getTestDb();
   const appIds = [scaffold.giteaAppId, scaffold.vikunjaAppId];
 
   // Let in-flight dispatch finish against intact state before anything is removed.
-  await quiesceOrderingQueue();
+  // A quiesce that never settles must NOT abort the deletion — that would leak the whole
+  // scaffold into the shared database instead of one audit row. It is captured and
+  // re-thrown after cleanup has run, so the run still fails loudly.
+  const quiesceError = await captureQuiesceFailure();
 
   // The runtime tables this journey is the only writer of.
   await db.delete(orderingQueue);
@@ -763,4 +776,9 @@ export async function cleanupScopedSyncScaffold(scaffold: ScopedSyncScaffold): P
       message: "no audit row from this run may survive cleanup (SS-11.5 parked queue is global)",
     })
     .toBe(0);
+
+  // Everything is removed; now surface a quiesce that never settled.
+  if (quiesceError !== undefined) {
+    throw quiesceError;
+  }
 }
