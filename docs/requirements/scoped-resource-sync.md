@@ -999,8 +999,13 @@ works in both directions.
 - **Backfilling addresses onto existing `RecordLink`s.** A link established before the ref was confirmed
   parks on its next write (criterion 5) rather than being silently repaired; re-linking the record, or a
   fresh backfill, establishes it with an address. A bulk repair pass is a separate slice.
-- **Manual-link address supply through the UI.** `linkManually` accepts the two addresses, but the
-  container-linking screen (SS-15.5) does not yet resolve and pass them.
+- **Manual-link address supply.** `linkManually` accepts the two addresses, but **no production caller
+  supplies them**: the operator manual-link API (`SyncOperatorService.linkRecords`) knows only the two
+  native ids the operator typed, and resolving an address means reading both records back out of their
+  apps — the same machinery the queued address-repair sweep will own. So a manual link on a scoped,
+  address-confirmed pair is established without addresses and parks on its first write. Consequently the
+  criterion-5 park's remedy points at **unlink + backfill** and deliberately does *not* suggest re-linking
+  manually, which would produce another addressless link and park again.
 - **Using the address anywhere in identity.** It is addressing-only by construction: an address is unique
   only inside its container, so it never keys a lookup, an index, an idempotency key, or a queue key.
 - **A single-record read that is not part of a linked write.** Only the drift-read / PUT read-carry paths,

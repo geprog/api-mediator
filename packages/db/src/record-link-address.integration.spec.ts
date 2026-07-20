@@ -131,21 +131,53 @@ suite("SS-19 record-address persistence integration (requires Postgres)", () => 
     expect(loaded?.appBRecordAddress).toBe("7");
   });
 
-  it("colliding addresses across containers both persist — an address is NOT an identity", async () => {
+  it("colliding addresses both persist — the address participates in NO unique/identity index", async () => {
     const repo = new RecordLinkRepository(db);
     // Repo A's #1 and repo B's #1: the same container-relative address, globally distinct
-    // records. If the address were ever part of a unique/identity index, the second insert
-    // would fail — and that failure would be the record-merge bug this system guards hardest
-    // against, just relocated into the schema.
-    const inPhoenix = makeLink({ appBNativeId: "5001", appBRecordAddress: "1" });
-    const inAtlas = makeLink({ appBNativeId: "9002", appBRecordAddress: "1" });
+    // records. To make this falsifiable the ADDRESS dimension must be the only thing the two
+    // links share-and-collide on, so everything the real indexes key by is held **constant**
+    // (`resourcePairRef`, `appAId`, `appBId`) and only the native ids vary — the minimum that
+    // keeps native-id uniqueness satisfiable for two genuinely distinct records.
+    //
+    // Under the real schema both insert. Under the hypothetical this test exists to exclude —
+    // an index that keys a side by its address instead of its native id, i.e.
+    // `(resource_pair_ref, app_b_id, app_b_record_address)` — the second insert would be
+    // rejected, because the two differ *only* in native id. That rejection would be the
+    // record-merge bug this system guards hardest against, relocated into the schema.
+    const appAId = randomUUID();
+    const appBId = randomUUID();
+    const resourcePairRef = "pair::issues";
+    const shared = { appAId, appBId, resourcePairRef, appARecordAddress: "1" } as const;
+    const inPhoenix = makeLink({
+      ...shared,
+      appANativeId: "task-11",
+      appBNativeId: "5001",
+      appBRecordAddress: "1",
+    });
+    const inAtlas = makeLink({
+      ...shared,
+      appANativeId: "task-22",
+      appBNativeId: "9002",
+      appBRecordAddress: "1",
+    });
     await repo.insert(inPhoenix);
     await expect(repo.insert(inAtlas)).resolves.toBeUndefined();
 
+    // Both sides' addresses collide across the two links, on the same pair and the same apps.
     expect((await repo.getById(inPhoenix.id))?.appBRecordAddress).toBe("1");
     expect((await repo.getById(inAtlas.id))?.appBRecordAddress).toBe("1");
-    // ...and they remain two distinct links, correlated by their distinct global ids.
-    expect(inPhoenix.id).not.toBe(inAtlas.id);
+    expect((await repo.getById(inPhoenix.id))?.appARecordAddress).toBe("1");
+
+    // ...and resolution still discriminates by NATIVE ID despite the identical addresses:
+    // each lookup returns its own link, never the other. This is the positive half of the
+    // claim — the address is not merely absent from the indexes, it is absent from the
+    // resolve path the whole pipeline routes through.
+    expect(
+      (await repo.findActiveByRecord(resourcePairRef, { appId: appBId, nativeId: "5001" }))?.id,
+    ).toBe(inPhoenix.id);
+    expect(
+      (await repo.findActiveByRecord(resourcePairRef, { appId: appBId, nativeId: "9002" }))?.id,
+    ).toBe(inAtlas.id);
   });
 
   it("the `recordAddressRef` ref kind exists in the Postgres enum and persists unconfirmed → confirmed", async () => {

@@ -1101,8 +1101,15 @@ export class SyncPipelineHandler {
       case "stored-address": {
         const address = targetRecordAddressOf(link, sourceSide);
         if (address === undefined) {
+          // Deliberately states the CONDITION, not a presumed cause. Several situations
+          // produce it — a link established before the ref was confirmed, or a ref confirmed
+          // to an `operation`/`parameter` IR target that resolves to no record field — so
+          // naming one would misdiagnose the others. The remedy must also not loop: a manual
+          // re-link does NOT currently supply an address (see `ManualLinkParams`), so it
+          // would produce another addressless link and park again. Backfill is the only path
+          // that re-establishes the link WITH its address today.
           throw new RecordAddressUnresolvedError(
-            "the RecordLink carries no container-relative address for the target side — it predates the confirmed recordAddressRef; re-link the record (or replay after a fresh backfill), then replay",
+            "no container-relative address is stored on this RecordLink for the target side, so the record cannot be addressed inside its container — unlink the record and re-run backfill to re-establish the link with its address, then replay",
           );
         }
         return address;

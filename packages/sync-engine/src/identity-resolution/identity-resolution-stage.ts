@@ -93,8 +93,15 @@ export interface ManualLinkParams {
   /**
    * SS-19 — each side's **container-relative address**, frozen onto the link so a later
    * update/delete addresses the record inside its container. Absent per side when that
-   * side addresses by its native id; the manual-linking UI resolves them from the two
-   * records it just paired.
+   * side addresses by its native id.
+   *
+   * **No production caller supplies these yet.** The operator manual-link API
+   * (`SyncOperatorService.linkRecords`) knows only the two native ids the operator typed;
+   * resolving an address would mean reading both records back out of their apps, which is
+   * the same machinery the queued address-repair sweep will own. Until then a manual link
+   * on a scoped, address-confirmed pair is established **without** addresses and parks on
+   * its first write — which is why that park's remedy points at unlink + backfill and
+   * deliberately does **not** suggest re-linking manually (it would loop).
    */
   readonly appARecordAddress?: string;
   readonly appBRecordAddress?: string;
