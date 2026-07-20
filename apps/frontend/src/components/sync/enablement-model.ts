@@ -23,17 +23,21 @@ import type {
 /** The operator's backfill decision — one of these, chosen explicitly (never defaulted). */
 export type BackfillChoice = "link-only" | "push" | "skip";
 
-/** One rendered checklist blocker: a stable key, a human label, and an optional deep link. */
+/**
+ * A checklist blocker's **call-to-action**: the route that fixes it plus the link label
+ * (a Phase-1 `ResourceBinding` confirm panel, the SS-15.4 scope-identity-key panel, or the
+ * SS-15.5 container-linking screen). `null` for a bare blocker with no in-app fix surface.
+ */
+export interface EnablementAction {
+  readonly to: string;
+  readonly label: string;
+}
+
+/** One rendered checklist blocker: a stable key, a human label, and an optional call-to-action. */
 export interface EnablementChecklistItem {
   readonly key: string;
   readonly label: string;
-  /**
-   * SU-5.1 — for an unconfirmed `ResourceBinding` ref blocker, the route to the
-   * Phase-1 binding-confirmation panel (RB-3). The SA-2 DTO carries the owning app
-   * id (not the spec id), so this deep-links to that side's app-detail page, whose
-   * spec list reaches the binding panel. `null` for non-ref blockers.
-   */
-  readonly bindingLink: string | null;
+  readonly action: EnablementAction | null;
 }
 
 /** Whether an enabled rule is still backfilling (not yet polling), polling, or disabled (BE-3). */
@@ -77,10 +81,39 @@ function bindingLinkFor(
   return `/apps/${encodeURIComponent(resourcePair[side].appId)}`;
 }
 
-/** Glossary-exact human label + deep link for one hard-blocker requirement. */
+/** SU-5.1 — the "confirm this `ResourceBinding` ref" call-to-action for a side, or `null`. */
+function bindingAction(
+  side: "source" | "target",
+  resourcePair: SyncRuleResourcePairDto | null,
+): EnablementAction | null {
+  const to = bindingLinkFor(side, resourcePair);
+  return to === null ? null : { to, label: "Confirm binding →" };
+}
+
+/**
+ * SS-15.4 — the "confirm the scope identity key" call-to-action, deep-linking to the
+ * confirmation panel (SS-15.4) for this pair. `null` when the resource pair ref is unknown.
+ */
+function scopeIdentityKeyAction(resourcePairRef: string): EnablementAction | null {
+  return resourcePairRef === ""
+    ? null
+    : {
+        to: `/sync/scope-identity-key?pair=${encodeURIComponent(resourcePairRef)}`,
+        label: "Confirm scope identity key →",
+      };
+}
+
+/** SS-15.5 — the "link containers" call-to-action, to the container-linking screen. */
+const CONTAINER_LINKING_ACTION: EnablementAction = {
+  to: "/sync/container-links",
+  label: "Link containers →",
+};
+
+/** Glossary-exact human label + call-to-action for one hard-blocker requirement. */
 export function describeRequirement(
   requirement: EnablementRequirementDto,
   resourcePair: SyncRuleResourcePairDto | null,
+  resourcePairRef = "",
 ): EnablementChecklistItem {
   switch (requirement.kind) {
     case "identity-key":
@@ -90,20 +123,20 @@ export function describeRequirement(
           requirement.issue === "missing"
             ? "Confirm the identity key — no identity FieldMapping is set (a rule cannot merge records without exactly one)."
             : `Confirm exactly one identity key — ${String(requirement.confirmedCount)} are set (ambiguous).`,
-        bindingLink: null,
+        action: null,
       };
     case "poll-operation-ref":
       return {
         key: "poll-operation-ref",
         label: "Confirm the poll operation (pollOperationRef) the source is polled on.",
-        bindingLink: null,
+        action: null,
       };
     case "propagatable-operation":
       return {
         key: "propagatable-operation",
         label:
           "Approve a create or update target operation — the rule has nothing it can propagate.",
-        bindingLink: null,
+        action: null,
       };
     case "target-operation":
       return {
@@ -112,13 +145,13 @@ export function describeRequirement(
           requirement.issue === "missing"
             ? `Approve a target ${requirement.action} operation (delete propagation needs one).`
             : `The target ${requirement.action} operation needs its target-id parameter (targetIdParamRef) to route via the RecordLink.`,
-        bindingLink: null,
+        action: null,
       };
     case "binding-ref":
       return {
         key: `binding-ref:${requirement.side}:${requirement.ref}`,
         label: `Confirm the ${requirement.side} ResourceBinding ${requirement.ref} (used for ${requirement.usedFor}).`,
-        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+        action: bindingAction(requirement.side, resourcePair),
       };
     case "identity-lookup-path":
       // Not a hard blocker (surfaced as a degradation); described defensively for totality.
@@ -126,7 +159,7 @@ export function describeRequirement(
         key: "identity-lookup-path",
         label:
           "No identity-lookup path — match-first is unavailable; enable only with backfill skipped.",
-        bindingLink: null,
+        action: null,
       };
     case "scope-binding":
       // SS-5.4 / SS-9.1b — a hard blocker; the full supply/confirm panel is SS-6/SS-9.
@@ -135,7 +168,7 @@ export function describeRequirement(
       return {
         key: `scope-binding:${requirement.side}:${requirement.parameterName}`,
         label: `Supply and confirm the ${requirement.side} scope path-parameter '${requirement.parameterName}' on ${requirement.resourceRef}.`,
-        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+        action: bindingAction(requirement.side, resourcePair),
       };
     case "source-scope-ref":
       // SS-9.1a — a hard blocker: the source record's scope capture (sourceScopeRef) must
@@ -147,27 +180,27 @@ export function describeRequirement(
       return {
         key: `source-scope-ref:${requirement.side}:${requirement.resourceRef}:${requirement.sourceScopeKey}`,
         label: `Confirm the ${requirement.side} record scope capture (sourceScopeRef) carrying the component '${requirement.sourceScopeKey}' on ${requirement.resourceRef}.`,
-        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+        action: bindingAction(requirement.side, resourcePair),
       };
     case "scope-identity-key":
       // SS-15.1/15.3 — a hard blocker: the pair's ScopeCorrespondence scope identity key must
-      // be confirmed before any record's container can resolve. The confirmation panel (SS-15.4)
-      // is Slice C UI; surfaced here as a checklist row with no existing deep link.
+      // be confirmed before any record's container can resolve. The call-to-action deep-links
+      // to the SS-15.4 confirmation panel for this pair.
       return {
         key: "scope-identity-key",
         label:
           "Confirm the scope identity key (ScopeCorrespondence) — the source↔target container pairing a scoped rule resolves each record's container through.",
-        bindingLink: null,
+        action: scopeIdentityKeyAction(resourcePairRef),
       };
     case "scope-link":
       // SS-15.1/15.3 — a hard blocker for a per-scope-pinned rule: the source container is not
       // enumerable, so at least one ScopeLink must be pinned to cover the scopes in play. The
-      // container-linking screen (SS-15.5) is Slice C UI; no existing deep link.
+      // call-to-action opens the SS-15.5 container-linking screen.
       return {
         key: "scope-link",
         label:
           "Link containers — no ScopeLink covers the scopes in play (this source is not enumerable, so scopes must be pinned).",
-        bindingLink: null,
+        action: CONTAINER_LINKING_ACTION,
       };
     case "container-list-op":
       // SS-15.2/15.3 — a hard blocker: the source/target container resource's collection read
@@ -176,7 +209,7 @@ export function describeRequirement(
       return {
         key: `container-list-op:${requirement.side}`,
         label: `Confirm the ${requirement.side} container list operation (collectionReadRef) so its containers can be enumerated.`,
-        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+        action: bindingAction(requirement.side, resourcePair),
       };
   }
 }
@@ -185,12 +218,12 @@ export function describeRequirement(
 export function enablementChecklist(
   stillNeeds: readonly EnablementRequirementDto[],
   resourcePair: SyncRuleResourcePairDto | null,
+  resourcePairRef = "",
 ): readonly EnablementChecklistItem[] {
   return blockingRequirements(stillNeeds).map((requirement) =>
-    describeRequirement(requirement, resourcePair),
+    describeRequirement(requirement, resourcePair, resourcePairRef),
   );
 }
-
 /**
  * The counterpart rule of a bidirectional pair: another rule with the **same**
  * `resourcePairRef`. `null` means the rule is one-way (SU-1.4 source-of-truth).

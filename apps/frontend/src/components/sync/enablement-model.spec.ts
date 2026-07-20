@@ -64,7 +64,7 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     const items = enablementChecklist(stillNeeds, PAIR);
     expect(items).toHaveLength(2);
     const bindingItem = items.find((item) => item.key === "binding-ref:target:nativeIdRef");
-    expect(bindingItem?.bindingLink).toBe("/apps/app-vikunja");
+    expect(bindingItem?.action?.to).toBe("/apps/app-vikunja");
     expect(items[0]?.label).toContain("identity key");
   });
 
@@ -80,7 +80,7 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     expect(item?.label).toContain("owner");
     expect(item?.label).toContain("issues");
     // Deep-links to the source side's app, whose spec reaches the RB-3 binding panel.
-    expect(item?.bindingLink).toBe("/apps/app-gitea");
+    expect(item?.action?.to).toBe("/apps/app-gitea");
   });
 
   it("keeps a scope-binding among the hard blockers so enable stays gated (SS-6.1)", () => {
@@ -106,7 +106,7 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     expect(item?.label).toContain("issues");
     expect(item?.label).toContain("sourceScopeRef");
     // Deep-links to the source side's app, whose spec reaches the RB-3 binding panel.
-    expect(item?.bindingLink).toBe("/apps/app-gitea");
+    expect(item?.action?.to).toBe("/apps/app-gitea");
   });
 
   it("keeps a source-scope-ref among the hard blockers so enable stays gated (SS-9.1a)", () => {
@@ -162,24 +162,31 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     ]);
   });
 
-  it("labels the scope-identity-key blocker and gives it no deep link (SS-15.4 panel is Slice C)", () => {
-    const item = describeRequirement({ kind: "scope-identity-key" }, PAIR);
+  it("deep-links the scope-identity-key blocker to the SS-15.4 confirmation panel for the pair", () => {
+    const item = describeRequirement({ kind: "scope-identity-key" }, PAIR, "pair-issues-tasks");
     expect(item.label).toContain("scope identity key");
-    expect(item.bindingLink).toBeNull();
+    expect(item.action?.to).toBe("/sync/scope-identity-key?pair=pair-issues-tasks");
+    expect(item.action?.label).toContain("scope identity key");
   });
 
-  it("labels the pinned scope-link blocker and gives it no deep link (SS-15.5 screen is Slice C)", () => {
+  it("gives the scope-identity-key blocker no deep link when the pair ref is unknown", () => {
+    const item = describeRequirement({ kind: "scope-identity-key" }, PAIR);
+    expect(item.action).toBeNull();
+  });
+
+  it("deep-links the pinned scope-link blocker to the SS-15.5 container-linking screen", () => {
     const item = describeRequirement({ kind: "scope-link" }, PAIR);
     expect(item.label).toContain("ScopeLink");
-    expect(item.bindingLink).toBeNull();
+    expect(item.action?.to).toBe("/sync/container-links");
+    expect(item.action?.label).toContain("Link containers");
   });
 
   it("deep-links a container-list-op blocker to its side's app (SS-15.2)", () => {
     expect(
-      describeRequirement({ kind: "container-list-op", side: "target" }, PAIR).bindingLink,
+      describeRequirement({ kind: "container-list-op", side: "target" }, PAIR).action?.to,
     ).toBe("/apps/app-vikunja");
     expect(
-      describeRequirement({ kind: "container-list-op", side: "source" }, PAIR).bindingLink,
+      describeRequirement({ kind: "container-list-op", side: "source" }, PAIR).action?.to,
     ).toBe("/apps/app-gitea");
   });
 
@@ -201,7 +208,7 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
       PAIR,
     );
     expect(item.label).toContain("deltaCursorRef");
-    expect(item.bindingLink).toBe("/apps/app-gitea");
+    expect(item.action?.to).toBe("/apps/app-gitea");
   });
 });
 

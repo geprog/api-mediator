@@ -11,6 +11,8 @@ import {
   pollScopeModeSchema,
   recordLinkEstablishedBySchema,
   recordLinkStatusSchema,
+  scopeContainerRefSchema,
+  scopeIdentityKeySchema,
   scopeKeySchema,
   scopeLinkEstablishedBySchema,
   scopeLinkStatusSchema,
@@ -622,3 +624,77 @@ export const triggerPollResponseSchema = z.object({
   outcome: pollRunOutcomeDtoSchema,
 });
 export type TriggerPollResponse = z.infer<typeof triggerPollResponseSchema>;
+
+// ── SS-15: scope identity key confirmation + container-linking candidates ──────
+
+/**
+ * A `ScopeCorrespondence` on the wire (SS-10) — the direction-agnostic container
+ * correlation config for one scoped resource pair: its **scope identity key** (the
+ * value-preserving pairing *source `sourceScopeRef` component ↔ target container
+ * field*), the container refs, and the confirmation stamps. Ids / IR field paths /
+ * config only — **no credential material, no live payload value**. `scopeIdentityKey`
+ * reuses the domain schema **verbatim**, so its value-preserving (`rename`-only)
+ * refinement travels with the DTO.
+ */
+export const scopeCorrespondenceDtoSchema = z.object({
+  id: z.string(),
+  resourcePairRef: z.string(),
+  scopeIdentityKey: scopeIdentityKeySchema,
+  targetContainerRef: scopeContainerRefSchema,
+  sourceContainerRef: scopeContainerRefSchema.optional(),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: isoDateTimeSchema.nullable(),
+});
+export type ScopeCorrespondenceDto = z.infer<typeof scopeCorrespondenceDtoSchema>;
+
+/**
+ * `GET /api/scope-identity-key?resourcePairRef=…` response (SS-15.4): the
+ * derive-then-correct read behind the scope-identity-key confirmation panel. Carries
+ * the pair's `ScopeCorrespondence` — home of the mediator's pre-selected candidate
+ * `scopeIdentityKey` (SS-10) the operator confirms or corrects — or `null` when the
+ * pair has no correspondence yet.
+ */
+export const scopeIdentityKeyDerivationResponseSchema = z.object({
+  resourcePairRef: z.string(),
+  correspondence: scopeCorrespondenceDtoSchema.nullable(),
+});
+export type ScopeIdentityKeyDerivationResponse = z.infer<
+  typeof scopeIdentityKeyDerivationResponseSchema
+>;
+
+/**
+ * `POST /api/scope-identity-key` request (SS-15.4): confirm (or correct) the pair's
+ * scope identity key — the value-preserving pairing(s). Rejected (400) when a pairing
+ * is value-altering (`transform` ≠ `rename`), exactly like the record identity key
+ * (AS-5): reusing {@link scopeIdentityKeySchema} carries that refinement verbatim.
+ */
+export const confirmScopeIdentityKeyRequestSchema = z.object({
+  resourcePairRef: z.string().min(1),
+  scopeIdentityKey: scopeIdentityKeySchema,
+});
+export type ConfirmScopeIdentityKeyRequest = z.infer<typeof confirmScopeIdentityKeyRequestSchema>;
+
+/** `POST /api/scope-identity-key` response (SS-15.4) — the confirmed correspondence. */
+export const confirmScopeIdentityKeyResponseSchema = z.object({
+  correspondence: scopeCorrespondenceDtoSchema,
+});
+export type ConfirmScopeIdentityKeyResponse = z.infer<typeof confirmScopeIdentityKeyResponseSchema>;
+
+/**
+ * `GET /api/scope-links/candidates?resourcePairRef=…` response (SS-15.5): the per-pair
+ * target-container linking context the container-linking screen needs to turn a parked
+ * entry's chosen **candidate target native id** into a `POST /api/scope-links` request.
+ * `targetAppId` is the correspondence's target container app; `targetScopeKeyComponent`
+ * is the target addressing scope-key component name (a `scope-link` binding's
+ * `scopeKeyRef`) the chosen native id fills — each `null` when the pair has no
+ * correspondence or no resolvable single component. Ids / component name only — **no
+ * credential material, no payload value**.
+ */
+export const scopeLinkCandidateContextResponseSchema = z.object({
+  resourcePairRef: z.string(),
+  targetAppId: z.string().nullable(),
+  targetScopeKeyComponent: z.string().nullable(),
+});
+export type ScopeLinkCandidateContextResponse = z.infer<
+  typeof scopeLinkCandidateContextResponseSchema
+>;

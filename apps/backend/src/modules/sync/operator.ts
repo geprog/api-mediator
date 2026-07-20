@@ -24,6 +24,8 @@ import type {
   ParkedConflict,
   ParkedConflictResolutionChoice,
   RecordLink,
+  ScopeCorrespondence,
+  ScopeIdentityKey,
   ScopeKey,
   ScopeLink,
   SyncRule,
@@ -247,6 +249,19 @@ export interface ParkedContainerLinkView {
   /** The candidate target container native ids (empty = unresolvable / no candidate). */
   readonly candidateTargetNativeIds: readonly string[];
   readonly observedAt: Date;
+}
+
+/** The SS-15.4 scope-identity-key confirm request (mirrors the DTO). */
+export interface ScopeIdentityKeyConfirmRequest {
+  readonly resourcePairRef: string;
+  readonly scopeIdentityKey: ScopeIdentityKey;
+}
+
+/** The SS-15.5 per-pair target-container linking context (mirrors the DTO). */
+export interface ScopeLinkCandidateContext {
+  readonly resourcePairRef: string;
+  readonly targetAppId: string | null;
+  readonly targetScopeKeyComponent: string | null;
 }
 
 /** The SA-4 resolve request (mirrors the DTO): the operator's chosen resolution. */
@@ -681,6 +696,82 @@ export class SyncOperatorService {
       });
     }
     return views;
+  }
+
+  // ── SS-15: scope identity key confirmation + container-linking context ───────
+
+  /**
+   * SS-15.4 (read) — the pair's `ScopeCorrespondence` (SS-10), or `undefined` when the
+   * pair has none yet. Home of the mediator's pre-selected candidate `scopeIdentityKey`
+   * the confirmation panel confirms/corrects. Config only, no credential material.
+   */
+  public async getScopeCorrespondence(
+    resourcePairRef: string,
+  ): Promise<ScopeCorrespondence | undefined> {
+    return this.#scopeCorrespondences.getByResourcePair(resourcePairRef);
+  }
+
+  /**
+   * SS-15.4 (write) — confirm (or correct) the pair's **scope identity key**: replace the
+   * correspondence's `scopeIdentityKey` with the operator's pairing(s) and stamp
+   * `confirmedBy`/`confirmedAt` (OA-3). A value-altering (non-`rename`) pairing is rejected
+   * upstream by the DTO schema (400); the container refs are carried from the existing
+   * correspondence untouched — this slice confirms an **established** correspondence, whose
+   * creation is SS-10/SS-11's. A pair with no correspondence is a 404.
+   */
+  public async confirmScopeIdentityKey(
+    request: ScopeIdentityKeyConfirmRequest,
+    actor: string,
+  ): Promise<ScopeCorrespondence> {
+    const existing = await this.#scopeCorrespondences.getByResourcePair(request.resourcePairRef);
+    if (existing === undefined) {
+      throw new NotFoundError(
+        `No ScopeCorrespondence for resource pair ${request.resourcePairRef} — its container correspondence (SS-10/SS-11) must be established before its scope identity key can be confirmed.`,
+      );
+    }
+    const confirmed: ScopeCorrespondence = {
+      ...existing,
+      scopeIdentityKey: request.scopeIdentityKey,
+      confirmedBy: actor,
+      confirmedAt: this.#clock(),
+    };
+    const saved = await this.#scopeCorrespondences.confirmOrUpdate(confirmed);
+    await this.#auditLog.insert(this.#attribution(actor, "scope identity key confirmed", {}));
+    return saved;
+  }
+
+  /**
+   * SS-15.5 — the per-pair target-container **linking context** the container-linking
+   * screen needs to turn a parked entry's chosen candidate target native id into a
+   * `POST /api/scope-links` request: the correspondence's target container `appId` and the
+   * target addressing scope-key **component name** (a target-side `scope-link` binding's
+   * `scopeKeyRef` — the component the chosen native id fills). Each is `null` when the pair
+   * has no correspondence or no single resolvable component. Ids / component name only.
+   */
+  public async getScopeLinkCandidateContext(
+    resourcePairRef: string,
+  ): Promise<ScopeLinkCandidateContext> {
+    const correspondence = await this.#scopeCorrespondences.getByResourcePair(resourcePairRef);
+    if (correspondence === undefined) {
+      return { resourcePairRef, targetAppId: null, targetScopeKeyComponent: null };
+    }
+    const targetAppId = correspondence.targetContainerRef.appId;
+    const rules = await this.#syncRules.listAll();
+    for (const rule of rules) {
+      if (rule.resourcePairRef !== resourcePairRef) {
+        continue;
+      }
+      const artifacts = await resolveRuleArtifacts(rule.id, this.#repos);
+      if (artifacts === undefined || artifacts.targetApp.id !== targetAppId) {
+        continue;
+      }
+      for (const entry of artifacts.targetBinding.scopePathBindings ?? []) {
+        if (entry.kind === "scope-link") {
+          return { resourcePairRef, targetAppId, targetScopeKeyComponent: entry.scopeKeyRef };
+        }
+      }
+    }
+    return { resourcePairRef, targetAppId, targetScopeKeyComponent: null };
   }
 
   /** Turn a discovery establish outcome into the established link, or a 4xx. */

@@ -4,6 +4,7 @@ import { useAuthStore } from "../stores/auth.js";
 import AppDetailView from "../views/AppDetailView.vue";
 import AppListView from "../views/AppListView.vue";
 import ConflictResolutionView from "../views/ConflictResolutionView.vue";
+import ContainerLinkingView from "../views/ContainerLinkingView.vue";
 import HealthView from "../views/HealthView.vue";
 import LoginView from "../views/LoginView.vue";
 import ManualLinkingView from "../views/ManualLinkingView.vue";
@@ -11,6 +12,7 @@ import ParkedWritesView from "../views/ParkedWritesView.vue";
 import ProposalListView from "../views/ProposalListView.vue";
 import ProposalReviewView from "../views/ProposalReviewView.vue";
 import RegisterAppView from "../views/RegisterAppView.vue";
+import ScopeIdentityKeyView from "../views/ScopeIdentityKeyView.vue";
 import SpecView from "../views/SpecView.vue";
 import SyncRuleView from "../views/SyncRuleView.vue";
 import SyncRulesView from "../views/SyncRulesView.vue";
@@ -33,6 +35,16 @@ const routes: readonly RouteRecordRaw[] = [
   { path: "/sync", name: "sync-rules", component: SyncRulesView },
   { path: "/sync/rules/:id", name: "sync-rule", component: SyncRuleView },
   { path: "/sync/manual-links", name: "sync-manual-links", component: ManualLinkingView },
+  {
+    path: "/sync/container-links",
+    name: "sync-container-links",
+    component: ContainerLinkingView,
+  },
+  {
+    path: "/sync/scope-identity-key",
+    name: "sync-scope-identity-key",
+    component: ScopeIdentityKeyView,
+  },
   { path: "/sync/conflicts", name: "sync-conflicts", component: ConflictResolutionView },
   { path: "/sync/dead-letter", name: "sync-dead-letter", component: ParkedWritesView },
   { path: "/status", name: "status", component: HealthView },

@@ -2,6 +2,7 @@ import {
   createScopeLinkRequestSchema,
   createScopeLinkResponseSchema,
   parkedContainerLinkListResponseSchema,
+  scopeLinkCandidateContextResponseSchema,
   unlinkScopeLinkResponseSchema,
 } from "@mediator/contracts";
 import type { FastifyInstance } from "fastify";
@@ -25,13 +26,15 @@ import { toParkedContainerLinkDto, toScopeLinkDto } from "./sync-dto.js";
  * These are the thin endpoints the SS-15 container-linking UI (and an e2e) will drive;
  * no frontend ships here.
  *
- * - `GET    /api/scope-links/parked` (viewer)   — SS-11.5 the parked container-link queue
+ * - `GET    /api/scope-links/parked`     (viewer)   — SS-11.5 the parked container-link queue
+ * - `GET    /api/scope-links/candidates` (viewer)   — SS-15.5 per-pair target linking context
  * - `POST   /api/scope-links`        (operator) — SS-11.6 manual container link
  * - `DELETE /api/scope-links/:id`    (operator) — SS-11.6 unlink a container link
  */
 const parkedQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).optional(),
 });
+const candidatesQuerySchema = z.object({ resourcePairRef: z.string().min(1) });
 
 export function registerScopeLinkRoutes(app: FastifyInstance, sync: SyncOperatorService): void {
   // ── SS-11.5: the parked container-linking queue (surfaced from discovery failures) ──
@@ -44,6 +47,21 @@ export function registerScopeLinkRoutes(app: FastifyInstance, sync: SyncOperator
       return parkedContainerLinkListResponseSchema.parse({
         parked: parked.map(toParkedContainerLinkDto),
       });
+    },
+  );
+
+  // ── SS-15.5: per-pair target-container linking context (targetAppId + component) ──
+  app.get(
+    "/api/scope-links/candidates",
+    { preHandler: requireViewer },
+    async (request): Promise<unknown> => {
+      const { resourcePairRef } = parseInput(
+        candidatesQuerySchema,
+        request.query,
+        "query parameters",
+      );
+      const context = await sync.getScopeLinkCandidateContext(resourcePairRef);
+      return scopeLinkCandidateContextResponseSchema.parse(context);
     },
   );
 
