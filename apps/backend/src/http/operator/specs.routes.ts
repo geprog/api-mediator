@@ -67,7 +67,19 @@ export function registerSpecRoutes(app: FastifyInstance, deps: OperatorApiDeps):
       }
       const bindings = await deps.bindingReader.listByApiSpecId(id);
       const response: ResourceBindingsResponse = {
-        bindings: bindings.map((binding) => toResourceBindingDto(binding, owner.capabilities)),
+        // SS-18.4 — each binding carries its own kind-selector context (`scope-link`
+        // selectable + the derived `scopeKeyRef`), resolved from the pair's proposed
+        // `ScopeCorrespondence`. Sequential: the resolver short-circuits for the many
+        // scope-parameter-free resources, so this is one query for the few that have one.
+        bindings: await Promise.all(
+          bindings.map(async (binding) =>
+            toResourceBindingDto(
+              binding,
+              owner.capabilities,
+              await deps.scopeLinkAuthoring.resolve(binding, spec.appId),
+            ),
+          ),
+        ),
       };
       return resourceBindingsResponseSchema.parse(response);
     },

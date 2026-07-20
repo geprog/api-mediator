@@ -290,8 +290,12 @@ function hasScopeLinkEntry(binding: ResourceBinding): boolean {
  * because it must *enumerate*; here the confirmation check is the gate's. The container app is
  * always the pair's source or target app (already validated reachable by `resolveRuleArtifacts`),
  * so no extra base-URL check. `undefined` when the resource has no binding.
+ *
+ * Exported so the SS-18.4 kind selector resolves the container binding whose `nativeIdRef`
+ * gives the derived `scopeKeyRef` through the **same** loader the gate uses — one definition
+ * of "which binding is this container's".
  */
-async function loadContainerBinding(
+export async function loadContainerBinding(
   repos: ContainerBindingRepos,
   ref: ScopeContainerRef,
 ): Promise<ResourceBinding | undefined> {

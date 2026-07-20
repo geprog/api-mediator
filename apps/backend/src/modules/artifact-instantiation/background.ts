@@ -1,15 +1,22 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  ApiSpecRepository,
   ApprovedMappingRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
+  ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
   tx,
   type Database,
   type DbTransaction,
 } from "@mediator/db";
 import type { EventConsumer, Reconciler } from "@mediator/event-bus";
 
+import {
+  proposeScopeCorrespondences,
+  type ScopeCorrespondenceProposalOps,
+} from "../scope-authoring.js";
 import { MappingApprovedInstantiationConsumer, type LoadedApprovedMapping } from "./consumer.js";
 import { instantiateArtifacts } from "./instantiate.js";
 import { ArtifactInstantiationReconciler } from "./reconciler.js";
@@ -61,9 +68,19 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
     return { mapping, fields, operations };
   };
 
+  // SS-18.1 — the transaction-bound ops the `ScopeCorrespondence` proposal runs through:
+  // the two specs' IR + `ResourceBinding`s to derive from, and the idempotent
+  // never-clobbering `propose` to write with (SS-18.6).
+  const scopeProposalOps = (handle: DbTransaction): ScopeCorrespondenceProposalOps => ({
+    specs: new ApiSpecRepository(handle),
+    bindings: new ResourceBindingRepository(handle),
+    correspondences: new ScopeCorrespondenceRepository(handle),
+  });
+
   const consumer = new MappingApprovedInstantiationConsumer<DbTransaction>({
     load,
     ops: (handle) => new DownstreamArtifactRepository(handle),
+    scopeProposalOps,
     newId,
   });
 
@@ -81,6 +98,16 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
           fields: loaded.fields,
           operations: loaded.operations,
           ops: new DownstreamArtifactRepository(handle),
+          newId,
+        });
+        // The reconciler re-derives the WHOLE reaction, proposal included (SS-18.6's
+        // "a re-run instantiation" case) — idempotent, so a pair that already has a
+        // correspondence keeps exactly the one it has.
+        await proposeScopeCorrespondences({
+          mapping: loaded.mapping,
+          fields: loaded.fields,
+          operations: loaded.operations,
+          ops: scopeProposalOps(handle),
           newId,
         });
       }),

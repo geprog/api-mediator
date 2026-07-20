@@ -33,8 +33,9 @@ export function registerResourceBindingRoutes(app: FastifyInstance, deps: Operat
       );
       const operatorIdentity = getPrincipal(request).identity;
       const result = await deps.bindingConfirmer.confirmOrCorrect(id, body, operatorIdentity);
+      const scopeLink = await deps.scopeLinkAuthoring.resolve(result.binding, result.appId);
       return updateResourceBindingResponseSchema.parse(
-        toResourceBindingDto(result.binding, result.capabilities),
+        toResourceBindingDto(result.binding, result.capabilities, scopeLink),
       );
     },
   );

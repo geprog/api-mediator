@@ -15,6 +15,7 @@ import type {
 } from "@mediator/domain";
 
 import { refApplicable } from "../modules/resource-bindings.js";
+import type { ScopeLinkAuthoringContext } from "../modules/scope-authoring.js";
 
 /**
  * Domain entity → wire DTO mappers. The one place `Date`s become ISO strings and
@@ -60,10 +61,15 @@ export function toApiSpecMetadataDto(spec: ApiSpec): ApiSpecMetadataDto {
  * scope `value` is operator config (shown as entered), never credential/live payload.
  * Built explicitly (never spread from the domain entity), so nothing beyond these
  * fields leaks.
+ *
+ * `scopeLink` carries the SS-18.4 kind-selector context, resolved by the
+ * {@link ScopeLinkAuthoringResolver}: it is passed in rather than looked up here because
+ * this mapper is pure and synchronous, while the context needs repository reads.
  */
 export function toResourceBindingDto(
   binding: ResourceBinding,
   capabilities: AppCapabilities,
+  scopeLink: ScopeLinkAuthoringContext,
 ): ResourceBindingDto {
   const refs = RESOURCE_BINDING_REF_KINDS.map((kind) => {
     const ref = binding[kind];
@@ -143,6 +149,11 @@ export function toResourceBindingDto(
     refs,
     scopeBindings,
     sourceScopeRef,
+    // SS-18.4 — the kind-selector context: whether this resource's pair has a proposed
+    // `ScopeCorrespondence` (so `scope-link` is selectable) and the derived `scopeKeyRef`
+    // a selection would be written with. Both are proposals; neither confirms anything.
+    scopeLinkAvailable: scopeLink.scopeLinkAvailable,
+    scopeKeyRefCandidate: scopeLink.scopeKeyRefCandidate ?? null,
   };
 }
 

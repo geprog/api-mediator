@@ -5,6 +5,7 @@ import type {
   UpdateScopeBindingRequest,
   UpdateScopeConstantBindingRequest,
   UpdateScopeRecordDerivedBindingRequest,
+  UpdateScopeScopeLinkBindingRequest,
   UpdateSourceScopeRefRequest,
 } from "@mediator/contracts";
 import type { ResourceBindingRefPatch, ScopePathBindingPatch } from "@mediator/db";
@@ -51,10 +52,12 @@ export function refApplicable(
   }
 }
 
-/** The outcome of a confirm/correct, carrying the capabilities the DTO needs. */
+/** The outcome of a confirm/correct, carrying what the DTO needs beyond the binding. */
 export interface ConfirmResult {
   readonly binding: ResourceBinding;
   readonly capabilities: AppCapabilities;
+  /** The app owning the binding's spec — the SS-18.4 selector context is resolved per app. */
+  readonly appId: string;
 }
 
 /** Confirms/corrects one `ResourceBinding` ref (RB-2). */
@@ -130,7 +133,7 @@ export class ResourceBindingService implements BindingConfirmer {
                 operatorIdentity,
               );
 
-      return { binding: updated, capabilities: app.capabilities };
+      return { binding: updated, capabilities: app.capabilities, appId: app.id };
     });
   }
 
@@ -183,16 +186,22 @@ export class ResourceBindingService implements BindingConfirmer {
   }
 
   /**
-   * Supply + confirm one scope path-parameter binding. A **discriminated confirm**:
-   * a `record-derived` request (carrying `kind: "record-derived"`) builds its patch via
-   * {@link #recordDerivedScopePatch} (SS-8); everything else is the `constant` confirm
-   * via {@link #constantScopePatch} (SS-3). Both are **per parameter** — the repository rewrites
-   * only the one matching entry of the `jsonb` collection, leaving every sibling
-   * scope entry, all operational refs, and the `sourceScopeRef` untouched (SS-3.2).
+   * Supply + confirm one scope path-parameter binding. A **discriminated confirm**, one
+   * branch per fill source (SS-9.2's kind selector on the wire):
    *
-   * Both share the SS-3.4/SS-8 rule that `parameterName` must be an existing derived
+   * - no `kind` key — the `constant` confirm via {@link #constantScopePatch} (SS-3),
+   *   the unchanged Layer-1 shape;
+   * - `kind: "record-derived"` — {@link #recordDerivedScopePatch} (SS-8);
+   * - `kind: "scope-link"` — {@link #scopeLinkScopePatch} (SS-12 / SS-18.4), the Layer-3
+   *   fill source this slice makes selectable.
+   *
+   * All three are **per parameter** — the repository rewrites only the one matching entry
+   * of the `jsonb` collection, leaving every sibling scope entry, all operational refs,
+   * and the `sourceScopeRef` untouched (SS-3.2).
+   *
+   * All three share the SS-3.4/SS-8 rule that `parameterName` must be an existing derived
    * scope entry of the resource (`ResourceBinding.scopePathBindings`, the IR-derived
-   * scope set of SS-2), checked here before either kind-specific validation.
+   * scope set of SS-2), checked here before any kind-specific validation.
    */
   async #confirmScopeBinding(
     stores: TxStores,
@@ -211,10 +220,11 @@ export class ResourceBindingService implements BindingConfirmer {
       );
     }
 
-    const patch =
-      "kind" in request
+    const patch = !("kind" in request)
+      ? this.#constantScopePatch(request, operatorIdentity)
+      : request.kind === "record-derived"
         ? this.#recordDerivedScopePatch(request, operatorIdentity)
-        : this.#constantScopePatch(request, operatorIdentity);
+        : this.#scopeLinkScopePatch(request, operatorIdentity);
 
     const updated = await stores.resourceBindings.updateScopePathBinding(binding.id, patch);
     if (updated === undefined) {
@@ -305,6 +315,63 @@ export class ResourceBindingService implements BindingConfirmer {
       ...(transform !== undefined ? { transform } : {}),
       confirmedBy: operatorIdentity,
       confirmedAt: new Date(),
+    };
+  }
+
+  /**
+   * The **`scope-link`** scope confirm (SS-12 / SS-18.4, Layer 3): sets the entry's
+   * `scopeKeyRef` — which component of the resolved `ScopeLink`'s target-side
+   * `appXScopeKey` fills this parameter — flipping the entry's `kind` from its SS-2
+   * default `constant` and dropping the stale literal, exactly as the `record-derived`
+   * confirm does.
+   *
+   * **It is the one scope confirm that routinely writes a NULL confirmation pair.**
+   * SS-18.4 has *selecting* `scope-link` write the binding **unconfirmed**, with a
+   * separate operator action confirming it, so the request's `confirm` flag decides:
+   * absent/`false` records the choice (`confirmedBy`/`confirmedAt` null — used nowhere:
+   * `resolveScopeLinkScopeValues` skips unconfirmed entries and the SS-15 gate still
+   * blocks the rule), `true` stamps the confirmation. Nothing here ever confirms
+   * implicitly (SS-18.8).
+   *
+   * Validations:
+   *
+   * - **the confirmed⇒required invariant** — an empty/absent `scopeKeyRef` is rejected
+   *   (mirroring `record-derived`'s empty-`sourceScopeKey` rejection): a `scope-link`
+   *   binding without one names no container key and could never fill its parameter.
+   *   It is **not** resolved against a live `ScopeLink` here — that is per-rule and
+   *   per-record, which the SS-15 gate and the SS-12 resolver do, not this per-binding
+   *   confirm.
+   * - **no transform** — a `scope-link` binding carries none by construction (the
+   *   value-space bridge is the `ScopeLink` itself, SS-12), and the `.strict()` request
+   *   schema rejects one on the wire, so there is nothing to validate here.
+   *
+   * Whether `scope-link` is *offered* for this resource at all is the SS-18.4 selector's
+   * question (a proposed `ScopeCorrespondence` must exist), surfaced to the client as
+   * `ResourceBindingDto.scopeLinkAvailable`. It is deliberately **not** re-checked here:
+   * the correspondence is per **resource pair** while a binding is per resource, so a
+   * binding-scoped confirm is the wrong place to adjudicate it — the SS-15 gate, which
+   * has the rule in hand, refuses to enable a rule whose correspondence is missing or
+   * unconfirmed. A `scope-link` entry written without one is therefore inert, never unsafe.
+   */
+  #scopeLinkScopePatch(
+    request: UpdateScopeScopeLinkBindingRequest,
+    operatorIdentity: string,
+  ): ScopePathBindingPatch {
+    const scopeKeyRef = request.scopeKeyRef;
+    if (scopeKeyRef === undefined || scopeKeyRef.length === 0) {
+      throw new BadRequestError(
+        `Scope parameter '${request.parameterName}' cannot be set scope-link without a scopeKeyRef.`,
+        [{ path: "scopeKeyRef", message: "a scope-link binding requires a scopeKeyRef" }],
+      );
+    }
+    // SS-18.4 — selecting the kind writes it UNCONFIRMED; only an explicit confirm stamps.
+    const confirmed = request.confirm === true;
+    return {
+      kind: "scope-link",
+      parameterName: request.parameterName,
+      scopeKeyRef,
+      confirmedBy: confirmed ? operatorIdentity : null,
+      confirmedAt: confirmed ? new Date() : null,
     };
   }
 
@@ -440,8 +507,13 @@ function responseFieldPathExists(group: IrResourceGroup, fieldPath: string): boo
   return false;
 }
 
-/** The response representation's top-level fields (union across response schemas). */
-function responseRepresentationFields(group: IrResourceGroup): IrField[] {
+/**
+ * The response representation's top-level fields (union across response schemas).
+ * Exported so the SS-18 scope-identity-key derivation proposes a `targetFieldPath`
+ * against the **same** field set {@link responseFieldPathExists} validates an
+ * operator's correction against — one definition, two ends of the same pairing.
+ */
+export function responseRepresentationFields(group: IrResourceGroup): IrField[] {
   const byName = new Map<string, IrField>();
   for (const operation of group.operations) {
     for (const field of operation.responseSchema?.fields ?? []) {

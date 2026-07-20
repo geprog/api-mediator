@@ -55,9 +55,15 @@ export type ResourceBindingRefPatch = Partial<Record<ResourceBindingRefKind, Con
  *   value-preserving `transform`) + confirmation, **dropping** the `constant`'s
  *   `value` (a derived entry defaults to `kind: constant` at SS-2, so confirming it
  *   `record-derived` rewrites the member).
+ * - `scope-link` (SS-12 / SS-18.4) — sets the entry's `scopeKeyRef` (which target
+ *   `ScopeLink.appXScopeKey` component addresses the parameter) + confirmation,
+ *   likewise dropping the `constant`'s stale `value`. Unlike the other two, its
+ *   confirmation pair is routinely written **null**: SS-18.4 *selecting* `scope-link`
+ *   writes the entry unconfirmed, and a later confirm stamps it.
  *
- * Either way it rewrites **only** the matching entry of the `jsonb` collection,
- * leaving every sibling scope entry and all operational refs untouched (SS-3.2).
+ * Whichever member, it rewrites **only** the matching entry of the `jsonb`
+ * collection, leaving every sibling scope entry and all operational refs untouched
+ * (SS-3.2).
  */
 export interface ScopeConstantBindingPatch {
   readonly kind: "constant";
@@ -74,7 +80,15 @@ export interface ScopeRecordDerivedBindingPatch {
   readonly confirmedBy: string | null;
   readonly confirmedAt: Date | null;
 }
-export type ScopePathBindingPatch = ScopeConstantBindingPatch | ScopeRecordDerivedBindingPatch;
+export interface ScopeScopeLinkBindingPatch {
+  readonly kind: "scope-link";
+  readonly parameterName: string;
+  readonly scopeKeyRef: string;
+  readonly confirmedBy: string | null;
+  readonly confirmedAt: Date | null;
+}
+export type ScopePathBindingPatch =
+  ScopeConstantBindingPatch | ScopeRecordDerivedBindingPatch | ScopeScopeLinkBindingPatch;
 
 /**
  * Confirm/correct the whole `sourceScopeRef` for
@@ -190,9 +204,10 @@ function fromScopePathBindingRow(row: ScopePathBindingRow): ScopePathBinding {
 /**
  * Apply a {@link ScopePathBindingPatch} to a scope-binding `jsonb` collection:
  * rewrite **only** the entry whose `parameterName` matches — to the shape of the
- * patch's `kind` (a `constant`'s literal `value`, or a `record-derived`'s
- * `sourceScopeKey` + optional `transform`) plus its confirmation (`confirmedAt` as
- * ISO-8601) — leaving every sibling entry byte-identical (SS-3.2). The matched entry
+ * patch's `kind` (a `constant`'s literal `value`, a `record-derived`'s
+ * `sourceScopeKey` + optional `transform`, or a `scope-link`'s `scopeKeyRef`) plus
+ * its confirmation (`confirmedAt` as ISO-8601) — leaving every sibling entry
+ * byte-identical (SS-3.2). The matched entry
  * is **replaced** (not spread over its prior fields), so confirming an SS-2-default
  * `constant` entry `record-derived` drops the stale `value` and vice-versa. Returns
  * the new collection and whether an entry matched, so a caller can reject a
@@ -219,11 +234,20 @@ export function applyScopePathBindingPatch(
         confirmedAt,
       };
     }
+    if (patch.kind === "record-derived") {
+      return {
+        kind: "record-derived",
+        parameterName: patch.parameterName,
+        sourceScopeKey: patch.sourceScopeKey,
+        ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
+        confirmedBy: patch.confirmedBy,
+        confirmedAt,
+      };
+    }
     return {
-      kind: "record-derived",
+      kind: "scope-link",
       parameterName: patch.parameterName,
-      sourceScopeKey: patch.sourceScopeKey,
-      ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
+      scopeKeyRef: patch.scopeKeyRef,
       confirmedBy: patch.confirmedBy,
       confirmedAt,
     };

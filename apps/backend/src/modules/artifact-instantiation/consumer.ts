@@ -9,6 +9,8 @@ import {
 } from "@mediator/domain";
 import { parseMappingApproved, type DeliveredEvent, type EventConsumer } from "@mediator/event-bus";
 
+import type { ScopeCorrespondenceProposalOps } from "../scope-authoring.js";
+import { proposeScopeCorrespondences } from "../scope-authoring.js";
 import { instantiateArtifacts } from "./instantiate.js";
 
 /**
@@ -41,9 +43,25 @@ export type ApprovedMappingLoader<TTx> = (
 /** Build the transaction-bound {@link DownstreamArtifactOps} the instantiation writes through. */
 export type DownstreamArtifactOpsFactory<TTx> = (tx: TTx) => DownstreamArtifactOps;
 
+/**
+ * Build the transaction-bound {@link ScopeCorrespondenceProposalOps} the SS-18 proposal
+ * reads + writes through (spec IR, resource bindings, the idempotent correspondence
+ * propose).
+ */
+export type ScopeCorrespondenceProposalOpsFactory<TTx> = (
+  tx: TTx,
+) => ScopeCorrespondenceProposalOps;
+
 export interface MappingApprovedInstantiationConsumerDeps<TTx> {
   readonly load: ApprovedMappingLoader<TTx>;
   readonly ops: DownstreamArtifactOpsFactory<TTx>;
+  /**
+   * SS-18.1 — the `ScopeCorrespondence` proposal ops. **Optional**: a harness that only
+   * exercises the AI-1..AI-3 artifact instantiation may omit it, in which case no
+   * correspondence is proposed and the instantiation behaves exactly as before (the
+   * proposal is additive to the reaction, never a precondition of it).
+   */
+  readonly scopeProposalOps?: ScopeCorrespondenceProposalOpsFactory<TTx>;
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
 }
@@ -70,11 +88,13 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
   public readonly name = ARTIFACT_INSTANTIATION_CONSUMER_NAME;
   readonly #load: ApprovedMappingLoader<TTx>;
   readonly #ops: DownstreamArtifactOpsFactory<TTx>;
+  readonly #scopeProposalOps: ScopeCorrespondenceProposalOpsFactory<TTx> | undefined;
   readonly #newId: () => string;
 
   public constructor(deps: MappingApprovedInstantiationConsumerDeps<TTx>) {
     this.#load = deps.load;
     this.#ops = deps.ops;
+    this.#scopeProposalOps = deps.scopeProposalOps;
     this.#newId = deps.newId ?? ((): string => randomUUID());
   }
 
@@ -98,5 +118,21 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
       ops: this.#ops(tx),
       newId: this.#newId,
     });
+    // SS-18.1 — the moment source *and* target resources are both known, propose a
+    // `ScopeCorrespondence` for each **scoped** resource pair the mapping covers. It runs
+    // in the SAME transaction as the artifact instantiation (still pure database), so a
+    // pair's rule and its proposed correspondence commit together or not at all; and it is
+    // idempotent (SS-18.6), so a redelivery converges on one unconfirmed candidate per pair
+    // and never clobbers a confirmed one.
+    const scopeProposalOps = this.#scopeProposalOps;
+    if (scopeProposalOps !== undefined) {
+      await proposeScopeCorrespondences({
+        mapping: loaded.mapping,
+        fields: loaded.fields,
+        operations: loaded.operations,
+        ops: scopeProposalOps(tx),
+        newId: this.#newId,
+      });
+    }
   }
 }

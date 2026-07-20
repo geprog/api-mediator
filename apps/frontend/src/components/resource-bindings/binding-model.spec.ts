@@ -6,10 +6,12 @@ import {
   buildRefTargetOptions,
   canConfirm,
   canSupplyScope,
+  canSupplyScopeKeyRef,
   defaultTargetKind,
   describeTarget,
   refState,
   scopeBindingState,
+  scopeKindOptions,
 } from "./binding-model";
 
 function refDto(overrides: Partial<ResourceBindingRefDto>): ResourceBindingRefDto {
@@ -137,5 +139,46 @@ describe("binding-model — scope path-parameter bindings (SS-6.2)", () => {
     expect(canSupplyScope("")).toBe(false);
     expect(canSupplyScope("   ")).toBe(false);
     expect(canSupplyScope("alice")).toBe(true);
+  });
+});
+
+describe("scopeKindOptions — SS-18.4 makes scope-link selectable", () => {
+  it("offers all three kinds, with scope-link DISABLED when the pair has no correspondence", () => {
+    const options = scopeKindOptions(false);
+    expect(options.map((option) => option.kind)).toStrictEqual([
+      "constant",
+      "record-derived",
+      "scope-link",
+    ]);
+    expect(options.map((option) => option.disabled)).toStrictEqual([false, false, true]);
+    // The label says WHY it is unavailable, rather than "not yet available".
+    expect(options[2]?.label).toContain("scope correspondence");
+  });
+
+  it("makes scope-link SELECTABLE once a ScopeCorrespondence has been proposed", () => {
+    const options = scopeKindOptions(true);
+    expect(options.map((option) => option.disabled)).toStrictEqual([false, false, false]);
+    // The glossary term verbatim, with no caveat.
+    expect(options[2]?.label).toBe("scope-link");
+  });
+
+  it("never changes constant / record-derived selectability — no L1/L2 regression", () => {
+    for (const available of [false, true]) {
+      const options = scopeKindOptions(available);
+      expect(options[0]).toStrictEqual({ kind: "constant", label: "constant", disabled: false });
+      expect(options[1]).toStrictEqual({
+        kind: "record-derived",
+        label: "record-derived",
+        disabled: false,
+      });
+    }
+  });
+});
+
+describe("canSupplyScopeKeyRef — SS-18.4", () => {
+  it("requires a non-blank scopeKeyRef (the server 400s an empty one)", () => {
+    expect(canSupplyScopeKeyRef("id")).toBe(true);
+    expect(canSupplyScopeKeyRef("")).toBe(false);
+    expect(canSupplyScopeKeyRef("   ")).toBe(false);
   });
 });
