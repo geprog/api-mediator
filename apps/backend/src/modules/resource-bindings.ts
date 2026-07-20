@@ -31,7 +31,11 @@ import type { TxStores, UnitOfWork } from "./persistence.js";
  *
  * - `changeTimestampRef` — only when the app declares `supportsChangeTimestamps`.
  * - `deltaCursorRef` / `deltaDeletionRef` — only when it declares `supportsDeltaQuery`.
- * - `nativeIdRef` / `collectionReadRef` / `paginationRef` — always meaningful.
+ * - `nativeIdRef` / `recordAddressRef` / `collectionReadRef` / `paginationRef` —
+ *   always meaningful. `recordAddressRef` (SS-19) is not capability-gated: whether a
+ *   resource addresses records container-relatively is a property of *that resource's*
+ *   operations, not of the app's declared `capabilities`, so it is derived only where
+ *   the IR shows evidence (RB-1) and is simply absent otherwise.
  */
 export function refApplicable(
   refKind: ResourceBindingRefKind,
@@ -44,6 +48,7 @@ export function refApplicable(
     case "deltaDeletionRef":
       return capabilities.supportsDeltaQuery;
     case "nativeIdRef":
+    case "recordAddressRef":
     case "collectionReadRef":
     case "paginationRef":
       return true;

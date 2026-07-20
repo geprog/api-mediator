@@ -4,6 +4,7 @@ import type {
   ResourceBinding,
   ScopeCorrespondence,
 } from "@mediator/domain";
+import { resolveRecordAddressing } from "@mediator/domain";
 
 import type {
   EnablementDecision,
@@ -248,6 +249,35 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
       ref: "nativeIdRef",
       side: "target",
       usedFor: "native-id",
+    });
+  }
+
+  // ── SS-19: container-relative record addressing on the TARGET ────────────────
+  // A container-scoped target commonly addresses records by a *container-relative*
+  // address (a Gitea issue's `number`, the `{index}` of
+  // `PATCH /repos/{owner}/{repo}/issues/{index}`) rather than by the globally-unique
+  // native id the `RecordLink` stores. Derivation proposes that ref unconfirmed; while
+  // it stays unconfirmed the mediator does not know which of the record's two
+  // identifiers the write op addresses by, and guessing would 404 — or, worse, hit the
+  // WRONG record inside the right container. So the operator sees it here, before
+  // enabling, exactly as SS-15 surfaces its scope blockers, instead of discovering it
+  // as a runtime park.
+  //
+  // Only the target side is gated: this rule writes only to its target. The reverse
+  // direction of a bidirectional pair is its own `SyncRule` and gates its own target,
+  // so both sides end up covered without either rule blocking on a ref it never uses.
+  // An absent ref (every pre-SS-19 binding, every unscoped resource) yields `native-id`
+  // and pushes nothing — the byte-for-byte fallback.
+  const targetAddressing = resolveRecordAddressing(
+    targetBinding,
+    (targetBinding.scopePathBindings ?? []).length > 0,
+  );
+  if (targetAddressing.kind === "unconfirmed-address-ref") {
+    stillNeeds.push({
+      kind: "binding-ref",
+      ref: "recordAddressRef",
+      side: "target",
+      usedFor: "record-address",
     });
   }
 

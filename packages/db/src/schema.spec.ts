@@ -173,7 +173,7 @@ describe("pg enum ↔ domain parity", () => {
     expect([...pgValues].sort()).toStrictEqual([...domainValues].sort());
   });
 
-  it("resource_binding_ref_kind covers the six confirmable refs", () => {
+  it("resource_binding_ref_kind covers the seven confirmable refs", () => {
     expect([...RESOURCE_BINDING_REF_KINDS].sort()).toStrictEqual([
       "changeTimestampRef",
       "collectionReadRef",
@@ -181,6 +181,7 @@ describe("pg enum ↔ domain parity", () => {
       "deltaDeletionRef",
       "nativeIdRef",
       "paginationRef",
+      "recordAddressRef",
     ]);
   });
 });

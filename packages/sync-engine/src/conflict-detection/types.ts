@@ -114,6 +114,13 @@ export interface SingleRecordReadRequest {
   readonly targetAppId: string;
   /** The target's native id (from the `RecordLink`'s target side). */
   readonly nativeId: string;
+  /**
+   * SS-19 — the target's **container-relative address** (the `RecordLink`'s target-side
+   * `recordAddress`), which fills the read op's record-id parameter *instead of*
+   * `nativeId` when the target resource addresses records inside their container. Absent
+   * → the read addresses by `nativeId`, byte-for-byte as before SS-19.
+   */
+  readonly recordAddress?: string | undefined;
   readonly binding: SingleRecordReadBinding;
   /**
    * The change's **captured scope** (SS-8b) — fills a `record-derived` scope path
@@ -227,6 +234,13 @@ export interface ConflictDetectionInput {
    * resolves it once and parks (`ContainerUnresolvedError`) before CF when unresolvable.
    */
   readonly resolvedContainerScopeValues?: ReadonlyMap<string, string>;
+  /**
+   * SS-19 — the target record's **container-relative address**, resolved once by the
+   * pipeline handler from the `RecordLink` (which parks when a scoped, address-confirmed
+   * target has none), so the drift-read / PUT read-carry addresses the *same* record the
+   * write will. Absent on a native-id-addressed target.
+   */
+  readonly resolvedRecordAddress?: string;
 }
 
 // ── The per-field write plan + stage outcome (write path) ─────────────────────
@@ -346,6 +360,13 @@ export interface DeletionConflictInput {
    * L2/L3 record-derived-delete gap where the drift-read threw a generic transient today.
    */
   readonly resolvedContainerScopeValues?: ReadonlyMap<string, string>;
+  /**
+   * SS-19 — the target record's **container-relative address**, resolved once by the
+   * pipeline handler from the `RecordLink`, so a delete's `read-before-write` drift-read
+   * addresses the same record the delete will. Absent on a native-id-addressed target;
+   * a `deletePropagation = ignore` delete resolves none (it addresses nothing).
+   */
+  readonly resolvedRecordAddress?: string;
 }
 
 /**

@@ -54,7 +54,7 @@ export const errorResponseSchema = z.object({
 export type ErrorResponse = z.infer<typeof errorResponseSchema>;
 
 /**
- * The six confirmable `ResourceBinding` ref kinds, in a stable order. Kept in
+ * The seven confirmable `ResourceBinding` ref kinds, in a stable order. Kept in
  * lock-step with the domain `ResourceBinding` shape by the `satisfies` guard: if
  * a ref key is renamed or a new confirmable ref is added in `@mediator/domain`,
  * this tuple stops satisfying {@link ResourceBindingRefKey} and the build fails
@@ -68,6 +68,7 @@ type ResourceBindingRefKey = keyof {
 
 export const RESOURCE_BINDING_REF_KINDS = [
   "nativeIdRef",
+  "recordAddressRef",
   "collectionReadRef",
   "paginationRef",
   "deltaCursorRef",
@@ -75,6 +76,6 @@ export const RESOURCE_BINDING_REF_KINDS = [
   "changeTimestampRef",
 ] as const satisfies readonly ResourceBindingRefKey[];
 
-/** The Zod validator for one of the six `ResourceBinding` ref kinds. */
+/** The Zod validator for one of the seven `ResourceBinding` ref kinds. */
 export const resourceBindingRefKindSchema = z.enum(RESOURCE_BINDING_REF_KINDS);
 export type ResourceBindingRefKind = z.infer<typeof resourceBindingRefKindSchema>;

@@ -146,6 +146,7 @@ export class ConflictDetectionStage {
       sourceSide,
       context.targetReadBinding,
       input.resolvedContainerScopeValues,
+      input.resolvedRecordAddress,
     );
     // CF-6: `read-before-write` reads the target up front (detection needs the live value).
     const liveRead =
@@ -303,6 +304,7 @@ export class ConflictDetectionStage {
       sourceSide,
       context.targetReadBinding,
       input.resolvedContainerScopeValues,
+      input.resolvedRecordAddress,
     );
     let liveRead: SingleRecordReadResult | undefined;
     if (context.targetDriftCheck === "read-before-write") {
@@ -365,6 +367,7 @@ export class ConflictDetectionStage {
     sourceSide: SyncFieldStateSide,
     binding: SingleRecordReadBinding | undefined,
     resolvedScopeValues: ReadonlyMap<string, string> | undefined,
+    resolvedRecordAddress: string | undefined,
   ): () => Promise<SingleRecordReadResult> {
     let cached: SingleRecordReadResult | undefined;
     return async (): Promise<SingleRecordReadResult> => {
@@ -380,6 +383,11 @@ export class ConflictDetectionStage {
         stripUndefined({
           targetAppId: change.targetAppId,
           nativeId: targetNativeId(link, sourceSide),
+          // SS-19 — address the read by the record's container-relative address when the
+          // target has one, so the drift-read hits the SAME record the write will. The
+          // id and the container scope stay separate slots (SS-12.5): this fills the
+          // record-id parameter only, never a scope parameter.
+          recordAddress: resolvedRecordAddress,
           binding,
           // SS-8b — carry the captured scope so a scoped target read-carry / read-before-
           // write fills its `record-derived` scope param from the value the source record

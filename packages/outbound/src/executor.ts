@@ -65,6 +65,13 @@ export interface OutboundCallCommon {
   readonly sourceNativeId: string;
   /** The target resource's `ResourceBinding.nativeIdRef` — reads a create's new native id from the response. */
   readonly targetResourceNativeIdRef: IrRefTarget;
+  /**
+   * SS-19 — the target resource's confirmed `ResourceBinding.recordAddressRef`, read from a
+   * **create**'s response exactly as `targetResourceNativeIdRef` reads the new native id, so
+   * the new `RecordLink` can freeze the record's container-relative address. Absent when the
+   * target addresses records by their native id.
+   */
+  readonly targetResourceRecordAddressRef?: IrRefTarget;
   /** The `SyncRule` this execution belongs to (OC-5 `relatedRuleId`). */
   readonly relatedRuleId?: string;
   /** The `RecordLink` id, once one exists (OC-5 `recordLinkId`; a create has none yet). */
@@ -95,11 +102,13 @@ export type OutboundCall =
       readonly priorReconciledState: PriorReconciledState;
       /** The target-side native id to route the update to (provided; OC does not read `RecordLink`). */
       readonly targetNativeId: string;
+      readonly targetRecordAddress?: string;
     })
   | (OutboundCallCommon & {
       readonly action: "delete";
-      /** The link's target-side native id: the id parameter value **and** a delete-key input. */
+      /** The link's target-side native id: the delete-key input, and the id parameter value by default. */
       readonly targetNativeId: string;
+      readonly targetRecordAddress?: string;
     });
 
 /**
@@ -114,6 +123,13 @@ export type OutboundCall =
 export interface WrittenRepresentation {
   readonly body: JsonValue | undefined;
   readonly createdNativeId: string | undefined;
+  /**
+   * SS-19 — a create's newly assigned **container-relative address**
+   * (`ResourceBinding.recordAddressRef`), frozen onto the new `RecordLink` so later
+   * update/deletes address the record inside its container. `undefined` for an
+   * update/delete, for a native-id-addressed target, or when the response omitted it.
+   */
+  readonly createdRecordAddress?: string | undefined;
 }
 
 /** The disposition of a resolved outbound call. */
@@ -417,6 +433,14 @@ export class OutboundCallExecutor {
       call.action === "create"
         ? readNativeId(response.body, call.targetResourceNativeIdRef)
         : undefined;
+    // SS-19 — and, the same way, the created record's **container-relative address** via
+    // the target's `recordAddressRef`, so RL can freeze it onto the new `RecordLink`.
+    // `undefined` for an update/delete, for a native-id-addressed target (no ref), or when
+    // the response did not carry the field.
+    const createdRecordAddress =
+      call.action === "create" && call.targetResourceRecordAddressRef !== undefined
+        ? readNativeId(response.body, call.targetResourceRecordAddressRef)
+        : undefined;
 
     const payloadHash = call.action === "delete" ? undefined : computePayloadHash(call.payload);
     const syncEventId = await this.#record({
@@ -435,7 +459,7 @@ export class OutboundCallExecutor {
       idempotencyKey,
       syncEventId,
       // The written representation OC returns for EP/SP + RL-2 (deferred crit 2/3).
-      writtenRepresentation: { body: response.body, createdNativeId },
+      writtenRepresentation: { body: response.body, createdNativeId, createdRecordAddress },
     };
   }
 
@@ -485,7 +509,13 @@ export class OutboundCallExecutor {
       if (location === undefined) {
         return { ok: false, reason: `unresolved id parameter '${ref}' on the target operation` };
       }
-      const value = call.targetNativeId;
+      // SS-19 — address the record by its **container-relative address** when the target
+      // resource has one confirmed (a Gitea issue's `number`, the `{index}` of
+      // `/repos/{owner}/{repo}/issues/{index}`); the globally-unique native id would 404.
+      // Absent → the native id, which is byte-for-byte the pre-SS-19 behavior. The
+      // idempotency key keeps using `targetNativeId` (identity, not addressing), so
+      // existing keys are unchanged.
+      const value = call.targetRecordAddress ?? call.targetNativeId;
       if (location.in === "path") {
         path = path.replace(`{${location.name}}`, encodeURIComponent(value));
       } else if (location.in === "query") {

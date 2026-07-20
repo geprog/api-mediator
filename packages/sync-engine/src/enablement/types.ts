@@ -239,7 +239,12 @@ export interface ScopeLinkScopeBindingRequirement {
  * one-to-one onto the confirm/correct action (RB-2) that clears it.
  */
 export type BindingRefName =
-  "nativeIdRef" | "collectionReadRef" | "paginationRef" | "deltaCursorRef" | "deltaDeletionRef";
+  | "nativeIdRef"
+  | "recordAddressRef"
+  | "collectionReadRef"
+  | "paginationRef"
+  | "deltaCursorRef"
+  | "deltaDeletionRef";
 
 /**
  * Why a binding ref is required — the *use* that needs it (`docs/architecture/data-model.md`
@@ -252,7 +257,8 @@ export type BindingRefUse =
   | "backfill-enumeration" // BE-2.2 — backfill always enumerates the source (even a delta rule).
   | "pagination" // BE-2.2 — the enumerated collection read pages.
   | "delta-cursor" // BE-2.3 — a delta-polling rule reads/advances the cursor.
-  | "delta-deletion"; // BE-1.4 / BE-2.3 — `propagate` on a delta rule needs deletion reporting.
+  | "delta-deletion" // BE-1.4 / BE-2.3 — `propagate` on a delta rule needs deletion reporting.
+  | "record-address"; // SS-19 — a scoped target addresses records container-relatively.
 
 /**
  * A structured, typed reason a rule is not yet enable-able (BE-1.5 / BE-2.5). The

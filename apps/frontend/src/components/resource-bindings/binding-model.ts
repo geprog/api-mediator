@@ -129,9 +129,10 @@ export function canSupplyScopeKey(sourceScopeKey: string): boolean {
   return sourceScopeKey.trim().length > 0;
 }
 
-/** Human labels for the six ref kinds. */
+/** Human labels for the seven ref kinds. */
 export const REF_KIND_LABELS: Record<ResourceBindingRefKind, string> = {
   nativeIdRef: "Native id",
+  recordAddressRef: "Record address (in container)",
   collectionReadRef: "Collection read",
   paginationRef: "Pagination",
   deltaCursorRef: "Delta cursor",
@@ -164,6 +165,7 @@ export const TARGET_KINDS: readonly TargetKind[] = ["field", "operation", "param
 export function defaultTargetKind(kind: ResourceBindingRefKind): TargetKind {
   switch (kind) {
     case "nativeIdRef":
+    case "recordAddressRef":
     case "changeTimestampRef":
       return "field";
     case "collectionReadRef":

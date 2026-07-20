@@ -1,6 +1,6 @@
 import type { ScopeLinkStore } from "@mediator/db";
 import type { FieldMapping } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { resolveRecordAddressing, stripUndefined } from "@mediator/domain";
 import {
   PermanentOutboundError,
   resolveSingleRecordReadBinding,
@@ -125,8 +125,16 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
     );
     const writableFields = artifacts.fieldMappings.filter((field) => field.isIdentityKey !== true);
 
+    // SS-19 — the two sides' confirmed `recordAddressRef` field paths, so the new
+    // `RecordLink` freezes each side's container-relative address at establishment. Absent
+    // per side when that side addresses by its native id (no ref, or unconfirmed).
+    const sourceRecordAddressPath = confirmedFieldPath(artifacts.sourceBinding.recordAddressRef);
+    const targetRecordAddressPath = confirmedFieldPath(artifacts.targetBinding.recordAddressRef);
+
     const resolution = stripUndefined({
       ...buildResolutionContext(artifacts, identityField, operations.create !== undefined),
+      sourceRecordAddressPath,
+      targetRecordAddressPath,
       // SS-12.2/12.7 — freeze the resolved container onto the new link at establishment.
       scopeRefForNewLink: container.scopeRefForNewLink,
       // SS-14.1 — the target container scope fill so the identity lookup searches ONLY within
@@ -165,6 +173,15 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
       // SS-12 — the target resource's scope path bindings, so the handler fills a linked
       // delete's still-templated container `{…}` from the record's stored `RecordLink.scopeRef`.
       scopePathBindings: artifacts.targetBinding.scopePathBindings,
+      // SS-19 — how the target addresses its records, decided once here from the target
+      // binding + whether the resource is container-scoped. `native-id` (the default for an
+      // absent ref) reproduces the pre-SS-19 composition exactly.
+      targetRecordAddressing: resolveRecordAddressing(
+        artifacts.targetBinding,
+        (artifacts.targetBinding.scopePathBindings ?? []).length > 0,
+      ),
+      // SS-19 — so OC can read a create response's container-relative address.
+      targetResourceRecordAddressRef: confirmedValue(artifacts.targetBinding.recordAddressRef),
     });
   }
 

@@ -125,7 +125,7 @@ type ResourceBindingRefKey = keyof {
   ]: true;
 };
 
-/** The six `ResourceBinding` ref kinds, in a stable order (glossary-exact). */
+/** The seven `ResourceBinding` ref kinds, in a stable order (glossary-exact). */
 export const RESOURCE_BINDING_REF_KINDS = [
   "nativeIdRef",
   "collectionReadRef",
@@ -133,9 +133,14 @@ export const RESOURCE_BINDING_REF_KINDS = [
   "deltaCursorRef",
   "deltaDeletionRef",
   "changeTimestampRef",
+  // SS-19 appended LAST on purpose: this tuple is the `pgEnum` member order, so a new
+  // kind at the end makes its migration a pure `ALTER TYPE ... ADD VALUE` with no
+  // reordering. The list is consumed order-independently (mapper + repository iterate
+  // it); the operator-facing display order lives in `@mediator/contracts`.
+  "recordAddressRef",
 ] as const satisfies readonly ResourceBindingRefKey[];
 
-/** One of the six confirmable `ResourceBinding` ref kinds. */
+/** One of the seven confirmable `ResourceBinding` ref kinds. */
 export type ResourceBindingRefKind = (typeof RESOURCE_BINDING_REF_KINDS)[number];
 
 export const resourceBindingRefKindEnum = pgEnum(
@@ -1466,6 +1471,17 @@ export const recordLink = pgTable(
     appANativeId: text("app_a_native_id").notNull(),
     appBId: uuid("app_b_id").notNull(),
     appBNativeId: text("app_b_native_id").notNull(),
+    // SS-19 — each side's frozen **container-relative address** (a Gitea issue's
+    // `number`), captured at establishment via that side's
+    // `ResourceBinding.recordAddressRef`, so a linked update/delete can address the
+    // record inside its container without re-reading a source record that may be gone.
+    // NULLABLE — a NULL column is the domain **absent** address (that side addresses by
+    // its native id); existing rows migrate to NULL and keep the native-id behavior.
+    // Deliberately NOT indexed and NOT unique: an address collides across containers, so
+    // it must never be used to correlate records. The unique-active indexes below stay on
+    // the native ids — identity is unchanged.
+    appARecordAddress: text("app_a_record_address"),
+    appBRecordAddress: text("app_b_record_address"),
     resourcePairRef: text("resource_pair_ref").notNull(),
     establishedBy: recordLinkEstablishedByEnum("established_by").notNull(),
     status: recordLinkStatusEnum("status").notNull(),

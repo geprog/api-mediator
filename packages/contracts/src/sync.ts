@@ -67,6 +67,7 @@ export const enablementRequirementDtoSchema = z.discriminatedUnion("kind", [
     kind: z.literal("binding-ref"),
     ref: z.enum([
       "nativeIdRef",
+      "recordAddressRef",
       "collectionReadRef",
       "paginationRef",
       "deltaCursorRef",
@@ -80,6 +81,7 @@ export const enablementRequirementDtoSchema = z.discriminatedUnion("kind", [
       "pagination",
       "delta-cursor",
       "delta-deletion",
+      "record-address",
     ]),
   }),
   z.object({ kind: z.literal("identity-lookup-path") }),

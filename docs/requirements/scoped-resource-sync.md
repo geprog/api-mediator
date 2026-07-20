@@ -927,6 +927,99 @@ Phase-3 approval / downstream-artifact instantiation (the proposal trigger). Pre
 capstone e2e, which cannot configure an L3 pair without it. **No migration** — `scope_correspondence`,
 `scope_link`, and `resource_binding.scope_path_bindings` all already exist (migrations 0016-0019).
 
+## SS-19 — The two identities of a container-scoped record: a distinct `recordAddressRef`
+
+**As an** operator, **I** have the mediator address a scoped record by the identifier its API actually
+addresses records by *inside a container* — while the `RecordLink` keeps linking by the globally-unique one
+— **so that** writes *into* a scoped container succeed instead of 404-ing, and bidirectional scoped sync
+works in both directions.
+
+> **Why this story exists.** Found live by the Layer-3 capstone. A container-scoped resource commonly has
+> **two** identities, and `ResourceBinding` had only one ref for both jobs:
+>
+> - a **global identity** — a Gitea issue's `id`, unique across all repos. This is what `nativeIdRef`
+>   designates and what `RecordLink` stores; it is correct for **linking**, precisely because it never
+>   collides across containers; and
+> - a **container-relative address** — the same issue's `number`, the `{index}` of
+>   `PATCH /repos/{owner}/{repo}/issues/{index}`. This is what the API **addresses** records by.
+>
+> With only `nativeIdRef`, the counterpart write composed `/repos/{owner}/{repo}/issues/<globalId>` and
+> **404'd**. Picking `number` for `nativeIdRef` instead would fix addressing and **break linking**, because
+> `number` collides across containers (repo A #1 vs repo B #1) — the record-merge failure mode this system
+> guards hardest against. The two jobs genuinely need two refs. This is **systematic for container-scoped
+> resources**, not a Gitea quirk (GitLab `iid`, any per-tenant sequence). SS-19 coins **one** new ref and
+> **one** additive per-side `RecordLink` column; it reuses the RB-3 confirm mechanism, the SS-12
+> freeze-at-establishment pattern, and the SS-11/SS-12 park machinery unchanged.
+
+### Acceptance criteria
+
+1. **Given** a resource whose IR shows a container-relative address field distinct from its native id,
+   **when** its `ResourceBinding` is derived at ingestion (RB-1), **then** a **`recordAddressRef`** is
+   derived naming that field, left **unconfirmed** (`confirmedBy`/`confirmedAt` null) — and `nativeIdRef`
+   keeps its meaning unchanged (the global identity `RecordLink` stores). Derivation is deliberately
+   conservative: it runs **only** for a container-scoped resource (one with at least one non-record-id scope
+   path parameter) and **only** for an address-shaped field (`number`/`iid`/`index`/…) that is **not** the
+   field `nativeIdRef` already claimed; anything else derives **nothing**.
+2. **Given** a derived `recordAddressRef`, **when** the operator reviews it, **then** it is confirmed or
+   corrected through **exactly** the Phase-1 **RB-3** confirm/correct mechanism every other ref uses — same
+   `confirmedBy`/`confirmedAt` discipline, same per-ref isolation, **nothing auto-confirms it**
+   (derive-then-confirm end to end).
+3. **Given** a record whose side has a **confirmed** `recordAddressRef`, **when** its `RecordLink` is
+   established (create-propagation, identity-match, or manual), **then** that side's container-relative
+   address is read from the record in hand and **frozen onto the link** (`appARecordAddress` /
+   `appBRecordAddress`), **alongside** — never instead of — the native id. It is stored rather than
+   re-derived at write time for the same reason SS-12 stores `RecordLink.scopeRef`: a propagated **delete**
+   has no live source record to read it from. Both sides are captured, since a bidirectional pair shares the
+   one link. **And when** a linked update/delete (or its `read-before-write` drift-read / PUT read-carry) is
+   composed, **then** the operation's **record-id path parameter** is filled from the stored address while
+   the container **scope** parameters keep being filled from `scopeRef`/`ScopeLink` (SS-12) — the two remain
+   **separate slots** and the SS-12.5 *id × scope never crossed* invariant continues to hold.
+4. **Given** a resource with **no confirmed** `recordAddressRef`, **when** anything is composed for it,
+   **then** the behavior is **byte-for-byte unchanged**: the record-id parameter is filled from `nativeIdRef`
+   exactly as before. This covers every unscoped resource, L1 `constant` and L2 `record-derived` rules, and
+   **every `ResourceBinding` and `RecordLink` that predates this story** (the migration adds no ref rows and
+   no addresses, so all existing rows take this path). A present-but-unconfirmed ref on an **unscoped**
+   resource is likewise inert — there is no container for an address to be relative to, so an unratified
+   candidate never blocks it.
+5. **Given** a **container-scoped** resource whose write op addresses by a container-relative parameter,
+   **when** either its `recordAddressRef` is still **unconfirmed** or the `RecordLink` carries **no** stored
+   address for that side, **then** the execution **parks** with a clear, distinct reason (reusing the
+   existing dead-letter park machinery — `ContainerUnresolvedError` is the model), **before** any read or
+   write is issued. It must **never** fall back to the native id here: inside the resolved container that id
+   either does not exist (a 404) or names a **different** record the write would silently clobber. **And**
+   the rule-enablement gate surfaces the unconfirmed ref in its "still needs" list — on the **target** side,
+   the only side a rule writes to — so the operator sees it *before* enabling, mirroring how SS-15 surfaces
+   its scope blockers.
+6. **Given** the concept documentation, **when** this ships, **then** `docs/architecture/data-model.md`
+   records the new ref on `ResourceBinding` and the new per-side addresses on `RecordLink`, including the
+   two-identities rule and the reason the address is frozen rather than re-derived.
+
+### Out of scope
+
+- **Backfilling addresses onto existing `RecordLink`s.** A link established before the ref was confirmed
+  parks on its next write (criterion 5) rather than being silently repaired; re-linking the record, or a
+  fresh backfill, establishes it with an address. A bulk repair pass is a separate slice.
+- **Manual-link address supply.** `linkManually` accepts the two addresses, but **no production caller
+  supplies them**: the operator manual-link API (`SyncOperatorService.linkRecords`) knows only the two
+  native ids the operator typed, and resolving an address means reading both records back out of their
+  apps — the same machinery the queued address-repair sweep will own. So a manual link on a scoped,
+  address-confirmed pair is established without addresses and parks on its first write. Consequently the
+  criterion-5 park's remedy points at **unlink + backfill** and deliberately does *not* suggest re-linking
+  manually, which would produce another addressless link and park again.
+- **Using the address anywhere in identity.** It is addressing-only by construction: an address is unique
+  only inside its container, so it never keys a lookup, an index, an idempotency key, or a queue key.
+- **A single-record read that is not part of a linked write.** Only the drift-read / PUT read-carry paths,
+  which address the same record the write will, are covered here.
+
+### Dependencies
+
+Blocked by Phase-1 **RB-1/RB-3** (derivation + the confirm mechanism it reuses), **SS-4** (record-id vs
+scope path-parameter classification), **SS-12** (the `scopeRef` freeze-at-establishment pattern and the
+park machinery it mirrors, plus the SS-12.5 id × scope invariant it must preserve), and Phase-4 **RL-2/RL-3**
+(link establishment). Preserves SS-14 (scoped identity + scope-qualified queue key) and SP-4/SP-5 unchanged.
+**Needs one migration** (additive: the `recordAddressRef` ref kind + two nullable `record_link` address
+columns) — backward-compatible precisely because criterion 4's fallback makes every existing row valid.
+
 ---
 
 ## Out of scope (whole file)

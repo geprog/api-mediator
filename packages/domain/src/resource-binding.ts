@@ -72,6 +72,96 @@ export const confirmableRefSchema = z.object({
 });
 export type ConfirmableRef = z.infer<typeof confirmableRefSchema>;
 
+// ── recordAddressRef (container-relative record address, SS-19) ───────────────
+
+/**
+ * **The two identities of a container-scoped record** (SS-19,
+ * `docs/architecture/data-model.md` `ResourceBinding.recordAddressRef`). A record
+ * inside a container commonly carries *two* distinct identifiers, and a single ref
+ * cannot serve both jobs:
+ *
+ * - **Global identity** — unique across *all* containers (a Gitea issue's `id`).
+ *   This is {@link ResourceBinding.nativeIdRef}, and it is what a `RecordLink`
+ *   stores and links by. It is correct for **linking** precisely because it never
+ *   collides across containers.
+ * - **Container-relative address** — unique only *within* one container (a Gitea
+ *   issue's `number`, the `{index}` of
+ *   `PATCH /repos/{owner}/{repo}/issues/{index}`). This is what the API actually
+ *   **addresses** records by, and it is what `recordAddressRef` names.
+ *
+ * Using `nativeIdRef` to address composes `/repos/{owner}/{repo}/issues/<globalId>`
+ * and 404s; using the container-relative address to *link* would merge repo A's #1
+ * with repo B's #1 — the record-merge failure mode this system guards hardest
+ * against. So the two stay separate refs with separate jobs, and both jobs are
+ * satisfied at once.
+ *
+ * Modeled as an ordinary {@link ConfirmableRef} — derived unconfirmed at ingestion
+ * (RB-1) and **operator-confirmed** through the exact same RB-3 confirm/correct
+ * mechanism as every other ref; nothing auto-confirms it.
+ *
+ * **Absent** (the key omitted) means "this resource addresses records by their
+ * native id" — the case for every unscoped resource, for a scoped resource whose
+ * addressing parameter genuinely *is* the native id, and for every binding that
+ * predates SS-19. An absent ref therefore reproduces the pre-SS-19 behavior
+ * byte for byte.
+ */
+
+/**
+ * How one side's records are **addressed** by an operation's record-id path
+ * parameter — the single decision every write/read composition makes, derived from
+ * that side's {@link ResourceBinding.recordAddressRef} plus whether the resource is
+ * container-scoped. A discriminated union rather than a boolean because the third
+ * state (a derived-but-unconfirmed ref on a scoped resource) must **fail loud**, not
+ * silently pick one of the other two.
+ *
+ * - `native-id` — address from `nativeIdRef`, i.e. exactly the pre-SS-19 behavior.
+ * - `stored-address` — address from the `RecordLink`'s frozen per-side record address.
+ * - `unconfirmed-address-ref` — the resource is scoped and an address ref was derived
+ *   but **not confirmed**: the mediator does not know which of the record's two
+ *   identifiers this operation addresses by, so composing a URL would either 404 or
+ *   hit the *wrong* record in the right container. Callers park / block enablement.
+ */
+export type RecordAddressing =
+  | { readonly kind: "native-id" }
+  | { readonly kind: "stored-address" }
+  | { readonly kind: "unconfirmed-address-ref" };
+
+/**
+ * Decide how a resource addresses its records (SS-19 criteria 2/4/5). **Pure and
+ * total** — like the enablement gate, every input yields a decision and it never
+ * throws.
+ *
+ * The ordering of the branches *is* the backward-compatibility guarantee:
+ *
+ * 1. **No `recordAddressRef` at all → `native-id`.** Every binding that predates
+ *    SS-19, every unscoped resource, and every resource whose address genuinely is its
+ *    native id land here, so their composition is byte-for-byte what it was before.
+ *    The migration adds no ref rows, so *all* existing rows take this branch.
+ * 2. **Confirmed ref → `stored-address`.** The operator has ratified which field is
+ *    the container-relative address, so the frozen `RecordLink` address is used.
+ * 3. **Present-but-unconfirmed on a container-scoped resource →
+ *    `unconfirmed-address-ref`.** Derive-then-confirm: derivation proposed a
+ *    candidate, nobody ratified it, and this is precisely the case where guessing
+ *    wrong writes to another record. Fail loud.
+ * 4. **Present-but-unconfirmed on an *unscoped* resource → `native-id`.** With no
+ *    container there is nothing for an address to be relative to, so an unratified
+ *    candidate is inert rather than blocking — an unscoped resource is never
+ *    penalised for a derivation it does not need.
+ */
+export function resolveRecordAddressing(
+  binding: Pick<ResourceBinding, "recordAddressRef">,
+  isContainerScoped: boolean,
+): RecordAddressing {
+  const ref = binding.recordAddressRef;
+  if (ref === undefined) {
+    return { kind: "native-id" };
+  }
+  if (ref.confirmedBy !== null && ref.confirmedAt !== null) {
+    return { kind: "stored-address" };
+  }
+  return isContainerScoped ? { kind: "unconfirmed-address-ref" } : { kind: "native-id" };
+}
+
 // ── scopePathBindings (scope path-parameter bindings) ─────────────────────────
 
 /**
@@ -359,6 +449,9 @@ export const resourceBindingSchema = z.object({
   apiSpecId: z.string(),
   resourceRef: z.string(),
   nativeIdRef: confirmableRefSchema.optional(),
+  // The container-relative addressing ref (SS-19). Absent = the resource addresses
+  // records by their native id (every unscoped resource, and every pre-SS-19 row).
+  recordAddressRef: confirmableRefSchema.optional(),
   collectionReadRef: confirmableRefSchema.optional(),
   paginationRef: confirmableRefSchema.optional(),
   deltaCursorRef: confirmableRefSchema.optional(),

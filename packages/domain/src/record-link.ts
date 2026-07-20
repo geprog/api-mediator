@@ -78,6 +78,35 @@ export const recordLinkScopeRefSchema = z.discriminatedUnion("kind", [
 ]);
 export type RecordLinkScopeRef = z.infer<typeof recordLinkScopeRefSchema>;
 
+// ── per-side record address (container-relative addressing, SS-19) ───────────
+
+/**
+ * `appARecordAddress` / `appBRecordAddress` — each side's **container-relative
+ * address**, captured at link establishment from that side's record via its
+ * `ResourceBinding.recordAddressRef` (`docs/architecture/data-model.md`
+ * `RecordLink`; SS-19 criterion 3).
+ *
+ * **Why stored, not re-derived.** A propagated **delete** has no live source record
+ * to read an address out of — the record is gone — and a linked update must address
+ * the target without a second read. This is the same constraint that made SS-12
+ * store `RecordLink.scopeRef` rather than re-derive the container at write time, and
+ * it is answered the same way: freeze the value at establishment.
+ *
+ * **Additive, never load-bearing for identity.** These are *addressing* columns
+ * only. `appANativeId`/`appBNativeId` remain the link's identity — the unique-active
+ * indexes, the resolve-by-(app, native id) lookup, tombstoning and every RL-*
+ * invariant read the native ids and are untouched by these fields. A record address
+ * is deliberately **not** unique across containers (repo A #1 and repo B #1 are both
+ * `"1"`), so it must never be used to correlate records.
+ *
+ * **Absent** on both sides for a resource that addresses by its native id (no
+ * confirmed `recordAddressRef`) and on every link established before SS-19; the
+ * write path then falls back to the native id exactly as it did before. Absent on
+ * *one* side when only that side addresses container-relatively — the two sides are
+ * independent, since each side's `ResourceBinding` decides for itself.
+ */
+const recordAddressSchema = z.string().min(1);
+
 // ── RecordLink ───────────────────────────────────────────────────────────────
 
 /**
@@ -96,14 +125,19 @@ export type RecordLinkScopeRef = z.infer<typeof recordLinkScopeRefSchema>;
  *   link is tombstoned (SD-2 criterion 5).
  * - `scopeRef` — optional (above); present only on a link under a scoped rule,
  *   absent on a non-scoped rule's links (SS-10 criterion 4).
+ * - `appARecordAddress` / `appBRecordAddress` — optional (above); each side's frozen
+ *   container-relative address, absent when that side addresses by its native id
+ *   (SS-19 criterion 3). Addressing only — never identity.
  */
 export const recordLinkSchema = z
   .object({
     id: z.string(),
     appAId: z.string(),
     appANativeId: z.string(),
+    appARecordAddress: recordAddressSchema.optional(),
     appBId: z.string(),
     appBNativeId: z.string(),
+    appBRecordAddress: recordAddressSchema.optional(),
     resourcePairRef: z.string(),
     establishedBy: recordLinkEstablishedBySchema,
     status: recordLinkStatusSchema,

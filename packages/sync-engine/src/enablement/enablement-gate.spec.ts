@@ -379,6 +379,78 @@ describe("BE-2.1 — nativeIdRef on both sides", () => {
   });
 });
 
+// ── SS-19 — container-relative record addressing on the target ─────────────────
+
+describe("SS-19 — recordAddressRef on a container-scoped target", () => {
+  const scopeConstant: ScopePathBinding = {
+    kind: "constant",
+    parameterName: "repo",
+    value: "phoenix",
+    confirmedBy: "op-alice",
+    confirmedAt: T0,
+  };
+
+  it("scoped target + UNCONFIRMED recordAddressRef → blocked, so the operator sees it before enabling", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        targetBinding: targetBinding({
+          recordAddressRef: unconfirmed(fieldTarget("number")),
+          scopePathBindings: [scopeConstant],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "binding-ref",
+      ref: "recordAddressRef",
+      side: "target",
+      usedFor: "record-address",
+    });
+  });
+
+  it("scoped target + CONFIRMED recordAddressRef → not blocked by SS-19", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        targetBinding: targetBinding({
+          recordAddressRef: confirmed(fieldTarget("number")),
+          scopePathBindings: [scopeConstant],
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("backward-compatible: a target with NO recordAddressRef adds no blocker (every pre-SS-19 binding)", () => {
+    const decision = evaluateEnablement(
+      validInput({ targetBinding: targetBinding({ scopePathBindings: [scopeConstant] }) }),
+    );
+    expectEnable(decision);
+  });
+
+  it("an UNSCOPED target with an unconfirmed recordAddressRef adds no blocker (nothing to be relative to)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        targetBinding: targetBinding({ recordAddressRef: unconfirmed(fieldTarget("number")) }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("only the TARGET side is gated — a source-side unconfirmed ref never blocks this direction", () => {
+    // The reverse direction of a bidirectional pair is its own SyncRule and gates its own
+    // target, so both sides end up covered without either rule blocking on a ref it never uses.
+    const decision = evaluateEnablement(
+      validInput({
+        sourceBinding: fullFetchSourceBinding({
+          recordAddressRef: unconfirmed(fieldTarget("number")),
+          scopePathBindings: [scopeConstant],
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+});
+
 // ── BE-2.2 — collectionReadRef / paginationRef where enumeration applies ────────
 
 describe("BE-2.2 — collection read + pagination", () => {
