@@ -6,7 +6,7 @@ import type {
   SyncFieldState,
   SyncFieldStateSide,
 } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import type { SyncFieldStateStore } from "@mediator/db";
 import { readPath, type JsonRecord } from "@mediator/transform";
 
@@ -195,7 +195,10 @@ export class LoopPreventionStage {
       mappingId: string | undefined,
       changeTimestamp: Date | null,
     ): void => {
-      const read = readPath(source, fieldPath);
+      // Live record → record-relative; the `SyncFieldState` row `fieldPath` KEY
+      // below stays resource-qualified (the seeder + `participatingFieldsForSide`
+      // key space) — same shape as the seeder and `observeTarget`.
+      const read = readPath(source, recordRelativePath(fieldPath));
       const hash = hashFieldValue(read.present ? read.value : null);
       const row: SyncFieldState = stripUndefined({
         id: this.#newId(),
@@ -210,7 +213,7 @@ export class LoopPreventionStage {
         lastWrittenByMappingId: mappingId,
         status: "active" as const,
       });
-      byKey.set(`${side} ${fieldPath}`, row);
+      byKey.set(rowKey(side, fieldPath), row);
     };
 
     const writtenTs = input.writtenChangeTimestamp ?? null;
@@ -299,7 +302,8 @@ export class LoopPreventionStage {
       if (baseline === undefined) {
         return false; // no reconciled baseline for a participating field → not an echo
       }
-      const read = readPath(observed, path);
+      // `path` is the qualified `SyncFieldState` key space; `observed` is a live record.
+      const read = readPath(observed, recordRelativePath(path));
       const observedHash = hashFieldValue(read.present ? read.value : null);
       if (observedHash !== baseline) {
         return false; // a participating field differs → a genuine change
@@ -447,6 +451,23 @@ function linkIdOf(resolution: ResolutionOutcome): string | undefined {
     return resolution.link.id;
   }
   return undefined;
+}
+
+/**
+ * `SyncFieldState` in-memory dedup key for a (side, fieldPath) pair.
+ *
+ * `JSON.stringify` of the two parts (the `derive.ts` precedent) rather than a joined
+ * string: it is **printable** — a literal NUL separator here made GNU grep classify
+ * this whole file as binary and skip it in every `readPath` audit sweep — and it is
+ * unambiguous, because any separator character occurring inside `side` or
+ * `fieldPath` is escaped by the encoder rather than colliding. A resource-qualified
+ * `fieldPath` contains `/` and `.`, so a single-character join has no safe choice.
+ *
+ * This key never leaves this method: `reBaseline` persists each row by its own
+ * `recordLinkId`/`side`/`fieldPath` columns, so the encoding is not storage.
+ */
+function rowKey(side: SyncFieldStateSide, fieldPath: string): string {
+  return JSON.stringify([side, fieldPath]);
 }
 
 /** A field's input paths: the primary `sourcePath` plus any additional inputs. */

@@ -1,4 +1,9 @@
-import type { AggregateConfig, CoerceConfig, FieldMapping } from "@mediator/domain";
+import {
+  type AggregateConfig,
+  type CoerceConfig,
+  type FieldMapping,
+  recordRelativePath,
+} from "@mediator/domain";
 
 import { applyAggregate } from "./aggregate.js";
 import { applyCoerce } from "./coerce.js";
@@ -192,7 +197,7 @@ function computeValue(field: FieldMapping, source: JsonRecord, options?: ApplyOp
 }
 
 function applyRename(field: FieldMapping, source: JsonRecord): JsonValue {
-  const read = readPath(source, field.sourcePath);
+  const read = readPath(source, recordRelativePath(field.sourcePath));
   if (!read.present) {
     throw new TransformError(
       "missing-input",
@@ -209,7 +214,7 @@ function applyCoerceField(
   source: JsonRecord,
   conversion: CoerceConfig,
 ): JsonValue {
-  const read = readPath(source, field.sourcePath);
+  const read = readPath(source, recordRelativePath(field.sourcePath));
   if (!read.present || read.value === null) {
     throw new TransformError(
       "missing-input",
@@ -220,7 +225,9 @@ function applyCoerceField(
 }
 
 function readAllInputs(field: FieldMapping, source: JsonRecord): PathRead[] {
-  return [field.sourcePath, ...additionalInputPaths(field)].map((path) => readPath(source, path));
+  return [field.sourcePath, ...additionalInputPaths(field)].map((path) =>
+    readPath(source, recordRelativePath(path)),
+  );
 }
 
 function applyExpressionField(
@@ -232,14 +239,15 @@ function applyExpressionField(
   const limits = resolveSandboxLimits(options?.sandboxLimits);
   const bindings = new Map<string, JsonValue>();
   for (const path of [field.sourcePath, ...additionalInputPaths(field)]) {
-    const name = leafName(path);
+    const relative = recordRelativePath(path);
+    const name = leafName(relative);
     if (bindings.has(name)) {
       throw new TransformError(
         "invalid-config",
         `expression: input paths collide on binding name '${name}' (last path segment must be unique)`,
       );
     }
-    const read = readPath(source, path);
+    const read = readPath(source, relative);
     // A declared input that is absent resolves to the documented null placeholder
     // (TX-3 criterion 4), so every declared name always resolves during evaluation.
     bindings.set(name, read.present ? read.value : null);
@@ -277,7 +285,7 @@ export function applyFieldMappings(
   for (const field of fields) {
     const { value } = applyFieldMapping(field, source, options);
     try {
-      setPath(output, field.targetPath, value);
+      setPath(output, recordRelativePath(field.targetPath), value);
     } catch (error) {
       if (error instanceof SetPathError) {
         throw new TransformError("invalid-config", error.message, {

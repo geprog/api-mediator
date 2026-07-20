@@ -14,7 +14,7 @@ import type {
   SyncFieldStateSide,
   TombstoneReason,
 } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import {
   contentHashOfRecord,
   valuesAgree,
@@ -645,7 +645,10 @@ export class BackfillRunner {
     resolution: ResolutionContext,
     change: DetectedChange,
   ): Promise<JsonRecord | undefined> {
-    const identity = readPath(change.observedRecord ?? {}, resolution.identitySourcePath);
+    const identity = readPath(
+      change.observedRecord ?? {},
+      recordRelativePath(resolution.identitySourcePath),
+    );
     if (!identity.present) {
       return undefined;
     }
@@ -675,7 +678,7 @@ export class BackfillRunner {
         return undefined;
       }
       matches = result.records.filter((candidate) => {
-        const read = readPath(candidate.record, resolution.identityTargetPath);
+        const read = readPath(candidate.record, recordRelativePath(resolution.identityTargetPath));
         return read.present && valuesAgree(read.value, identity.value);
       });
     } else {

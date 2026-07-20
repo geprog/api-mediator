@@ -17,7 +17,7 @@ import type {
   SyncFieldStateSide,
   TombstoneReason,
 } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import {
   isTransformError,
   readPath,
@@ -812,7 +812,8 @@ export class SyncPipelineHandler {
     const paths = sourceInputPaths(context.fieldMappings);
     const rows: SyncFieldState[] = paths.map((path) => {
       const existing = bySideField.get(rowKey(sourceSide, path));
-      const read = readPath(observed, path);
+      // Live record → record-relative; `fieldPath` below stays in the stored space.
+      const read = readPath(observed, recordRelativePath(path));
       return stripUndefined({
         id: existing?.id ?? this.#newId(),
         recordLinkId: link.id,
@@ -857,7 +858,9 @@ export class SyncPipelineHandler {
       }
       const carry = plan.carry;
       if (carry !== undefined && carry.present) {
-        setPath(payload, plan.targetPath, carry.value);
+        // The transform above already wrote record-relative keys — the PUT read-carry
+        // must land in the SAME key space, or it would add a second, literal key.
+        setPath(payload, recordRelativePath(plan.targetPath), carry.value);
       }
     }
     return payload;

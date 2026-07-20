@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import type { FieldMapping, SyncFieldState, SyncFieldStateSide } from "@mediator/domain";
+import {
+  type FieldMapping,
+  recordRelativePath,
+  type SyncFieldState,
+  type SyncFieldStateSide,
+} from "@mediator/domain";
 import type { SyncFieldStateStore } from "@mediator/db";
 import {
   applyFieldMapping,
@@ -99,12 +104,16 @@ export class IdentityMatchSeeder {
     };
 
     for (const field of input.fieldMappings) {
-      const targetRead = readPath(input.matchedTarget, field.targetPath);
+      // Reads go through `recordRelativePath` (live records are record-relative); the
+      // `SyncFieldState.fieldPath` KEYS stay in the stored, resource-qualified space —
+      // the same space `participatingFieldsForSide` derives the echo compare's paths in,
+      // so seeded rows and the loop-prevention lookup keep agreeing.
+      const targetRead = readPath(input.matchedTarget, recordRelativePath(field.targetPath));
       const agree =
         targetRead.present && this.#pairingAgrees(field, input.observedSource, targetRead.value);
 
       for (const path of inputPaths(field)) {
-        const read = readPath(input.observedSource, path);
+        const read = readPath(input.observedSource, recordRelativePath(path));
         put(input.sourceSide, path, read.present ? read.value : null, agree);
       }
       put(input.targetSide, field.targetPath, targetRead.present ? targetRead.value : null, agree);

@@ -1,3 +1,4 @@
+import { fieldResourceRef } from "@mediator/domain";
 import type {
   ApiSpec,
   ApprovedMapping,
@@ -132,6 +133,50 @@ export function findIdentityField(
   return identity.length === 1 ? identity[0] : undefined;
 }
 
+/**
+ * The subset of a mapping's `FieldMapping`s that belong to **one** resource pair.
+ *
+ * An `ApprovedMapping` covers N resource pairs (`docs/architecture/data-model.md`
+ * `SyncRule`: "one `SyncRule` per mapped resource pair … a mapping covering four
+ * resource pairs yields four independently enable-able rules"), and a `FieldMapping`
+ * row carries no pair reference — its resource-qualified `sourcePath`/`targetPath`
+ * (`issues/title`) are what say which pair it belongs to. Without this filter every
+ * rule under a multi-pair mapping receives *every* pair's fields, so a `users→members`
+ * pairing would be transformed into an `issues→tasks` write, seeded as `SyncFieldState`
+ * on the wrong link, and compared by conflict detection against a field the record
+ * does not have.
+ *
+ * **Tolerant on purpose, in the safe direction:** a field whose paths carry no
+ * resource qualification cannot be attributed to any pair, so it is **retained**
+ * (the long-standing behavior — the Phase-4 SU-6 capstone and much of the unit-test
+ * corpus seed bare paths). Only a field that positively identifies itself as
+ * belonging to a *different* pair is excluded, so this can never drop a field a rule
+ * legitimately needs.
+ *
+ * The cost of that tolerance is over-retention on a **mixed-qualification** mapping:
+ * an unqualified field is retained for *every* pair, so on a mapping that covers
+ * N > 1 pairs and qualifies only some of its fields, the unqualified one is
+ * transformed into every pair's write — the exact cross-pair leak the filter exists
+ * to stop. This is not producible today (a real `ApprovedMapping` is assembled with
+ * every path qualified, so a multi-pair mapping is uniformly qualified and the
+ * unqualified corpus is all single-pair), which is why the tolerance is kept rather
+ * than hardened into a rejection. A producer that starts emitting mixed
+ * qualification would have to revisit it.
+ */
+export function fieldMappingsForResourcePair(
+  fieldMappings: readonly FieldMapping[],
+  sourceResourceRef: string,
+  targetResourceRef: string,
+): readonly FieldMapping[] {
+  return fieldMappings.filter((field) => {
+    const source = fieldResourceRef(field.sourcePath);
+    const target = fieldResourceRef(field.targetPath);
+    const sourceForeign = source !== undefined && source !== sourceResourceRef;
+    const targetForeign = target !== undefined && target !== targetResourceRef;
+    return !sourceForeign && !targetForeign;
+  });
+}
+
 function findGroup(spec: ApiSpec, resourceRef: string): IrResourceGroup | undefined {
   return spec.parsedIR.find((group) => group.resourceRef === resourceRef);
 }
@@ -227,7 +272,13 @@ export async function resolveRuleArtifacts(
   return {
     rule,
     mapping,
-    fieldMappings,
+    // Scope the mapping's fields to THIS rule's resource pair — a multi-pair mapping
+    // must not feed a foreign pair's fields into this rule's transform/identity path.
+    fieldMappings: fieldMappingsForResourcePair(
+      fieldMappings,
+      source.resourceRef,
+      target.resourceRef,
+    ),
     operationMappings,
     sourceApp,
     targetApp,

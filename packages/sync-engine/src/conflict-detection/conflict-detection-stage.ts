@@ -6,7 +6,7 @@ import type {
   SyncFieldStateSide,
   TargetDriftCheck,
 } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import type { SyncFieldStateStore } from "@mediator/db";
 import { readPath, type JsonRecord, type JsonValue, type PathRead } from "@mediator/transform";
 
@@ -474,7 +474,8 @@ function observeTarget(
       // Target not found (or read absent) → treat the mapped field as absent (null).
       return { hash: hashFieldValue(null), changeTs: null, observedAt: now };
     }
-    const read = readPath(liveRead.record, targetPath);
+    // Live record → record-relative; the `SyncFieldState` row key above stays qualified.
+    const read = readPath(liveRead.record, recordRelativePath(targetPath));
     const changeTs =
       opts.changeTimestampsComparable && opts.targetChangeTimestampRef !== undefined
         ? readChangeTimestamp(liveRead.record, opts.targetChangeTimestampRef)
@@ -537,7 +538,7 @@ function decideWinner(
 
 /** A single-record read's value at a target field path (for PUT read-carry, CF-5). */
 function readTargetField(read: SingleRecordReadResult, targetPath: string): PathRead {
-  return read.found ? readPath(read.record, targetPath) : { present: false };
+  return read.found ? readPath(read.record, recordRelativePath(targetPath)) : { present: false };
 }
 
 /** Read + parse a record's change timestamp (epoch millis, or a Date-parseable string). */

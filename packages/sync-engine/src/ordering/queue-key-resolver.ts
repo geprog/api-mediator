@@ -1,4 +1,9 @@
-import type { RecordLink, RecordLinkScopeRef, ScopePathBinding } from "@mediator/domain";
+import {
+  type RecordLink,
+  type RecordLinkScopeRef,
+  recordRelativePath,
+  type ScopePathBinding,
+} from "@mediator/domain";
 import type { RecordLinkSideRef } from "@mediator/db";
 import { readPath, type CapturedScope, type JsonRecord, type JsonValue } from "@mediator/transform";
 
@@ -242,6 +247,6 @@ function readIdentityValue(
   if (change.observedRecord === undefined) {
     return undefined;
   }
-  const read = readPath(change.observedRecord, context.identitySourcePath);
+  const read = readPath(change.observedRecord, recordRelativePath(context.identitySourcePath));
   return read.present ? read.value : undefined;
 }

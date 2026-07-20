@@ -1,4 +1,5 @@
 import {
+  fieldResourceRef,
   fieldMappingSchema,
   operationMappingSchema,
   parameterMappingSchema,
@@ -58,10 +59,25 @@ export function resourcePairKey(sourceResourceRef: string, targetResourceRef: st
   return `${sourceResourceRef}\u0000${targetResourceRef}`;
 }
 
-/** The `resourceRef` portion of a serialized field path (`resourceRef/field`). */
-function fieldResourceRef(fieldPath: string): string {
-  const slash = fieldPath.indexOf("/");
-  return slash === -1 ? fieldPath : fieldPath.slice(0, slash);
+/**
+ * The resource-pair key component of a stored field path, for the AS-5 identity-key
+ * invariants below. A well-formed stored path is resource-qualified (`issues/title`),
+ * so this is its `resourceRef`; an **unqualified** path names no resource and falls
+ * back to the whole path as its own component — preserving these invariants' intent
+ * (two identity fields collide iff they name the same pair).
+ *
+ * On **degenerate** inputs it is marginally stricter than the local `split("/")` it
+ * replaced: `"/title"` and `"issues/"` have an empty component on one side, which
+ * {@link parseFieldRef} rejects as unqualified, so they fall back to the whole path
+ * instead of yielding an empty `resourceRef`. Both forms are rejected by edit-path
+ * validation long before assembly, so the difference is unreachable; it is called out
+ * here only so "same behavior" is not read as byte-identical on all inputs.
+ *
+ * Built on the shared {@link fieldResourceRef} parse rather than a local `split("/")`,
+ * so the qualified↔bare boundary has exactly one definition system-wide.
+ */
+function identityPairComponent(fieldPath: string): string {
+  return fieldResourceRef(fieldPath) ?? fieldPath;
 }
 
 /** The validated identity-key confirmations plus the resource pairs a *new* one touched. */
@@ -149,8 +165,8 @@ export function resolveIdentityKeys(input: {
     const counterpartIdentity = counterpartFields.find(
       (field) =>
         field.isIdentityKey === true &&
-        fieldResourceRef(field.sourcePath) === targetResourceRef &&
-        fieldResourceRef(field.targetPath) === sourceResourceRef,
+        identityPairComponent(field.sourcePath) === targetResourceRef &&
+        identityPairComponent(field.targetPath) === sourceResourceRef,
     );
     if (
       counterpartIdentity !== undefined &&
@@ -215,8 +231,8 @@ export function assertIdentityInvariants(
         "an identity key may carry only a value-preserving rename transform",
       );
     }
-    const sourceResourceRef = fieldResourceRef(field.sourcePath);
-    const targetResourceRef = fieldResourceRef(field.targetPath);
+    const sourceResourceRef = identityPairComponent(field.sourcePath);
+    const targetResourceRef = identityPairComponent(field.targetPath);
     const rpKey = resourcePairKey(sourceResourceRef, targetResourceRef);
     if (seenResourcePairs.has(rpKey)) {
       throw new BadRequestError("a mapped resource pair may have only one confirmed identity key");
@@ -226,8 +242,8 @@ export function assertIdentityInvariants(
     const counterpartIdentity = counterpartFields.find(
       (cp) =>
         cp.isIdentityKey === true &&
-        fieldResourceRef(cp.sourcePath) === targetResourceRef &&
-        fieldResourceRef(cp.targetPath) === sourceResourceRef,
+        identityPairComponent(cp.sourcePath) === targetResourceRef &&
+        identityPairComponent(cp.targetPath) === sourceResourceRef,
     );
     if (
       counterpartIdentity !== undefined &&
