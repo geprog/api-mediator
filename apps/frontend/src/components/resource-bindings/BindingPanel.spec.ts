@@ -115,6 +115,10 @@ function bindingsFixture(overrides: { collectionConfirmed?: boolean }): Resource
         ],
         scopeBindings: [],
         sourceScopeRef: null,
+        // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
+        // so `scope-link` stays the disabled option it was before Layer 3.
+        scopeLinkAvailable: false,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -235,6 +239,10 @@ function scopeFixture(overrides: { confirmed?: boolean }): ResourceBindingsRespo
           },
         ],
         sourceScopeRef: null,
+        // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
+        // so `scope-link` stays the disabled option it was before Layer 3.
+        scopeLinkAvailable: false,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -277,6 +285,10 @@ function recordDerivedScopeFixture(overrides: {
           },
         ],
         sourceScopeRef: null,
+        // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
+        // so `scope-link` stays the disabled option it was before Layer 3.
+        scopeLinkAvailable: false,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -373,7 +385,7 @@ describe("BindingPanel — SS-9 record-derived kind choice", () => {
     expect(inputValue(wrapper, "scope-sourcekey-input-id")).toBe("project");
   });
 
-  it("offers the kind selector: constant + record-derived selectable, scope-link disabled (SS-9.2)", async () => {
+  it("offers the kind selector: constant + record-derived selectable, scope-link disabled without a correspondence (SS-9.2 / SS-18.4)", async () => {
     getBindingsMock.mockResolvedValue(recordDerivedScopeFixture({}));
     const wrapper = mountPanel("operator");
     await flushPromises();
@@ -385,10 +397,12 @@ describe("BindingPanel — SS-9 record-derived kind choice", () => {
     expect(
       wrapper.get('[data-testid="scope-kind-option-id-record-derived"]').attributes("disabled"),
     ).toBeUndefined();
-    // scope-link is a Layer-3 fill source: shown, greyed, and labeled not-yet-available.
+    // scope-link is a Layer-3 fill source. Since SS-18.4 it is selectable — but only for a
+    // pair the mediator has proposed a `ScopeCorrespondence` for. This fixture has none
+    // (`scopeLinkAvailable: false`), so it stays shown, greyed, and labeled with the reason.
     const scopeLink = wrapper.get('[data-testid="scope-kind-option-id-scope-link"]');
     expect(scopeLink.attributes("disabled")).toBeDefined();
-    expect(scopeLink.text()).toContain("Layer 3");
+    expect(scopeLink.text()).toContain("scope correspondence");
   });
 
   it("switching to record-derived + a sourceScopeKey confirms the record-derived scope patch (SS-9.2)", async () => {
@@ -487,5 +501,215 @@ describe("BindingPanel — SS-9 record-derived kind choice", () => {
     // Confirmed state shown; the sourceScopeKey is operator config, never a credential/live value.
     expect(wrapper.get('[data-testid="scope-state-id"]').text()).toContain("confirmed");
     expect(wrapper.get('[data-testid="scope-readonly-id"]').text()).toContain("project");
+  });
+});
+
+describe("BindingPanel — SS-18.4 scope-link authoring", () => {
+  /**
+   * A `tasks` binding whose pair HAS a proposed `ScopeCorrespondence`: `scope-link` is
+   * selectable and the mediator offers its derived `scopeKeyRef`.
+   */
+  function scopeLinkFixture(overrides: {
+    kind?: "constant" | "scope-link";
+    confirmed?: boolean;
+  }): ResourceBindingsResponse {
+    const confirmed = overrides.confirmed === true;
+    const confirmation = {
+      confirmedBy: confirmed ? "operator@example.com" : null,
+      confirmedAt: confirmed ? "2026-07-10T00:00:00.000Z" : null,
+    };
+    return {
+      bindings: [
+        {
+          id: BINDING_ID,
+          apiSpecId: SPEC_ID,
+          resourceRef: "tasks",
+          refs: [],
+          scopeBindings: [
+            overrides.kind === "scope-link"
+              ? { parameterName: "id", kind: "scope-link", scopeKeyRef: "id", ...confirmation }
+              : { parameterName: "id", kind: "constant", value: "", ...confirmation },
+          ],
+          sourceScopeRef: null,
+          scopeLinkAvailable: true,
+          scopeKeyRefCandidates: { id: "id" },
+        },
+      ],
+    };
+  }
+
+  it("makes scope-link SELECTABLE once the pair has a proposed ScopeCorrespondence (SS-18.4)", async () => {
+    getBindingsMock.mockResolvedValue(scopeLinkFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    const scopeLink = wrapper.get('[data-testid="scope-kind-option-id-scope-link"]');
+    expect(scopeLink.attributes("disabled")).toBeUndefined();
+    expect(scopeLink.text()).toBe("scope-link");
+  });
+
+  it("pre-fills the mediator's DERIVED scopeKeyRef when scope-link is selected (SS-18.4)", async () => {
+    getBindingsMock.mockResolvedValue(scopeLinkFixture({}));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-id"]').setValue("scope-link");
+    expect(inputValue(wrapper, "scope-keyref-input-id")).toBe("id");
+  });
+
+  it("SELECTING scope-link writes the binding UNCONFIRMED — nothing is auto-confirmed (SS-18.4/18.8)", async () => {
+    getBindingsMock.mockResolvedValue(scopeLinkFixture({}));
+    updateBindingMock.mockResolvedValue(firstBinding(scopeLinkFixture({ kind: "scope-link" })));
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-id"]').setValue("scope-link");
+    await wrapper.get('[data-testid="scope-select-link-id"]').trigger("click");
+    await flushPromises();
+
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "id",
+      kind: "scope-link",
+      scopeKeyRef: "id",
+      confirm: false,
+    });
+  });
+
+  it("CONFIRMING scope-link is a separate, explicit operator action (SS-18.4)", async () => {
+    getBindingsMock.mockResolvedValue(scopeLinkFixture({ kind: "scope-link" }));
+    updateBindingMock.mockResolvedValue(
+      firstBinding(scopeLinkFixture({ kind: "scope-link", confirmed: true })),
+    );
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    // A persisted scope-link entry seeds the selector to itself (no longer forced to constant).
+    await wrapper.get('[data-testid="scope-confirm-id"]').trigger("click");
+    await flushPromises();
+
+    expect(updateBindingMock).toHaveBeenCalledWith(BINDING_ID, {
+      parameterName: "id",
+      kind: "scope-link",
+      scopeKeyRef: "id",
+      confirm: true,
+    });
+  });
+
+  it("cannot select scope-link without a scopeKeyRef — the server 400s an empty one", async () => {
+    getBindingsMock.mockResolvedValue({
+      bindings: [
+        {
+          ...firstBinding(scopeLinkFixture({})),
+          scopeKeyRefCandidates: {},
+        },
+      ],
+    });
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-id"]').setValue("scope-link");
+    expect(inputValue(wrapper, "scope-keyref-input-id")).toBe("");
+    expect(
+      wrapper.get('[data-testid="scope-select-link-id"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(wrapper.get('[data-testid="scope-confirm-id"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("pre-fills each scope row from ITS OWN parameter's candidate, never one key into both", async () => {
+    // The hazard: a two-part Gitea container whose `{owner}`/`{repo}` rows both pre-fill
+    // `owner` composes `alice/alice` — a VALID repository path, so an operator accepting
+    // both pre-fills addresses a real-but-wrong container instead of getting an error.
+    getBindingsMock.mockResolvedValue({
+      bindings: [
+        {
+          id: BINDING_ID,
+          apiSpecId: SPEC_ID,
+          resourceRef: "issues",
+          refs: [],
+          scopeBindings: [
+            {
+              parameterName: "owner",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+            {
+              parameterName: "repo",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+          ],
+          sourceScopeRef: null,
+          scopeLinkAvailable: true,
+          scopeKeyRefCandidates: { owner: "owner", repo: "repo" },
+        },
+      ],
+    });
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-owner"]').setValue("scope-link");
+    await wrapper.get('[data-testid="scope-kind-select-repo"]').setValue("scope-link");
+
+    expect(inputValue(wrapper, "scope-keyref-input-owner")).toBe("owner");
+    expect(inputValue(wrapper, "scope-keyref-input-repo")).toBe("repo");
+  });
+
+  it("pre-fills nothing for a parameter the mediator could not derive a key for", async () => {
+    getBindingsMock.mockResolvedValue({
+      bindings: [
+        {
+          id: BINDING_ID,
+          apiSpecId: SPEC_ID,
+          resourceRef: "issues",
+          refs: [],
+          scopeBindings: [
+            {
+              parameterName: "owner",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+            {
+              parameterName: "workspace",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+          ],
+          sourceScopeRef: null,
+          scopeLinkAvailable: true,
+          // `workspace` matched no source scope component -> withheld, not defaulted.
+          scopeKeyRefCandidates: { owner: "owner" },
+        },
+      ],
+    });
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-workspace"]').setValue("scope-link");
+    expect(inputValue(wrapper, "scope-keyref-input-workspace")).toBe("");
+    // …and the action stays disabled until the operator supplies one.
+    expect(
+      wrapper.get('[data-testid="scope-select-link-workspace"]').attributes("disabled"),
+    ).toBeDefined();
+  });
+
+  it("renders read-only for a viewer — no selector, input, or action (OA-2 / SS-18.8)", async () => {
+    getBindingsMock.mockResolvedValue(scopeLinkFixture({ kind: "scope-link", confirmed: true }));
+    const wrapper = mountPanel("viewer");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="scope-kind-select-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-keyref-input-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-select-link-id"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="scope-confirm-id"]').exists()).toBe(false);
+    // The stored scopeKeyRef is operator config, never a live/secret value.
+    expect(wrapper.get('[data-testid="scope-readonly-id"]').text()).toContain("id");
   });
 });

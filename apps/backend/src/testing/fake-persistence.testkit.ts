@@ -13,6 +13,7 @@ import type {
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
+  ScopeCorrespondence,
   ScopePathBinding,
 } from "@mediator/domain";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -32,6 +33,10 @@ import type {
 } from "../modules/persistence.js";
 import { RegistrationService } from "../modules/registration.js";
 import { ResourceBindingService } from "../modules/resource-bindings.js";
+import {
+  ScopeLinkAuthoringResolver,
+  type ScopeCorrespondenceSideReader,
+} from "../modules/scope-authoring.js";
 import { SpecRegistry } from "../modules/spec-registry.js";
 import { LocalAccountsAuthProvider } from "../http/auth/index.js";
 import { registerErrorHandler } from "../http/errors.js";
@@ -68,6 +73,30 @@ export class InMemoryStore {
   public readonly bindings = new Map<string, ResourceBinding>();
   public readonly credentials: RecordedCredential[] = [];
   public readonly events: DomainEventEnvelope[] = [];
+  /**
+   * Proposed/confirmed `ScopeCorrespondence`s (SS-10/SS-18), keyed by `resourcePairRef` —
+   * the same "one per scoped resource pair" invariant the UNIQUE index enforces. Seed it
+   * to make `scope-link` a selectable kind for a resource (SS-18.4).
+   */
+  public readonly scopeCorrespondences = new Map<string, ScopeCorrespondence>();
+}
+
+/**
+ * Mirrors `ScopeCorrespondenceRepository.listByResourceSide`: every correspondence whose
+ * canonical `resourcePairRef` names `(appId, resourceRef)` as one of its two
+ * `"<appId>:<resourceRef>"` tokens. Exact token equality, as the real repo re-checks
+ * after its SQL `LIKE` narrowing.
+ */
+class FakeScopeCorrespondenceRepo implements ScopeCorrespondenceSideReader {
+  public constructor(private readonly store: InMemoryStore) {}
+  public listByResourceSide(appId: string, resourceRef: string): Promise<ScopeCorrespondence[]> {
+    const token = `${appId}:${resourceRef}`;
+    return Promise.resolve(
+      [...this.store.scopeCorrespondences.values()].filter((correspondence) =>
+        correspondence.resourcePairRef.split("|").some((side) => side === token),
+      ),
+    );
+  }
 }
 
 class FakeAppRepo implements AppReader, AppTxRepo {
@@ -168,10 +197,12 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
     // Mirror ResourceBindingRepository.updateScopePathBinding (via
     // applyScopePathBindingPatch) exactly: rewrite only the entry whose
     // parameterName matches (per-parameter — SS-3.2) to the shape of the patch's
-    // `kind` (a `constant`'s literal `value`, or a `record-derived`'s
-    // `sourceScopeKey` + optional `transform`) — replacing the member, not spreading
-    // over its prior fields — leaving every sibling scope entry AND all operational
-    // refs untouched; when no entry matches, write nothing and return unchanged.
+    // `kind` (a `constant`'s literal `value`, a `record-derived`'s `sourceScopeKey` +
+    // optional `transform`, or a `scope-link`'s `scopeKeyRef`) — replacing the member,
+    // not spreading over its prior fields — leaving every sibling scope entry AND all
+    // operational refs untouched; when no entry matches, write nothing and return
+    // unchanged. A `scope-link` patch may carry a NULL confirmation pair (SS-18.4's
+    // select-without-confirming), which is stored verbatim exactly as the real repo does.
     const scope = existing.scopePathBindings ?? [];
     if (!scope.some((entry) => entry.parameterName === patch.parameterName)) {
       return Promise.resolve(existing);
@@ -187,11 +218,20 @@ class FakeBindingRepo implements BindingReader, BindingTxRepo {
           confirmedAt: patch.confirmedAt,
         };
       }
+      if (patch.kind === "record-derived") {
+        return {
+          kind: "record-derived",
+          parameterName: patch.parameterName,
+          sourceScopeKey: patch.sourceScopeKey,
+          ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
+          confirmedBy: patch.confirmedBy,
+          confirmedAt: patch.confirmedAt,
+        };
+      }
       return {
-        kind: "record-derived",
+        kind: "scope-link",
         parameterName: patch.parameterName,
-        sourceScopeKey: patch.sourceScopeKey,
-        ...(patch.transform !== undefined ? { transform: patch.transform } : {}),
+        scopeKeyRef: patch.scopeKeyRef,
         confirmedBy: patch.confirmedBy,
         confirmedAt: patch.confirmedAt,
       };
@@ -348,6 +388,12 @@ export function buildTestServer(
     {
       registrar: new RegistrationService({ unitOfWork, specRegistry, defaultPollInterval }),
       bindingConfirmer: new ResourceBindingService({ unitOfWork }),
+      // SS-18.4 — over the same in-memory store, so seeding a `ScopeCorrespondence`
+      // makes `scope-link` selectable on the bindings DTO exactly as in production.
+      scopeLinkAuthoring: new ScopeLinkAuthoringResolver({
+        correspondences: new FakeScopeCorrespondenceRepo(store),
+        repos: { apiSpecs: readers.specReader, resourceBindings: readers.bindingReader },
+      }),
       exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
       appReader: readers.appReader,
       specReader: readers.specReader,

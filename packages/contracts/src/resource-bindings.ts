@@ -119,6 +119,22 @@ export type ResourceBindingSourceScopeRefDto = z.infer<
  * its record-scope-capture ref (SS-7). `scopeBindings` is empty for a resource with
  * no non-record-id path parameter; `sourceScopeRef` is **null** for a resource that
  * carries no container field.
+ *
+ * The last two fields carry the SS-18.4 kind-selector context, so the client never has
+ * to know about `ScopeCorrespondence`/`ScopeLink` to render the selector correctly:
+ *
+ * - `scopeLinkAvailable` — whether this resource's pair has a proposed
+ *   `ScopeCorrespondence` (SS-18.1). `scope-link` is a **selectable** kind exactly when
+ *   this is `true`; for a non-scoped pair it stays `false` and the option stays
+ *   disabled, so L1 `constant` / L2 `record-derived` authoring is unchanged.
+ * - `scopeKeyRefCandidates` — the mediator's **derived** `scopeKeyRef` **per scope path
+ *   parameter** (which component of that side's `ScopeLink.appXScopeKey` addresses that
+ *   parameter), keyed by `parameterName`. A parameter with no confident derivation is
+ *   **absent** from the map rather than defaulted to a sibling's component: a multi-part
+ *   container (Gitea `{owner}`/`{repo}`) would otherwise pre-fill one component into both
+ *   rows, and `alice/alice` is a valid repository path — so the wrong key addresses a
+ *   real-but-wrong container instead of failing loudly. Proposals the operator may
+ *   correct, never confirmations.
  */
 export const resourceBindingDtoSchema = z.object({
   id: z.string(),
@@ -127,6 +143,8 @@ export const resourceBindingDtoSchema = z.object({
   refs: z.array(resourceBindingRefDtoSchema),
   scopeBindings: z.array(resourceBindingScopeDtoSchema),
   sourceScopeRef: resourceBindingSourceScopeRefDtoSchema.nullable(),
+  scopeLinkAvailable: z.boolean(),
+  scopeKeyRefCandidates: z.record(z.string(), z.string()),
 });
 export type ResourceBindingDto = z.infer<typeof resourceBindingDtoSchema>;
 
@@ -204,9 +222,44 @@ export type UpdateScopeRecordDerivedBindingRequest = z.infer<
   typeof updateScopeRecordDerivedBindingRequestSchema
 >;
 
+/**
+ * The **`scope-link`** scope-binding patch (SS-18.4, extending the SS-9.2 kind
+ * selector to Layer 3). Two distinct operator actions share this one shape,
+ * discriminated by `confirm` — which is what keeps SS-18.4's "written … left
+ * **unconfirmed** until the operator confirms it" and SS-18.8's "nothing is silently
+ * auto-confirmed" both true:
+ *
+ * - **`confirm` absent / `false`** — *selecting* `scope-link` as the parameter's fill
+ *   source. The entry is rewritten to the `scope-link` member with its `scopeKeyRef`
+ *   and an explicitly **null** confirmation pair, so the choice is recorded but used
+ *   nowhere (`resolveScopeLinkScopeValues` skips unconfirmed entries, and the SS-15
+ *   gate still blocks the rule).
+ * - **`confirm: true`** — the operator ratifying it, stamping `confirmedBy`/
+ *   `confirmedAt` exactly as the `constant`/`record-derived` supply-and-confirm does.
+ *
+ * `scopeKeyRef` is **optional on the wire** so an empty/absent one reaches the service
+ * as a single 400 ("cannot be confirmed scope-link without a scopeKeyRef"), mirroring
+ * how the constant defers its empty-`value` check and `record-derived` its empty
+ * `sourceScopeKey` check. The client normally echoes back the mediator's **derived**
+ * candidate (`ResourceBindingDto.scopeKeyRefCandidate`), and may correct it — the
+ * derivation is a proposal, never an imposition.
+ */
+export const updateScopeScopeLinkBindingRequestSchema = z
+  .object({
+    parameterName: z.string().min(1),
+    kind: z.literal("scope-link"),
+    scopeKeyRef: z.string().optional(),
+    confirm: z.boolean().optional(),
+  })
+  .strict();
+export type UpdateScopeScopeLinkBindingRequest = z.infer<
+  typeof updateScopeScopeLinkBindingRequestSchema
+>;
+
 export const updateScopeBindingRequestSchema = z.union([
   updateScopeConstantBindingRequestSchema,
   updateScopeRecordDerivedBindingRequestSchema,
+  updateScopeScopeLinkBindingRequestSchema,
 ]);
 export type UpdateScopeBindingRequest = z.infer<typeof updateScopeBindingRequestSchema>;
 
@@ -241,15 +294,17 @@ export type UpdateSourceScopeRefRequest = z.infer<typeof updateSourceScopeRefReq
 
 /**
  * `PATCH /api/resource-bindings/:id` request: an operational-ref patch (RB-2), a
- * scope-binding patch — `constant` (SS-3) **or** `record-derived` (SS-8) — **or** a
- * `sourceScopeRef` patch (SS-7), distinguished by which key it carries (`refKind` /
- * `parameterName` / `components`); the two scope-binding shapes are then told apart by
- * the presence of `kind`. One PATCH confirms exactly one binding target.
+ * scope-binding patch — `constant` (SS-3), `record-derived` (SS-8) **or** `scope-link`
+ * (SS-18.4) — **or** a `sourceScopeRef` patch (SS-7), distinguished by which key it
+ * carries (`refKind` / `parameterName` / `components`); the three scope-binding shapes are
+ * then told apart by their `kind` (the `constant` branch is the one that carries none).
+ * One PATCH confirms exactly one binding target.
  */
 export const updateResourceBindingRequestSchema = z.union([
   updateResourceBindingRefRequestSchema,
   updateScopeConstantBindingRequestSchema,
   updateScopeRecordDerivedBindingRequestSchema,
+  updateScopeScopeLinkBindingRequestSchema,
   updateSourceScopeRefRequestSchema,
 ]);
 export type UpdateResourceBindingRequest = z.infer<typeof updateResourceBindingRequestSchema>;

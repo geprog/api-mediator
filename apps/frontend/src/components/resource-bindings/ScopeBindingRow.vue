@@ -7,8 +7,9 @@ import { computed, ref } from "vue";
 import {
   canSupplyScope,
   canSupplyScopeKey,
+  canSupplyScopeKeyRef,
   scopeBindingState,
-  SCOPE_KIND_OPTIONS,
+  scopeKindOptions,
   type SelectableScopeBindingKind,
 } from "./binding-model.js";
 
@@ -29,6 +30,14 @@ import {
  *   `sourceScopeRef` components when the panel has that rule context ({@link sourceScopeKeyOptions});
  *   otherwise a free-text input is the fallback (the gate validates it per-rule regardless —
  *   the client is not the authority). Empty key cannot be confirmed (the server 400s it).
+ * - `scope-link` (SS-18.4, Layer 3) — selectable only once the pair has a proposed
+ *   `ScopeCorrespondence` (`scopeLinkAvailable`). Its datum is the **`scopeKeyRef`**: which
+ *   component of the resolved `ScopeLink`'s target `appXScopeKey` fills the parameter,
+ *   pre-filled from the mediator's derived candidate (`scopeKeyRefCandidate`) and
+ *   operator-correctable. Unlike the other two kinds it offers **two** actions, because
+ *   SS-18.4 separates them: *Select scope-link* writes the entry **unconfirmed** (the choice
+ *   is recorded, and used nowhere), and *Confirm* then ratifies it. Nothing is ever
+ *   auto-confirmed (SS-18.8).
  *
  * The existing entry renders per its **DTO** `kind` (its current persisted fill source);
  * the selector seeds from that kind and lets the operator switch which kind to confirm into.
@@ -49,6 +58,18 @@ const props = defineProps<{
    * back to a free-text `sourceScopeKey` input.
    */
   sourceScopeKeyOptions?: readonly string[] | undefined;
+  /**
+   * SS-18.4 — whether this resource's pair has a proposed `ScopeCorrespondence`, which is
+   * what makes `scope-link` a **selectable** kind rather than a disabled one.
+   */
+  scopeLinkAvailable: boolean;
+  /**
+   * SS-18.4 — the mediator's **derived** `scopeKeyRef` for this resource (which target
+   * `appXScopeKey` component addresses its scope parameters), seeding the input. `null`
+   * when it could not be derived; the operator then types one. A proposal, not a
+   * confirmation.
+   */
+  scopeKeyRefCandidate: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -61,18 +82,25 @@ const stateSeverity = computed<"success" | "warn">(() =>
 );
 
 // The kind to confirm INTO — seeded from the entry's current DTO kind (SS-2 defaults it to
-// `constant`), operator-switchable. A persisted `scope-link` entry (SS-12) is displayed
-// read-only but is not a **selectable** confirm kind here (the container-linking confirm UI
-// is SS-15), so the selector seeds to `constant`; the operator switches to a real kind.
-const selectedKind = ref<SelectableScopeBindingKind>(
-  props.scope.kind === "scope-link" ? "constant" : props.scope.kind,
-);
+// `constant`), operator-switchable. Since SS-18.4 `scope-link` is a real selectable kind
+// (when the pair has a proposed `ScopeCorrespondence`), so a persisted `scope-link` entry
+// now seeds the selector to itself rather than falling back to `constant`.
+const selectedKind = ref<SelectableScopeBindingKind>(props.scope.kind);
+
+// The kind-selector options (SS-9.2, extended by SS-18.4): `scope-link` is enabled exactly
+// when the pair has a proposed correspondence.
+const kindOptions = computed(() => scopeKindOptions(props.scopeLinkAvailable));
 
 // Per-kind drafts, seeded from the matching DTO member so a confirmed entry shows as stored
-// (SS-9.3); blank for the other kind and while unconfirmed (SS-2 derives a `constant` blank).
+// (SS-9.3); blank for the other kinds and while unconfirmed (SS-2 derives a `constant` blank).
 const draftValue = ref<string>(props.scope.kind === "constant" ? props.scope.value : "");
 const draftSourceScopeKey = ref<string>(
   props.scope.kind === "record-derived" ? props.scope.sourceScopeKey : "",
+);
+// SS-18.4 — the stored `scopeKeyRef` if the entry already is `scope-link`, else the
+// mediator's derived candidate (a proposal the operator may correct before writing it).
+const draftScopeKeyRef = ref<string>(
+  props.scope.kind === "scope-link" ? props.scope.scopeKeyRef : (props.scopeKeyRefCandidate ?? ""),
 );
 
 /** Rule/source context present → the `sourceScopeKey` pick list; absent → the text fallback. */
@@ -92,25 +120,59 @@ const currentDatum = computed<string>(() => {
   }
 });
 
-const canConfirm = computed<boolean>(() =>
-  selectedKind.value === "constant"
-    ? canSupplyScope(draftValue.value)
-    : canSupplyScopeKey(draftSourceScopeKey.value),
-);
+const canConfirm = computed<boolean>(() => {
+  switch (selectedKind.value) {
+    case "constant":
+      return canSupplyScope(draftValue.value);
+    case "record-derived":
+      return canSupplyScopeKey(draftSourceScopeKey.value);
+    case "scope-link":
+      return canSupplyScopeKeyRef(draftScopeKeyRef.value);
+  }
+});
+
+/**
+ * The scope patch for the selected kind. `confirm` is only meaningful for `scope-link`
+ * (SS-18.4's select-then-confirm); the `constant`/`record-derived` shapes are unchanged
+ * supply-and-confirm actions, so they ignore it.
+ */
+function scopePatchFor(confirm: boolean): UpdateResourceBindingRequest {
+  switch (selectedKind.value) {
+    case "constant":
+      return { parameterName: props.scope.parameterName, value: draftValue.value };
+    case "record-derived":
+      return {
+        parameterName: props.scope.parameterName,
+        kind: "record-derived",
+        sourceScopeKey: draftSourceScopeKey.value,
+      };
+    case "scope-link":
+      return {
+        parameterName: props.scope.parameterName,
+        kind: "scope-link",
+        scopeKeyRef: draftScopeKeyRef.value,
+        confirm,
+      };
+  }
+}
 
 function supplyAndConfirm(): void {
   if (!canConfirm.value) {
     return;
   }
-  const request: UpdateResourceBindingRequest =
-    selectedKind.value === "constant"
-      ? { parameterName: props.scope.parameterName, value: draftValue.value }
-      : {
-          parameterName: props.scope.parameterName,
-          kind: "record-derived",
-          sourceScopeKey: draftSourceScopeKey.value,
-        };
-  emit("confirm", { bindingId: props.bindingId, request });
+  emit("confirm", { bindingId: props.bindingId, request: scopePatchFor(true) });
+}
+
+/**
+ * SS-18.4 — *select* `scope-link` as this parameter's fill source: the entry is written
+ * with the derived `scopeKeyRef` and left **unconfirmed**, so the choice is recorded but
+ * used nowhere until the operator confirms it separately (SS-18.8).
+ */
+function selectScopeLink(): void {
+  if (!canConfirm.value) {
+    return;
+  }
+  emit("confirm", { bindingId: props.bindingId, request: scopePatchFor(false) });
 }
 </script>
 
@@ -149,7 +211,7 @@ function supplyAndConfirm(): void {
           :data-testid="`scope-kind-select-${scope.parameterName}`"
         >
           <option
-            v-for="option in SCOPE_KIND_OPTIONS"
+            v-for="option in kindOptions"
             :key="option.kind"
             :value="option.kind"
             :disabled="option.disabled"
@@ -173,7 +235,7 @@ function supplyAndConfirm(): void {
       </label>
 
       <!-- record-derived (SS-8a): a sourceScopeKey — a pick list with rule context, else text. -->
-      <label v-else class="scope-row__field">
+      <label v-else-if="selectedKind === 'record-derived'" class="scope-row__field">
         <span class="scope-row__field-label">Source scope key</span>
         <select
           v-if="hasSourceScopeContext"
@@ -196,10 +258,43 @@ function supplyAndConfirm(): void {
         />
       </label>
 
+      <!-- scope-link (SS-18.4, Layer 3): the scopeKeyRef — seeded from the mediator's derived
+           candidate, operator-correctable. Two actions: select (writes it UNCONFIRMED) and
+           confirm (ratifies it). -->
+      <label v-else class="scope-row__field">
+        <span class="scope-row__field-label">Scope key ref</span>
+        <input
+          v-model="draftScopeKeyRef"
+          type="text"
+          class="scope-row__input"
+          :data-testid="`scope-keyref-input-${scope.parameterName}`"
+          :placeholder="`container key component for ${scope.parameterName}`"
+        />
+      </label>
+
+      <p
+        v-if="selectedKind === 'scope-link'"
+        class="scope-row__hint"
+        :data-testid="`scope-keyref-hint-${scope.parameterName}`"
+      >
+        Which component of the linked container's scope key fills this parameter. Selecting
+        <strong>scope-link</strong> records the choice but leaves it unconfirmed — confirm it
+        separately, and confirm the pair's scope identity key, before a rule can enable.
+      </p>
+
       <div class="scope-row__buttons">
         <Button
+          v-if="selectedKind === 'scope-link'"
           size="small"
-          label="Supply and confirm"
+          severity="secondary"
+          label="Select scope-link"
+          :disabled="!canConfirm"
+          :data-testid="`scope-select-link-${scope.parameterName}`"
+          @click="selectScopeLink"
+        />
+        <Button
+          size="small"
+          :label="selectedKind === 'scope-link' ? 'Confirm' : 'Supply and confirm'"
           :disabled="!canConfirm"
           :data-testid="`scope-confirm-${scope.parameterName}`"
           @click="supplyAndConfirm"

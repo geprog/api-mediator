@@ -69,31 +69,53 @@ export function canSupplyScope(value: string): boolean {
 export type ScopeBindingKind = "constant" | "record-derived" | "scope-link";
 
 /**
- * The kinds an operator can actually confirm a scope binding **into** in Layer 2 —
- * `scope-link` is a Layer-3 fill source and is offered only as a disabled option
- * ({@link SCOPE_KIND_OPTIONS}).
+ * The kinds an operator can actually confirm a scope binding **into**. `scope-link` is
+ * among them only when the resource's pair has a proposed `ScopeCorrespondence`
+ * (SS-18.4) — see {@link scopeKindOptions}; for a non-scoped pair it stays the disabled
+ * option it was before Layer 3 could be configured.
  */
-export type SelectableScopeBindingKind = "constant" | "record-derived";
+export type SelectableScopeBindingKind = "constant" | "record-derived" | "scope-link";
 
 /** One kind-selector option (SS-9.2): the kind, a glossary-exact label, and whether it is selectable. */
 export interface ScopeKindOption {
   readonly kind: ScopeBindingKind;
   readonly label: string;
-  /** `scope-link` is disabled — a Layer-3 fill source not built yet (SS-9.2). */
+  /** `scope-link` is disabled until the pair has a proposed `ScopeCorrespondence` (SS-18.4). */
   readonly disabled: boolean;
 }
 
 /**
- * The three fill-source kinds the SS-9.2 kind selector presents. `constant` and
- * `record-derived` are selectable now; `scope-link` is shown **disabled** and labeled
- * as Layer-3/not-yet-available so the operator sees the full choice without being able
- * to pick an unbuilt kind. Labels keep the glossary term verbatim.
+ * The three fill-source kinds the SS-9.2 kind selector presents (SS-18.4 extends it).
+ * `constant` and `record-derived` are always selectable; `scope-link` becomes selectable
+ * exactly when `scopeLinkAvailable` — i.e. when the mediator has **proposed** a
+ * `ScopeCorrespondence` for this resource's pair, which is what makes a Layer-3 fill
+ * resolvable at all. Without one it stays visible but disabled, so the operator sees the
+ * full choice and why the third is unavailable, and a non-scoped pair is unaffected.
+ * Labels keep the glossary term verbatim.
  */
-export const SCOPE_KIND_OPTIONS: readonly ScopeKindOption[] = [
-  { kind: "constant", label: "constant", disabled: false },
-  { kind: "record-derived", label: "record-derived", disabled: false },
-  { kind: "scope-link", label: "scope-link (Layer 3 — not yet available)", disabled: true },
-];
+export function scopeKindOptions(scopeLinkAvailable: boolean): readonly ScopeKindOption[] {
+  return [
+    { kind: "constant", label: "constant", disabled: false },
+    { kind: "record-derived", label: "record-derived", disabled: false },
+    {
+      kind: "scope-link",
+      label: scopeLinkAvailable
+        ? "scope-link"
+        : "scope-link (needs a scope correspondence for this pair)",
+      disabled: !scopeLinkAvailable,
+    },
+  ];
+}
+
+/**
+ * Whether a `scope-link` scope binding may be written (SS-18.4): a non-blank `scopeKeyRef`
+ * must be present — normally the mediator's derived candidate
+ * (`ResourceBindingDto.scopeKeyRefCandidate`), optionally corrected by the operator. The
+ * server 400s an empty one, mirroring {@link canSupplyScopeKey} for `record-derived`.
+ */
+export function canSupplyScopeKeyRef(scopeKeyRef: string): boolean {
+  return scopeKeyRef.trim().length > 0;
+}
 
 /**
  * Whether a `record-derived` scope binding may be supplied + confirmed (SS-9.2): a

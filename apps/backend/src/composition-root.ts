@@ -5,6 +5,7 @@ import {
   MappingProposalRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
   closeDb,
   tx,
   type Database,
@@ -28,6 +29,7 @@ import { createMappingProvider } from "./modules/detection/provider.js";
 import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
+import { ScopeLinkAuthoringResolver } from "./modules/scope-authoring.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
 import { SyncOperatorService, type SyncOperatorEngine } from "./modules/sync/operator.js";
 import { LocalAccountsAuthProvider } from "./http/auth/index.js";
@@ -170,6 +172,12 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       defaultPollInterval: config.registration.defaultPollInterval,
     }),
     bindingConfirmer: new ResourceBindingService({ unitOfWork }),
+    // SS-18.4 — the kind-selector context reader: the pair's proposed `ScopeCorrespondence`
+    // (`scope-link` selectable) + the container binding behind the derived `scopeKeyRef`.
+    scopeLinkAuthoring: new ScopeLinkAuthoringResolver({
+      correspondences: new ScopeCorrespondenceRepository(db),
+      repos: { apiSpecs: specReader, resourceBindings: new ResourceBindingRepository(db) },
+    }),
     exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
     appReader: new RegisteredAppRepository(db),
     specReader,

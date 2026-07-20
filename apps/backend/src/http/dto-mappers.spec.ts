@@ -23,6 +23,17 @@ function binding(scopePathBindings: ResourceBinding["scopePathBindings"]): Resou
   return { id: "rb-1", apiSpecId: "spec-1", resourceRef: "tasks", scopePathBindings };
 }
 
+/**
+ * The SS-18.4 kind-selector context these serialization cases do not exercise: no proposed
+ * `ScopeCorrespondence`, so `scope-link` is not selectable and no `scopeKeyRef` candidate is
+ * offered. It must not affect how an ALREADY-persisted `scope-link` entry serializes — which
+ * is exactly what these cases assert.
+ */
+const NO_SCOPE_LINK_CONTEXT = {
+  scopeLinkAvailable: false,
+  scopeKeyRefCandidates: {},
+} as const;
+
 describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", () => {
   it("serializes a confirmed scope-link entry kind-tagged with its scopeKeyRef", () => {
     const dto = toResourceBindingDto(
@@ -36,6 +47,7 @@ describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", (
         },
       ]),
       CAPS,
+      NO_SCOPE_LINK_CONTEXT,
     );
 
     expect(dto.scopeBindings).toHaveLength(1);
@@ -61,6 +73,7 @@ describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", (
         },
       ]),
       CAPS,
+      NO_SCOPE_LINK_CONTEXT,
     );
 
     expect(dto.scopeBindings).toStrictEqual([
@@ -100,6 +113,7 @@ describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", (
         },
       ]),
       CAPS,
+      NO_SCOPE_LINK_CONTEXT,
     );
 
     expect(dto.scopeBindings.map((entry) => `${entry.parameterName}:${entry.kind}`)).toStrictEqual([

@@ -9,6 +9,7 @@ import type {
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
+import type { ScopeLinkAuthoringResolver } from "../../modules/scope-authoring.js";
 import type { SyncOperatorService } from "../../modules/sync/operator.js";
 
 /**
@@ -23,6 +24,12 @@ export interface OperatorApiDeps {
   readonly specReader: SpecReader;
   readonly bindingReader: BindingReader;
   readonly bindingConfirmer: BindingConfirmer;
+  /**
+   * SS-18.4 — resolves, per `ResourceBinding`, whether `scope-link` is a selectable
+   * scope-binding kind (its pair has a proposed `ScopeCorrespondence`) and the derived
+   * `scopeKeyRef` a selection would carry. Read-only; it confirms nothing.
+   */
+  readonly scopeLinkAuthoring: ScopeLinkAuthoringResolver;
   readonly exclusionsReplacer: ExclusionsReplacer;
   // Phase-3 Review & Approval (RA-1..RA-5): the read side, the Approval Service
   // (per-item decisions + identity-key confirmation + approve), and the

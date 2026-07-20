@@ -66,9 +66,51 @@ export function canonicalResourcePairRef(a: ResourcePairSide, b: ResourcePairSid
 }
 
 /** The resource-group ref portion of a serialized IR path/operation ref (leading segment). */
-function resourceRefOf(serializedRef: string): string {
+export function resourceRefOf(serializedRef: string): string {
   const slash = serializedRef.indexOf("/");
   return slash === -1 ? serializedRef : serializedRef.slice(0, slash);
+}
+
+/** One **directional** `(source resource, target resource)` pair a mapping covers. */
+export interface DirectionalResourcePair {
+  readonly sourceResourceRef: string;
+  readonly targetResourceRef: string;
+}
+
+/**
+ * The distinct **directional** resource pairs a peer-peer mapping covers — every
+ * `FieldMapping` (`sourcePath → targetPath`) and `OperationMapping`
+ * (`sourceOperationRef → targetOperationRef`) reduced to its `(source resource,
+ * target resource)` refs, deduplicated in first-seen order.
+ *
+ * Exported (rather than left inline in {@link derivePeerPeerArtifacts}) because the
+ * SS-18 `ScopeCorrespondence` proposal enumerates the **same** pairs the instantiation
+ * emits `SyncRule`s for, and must not re-derive that enumeration independently — a
+ * divergence would propose a correspondence for a pair that has no rule, or miss one
+ * that does.
+ */
+export function deriveDirectionalResourcePairs(
+  fields: readonly FieldMapping[],
+  operations: readonly OperationMapping[],
+): readonly DirectionalResourcePair[] {
+  const pairs = new Map<string, DirectionalResourcePair>();
+  const addPair = (sourceRef: string, targetRef: string): void => {
+    const sourceResourceRef = resourceRefOf(sourceRef);
+    const targetResourceRef = resourceRefOf(targetRef);
+    // A JSON tuple is a collision-free in-memory Map key even when a ref itself
+    // contains a separator character (and, unlike a NUL join, is printable).
+    const key = JSON.stringify([sourceResourceRef, targetResourceRef]);
+    if (!pairs.has(key)) {
+      pairs.set(key, { sourceResourceRef, targetResourceRef });
+    }
+  };
+  for (const field of fields) {
+    addPair(field.sourcePath, field.targetPath);
+  }
+  for (const operation of operations) {
+    addPair(operation.sourceOperationRef, operation.targetOperationRef);
+  }
+  return [...pairs.values()];
 }
 
 /** The peer-peer artifacts: one disabled `SyncRule` per mapped resource pair + the sync edge. */
@@ -94,29 +136,18 @@ export function derivePeerPeerArtifacts(input: {
 }): PeerPeerArtifacts {
   const { mapping, fields, operations, newId } = input;
 
-  // Distinct directional (source resource, target resource) pairs the mapping covers.
-  const directionalPairs = new Map<string, { readonly src: string; readonly tgt: string }>();
-  const addPair = (sourceRef: string, targetRef: string): void => {
-    const src = resourceRefOf(sourceRef);
-    const tgt = resourceRefOf(targetRef);
-    // NUL is a collision-free in-memory Map key separator (never persisted — the
-    // stored resourcePairRef below uses a printable form; Postgres text rejects NUL).
-    directionalPairs.set(`${src}\u0000${tgt}`, { src, tgt });
-  };
-  for (const field of fields) {
-    addPair(field.sourcePath, field.targetPath);
-  }
-  for (const operation of operations) {
-    addPair(operation.sourceOperationRef, operation.targetOperationRef);
-  }
+  // Distinct directional (source resource, target resource) pairs the mapping covers —
+  // the SAME enumeration the SS-18 ScopeCorrespondence proposal walks, so a rule and its
+  // proposed correspondence can never disagree about which pairs the mapping covers.
+  const directionalPairs = deriveDirectionalResourcePairs(fields, operations);
 
   // One disabled SyncRule per distinct canonical resourcePairRef (dedup keeps the
   // count at N mapped resource pairs even if two directional pairs canonicalize equal).
   const rulesByRef = new Map<string, SyncRule>();
-  for (const { src, tgt } of directionalPairs.values()) {
+  for (const { sourceResourceRef, targetResourceRef } of directionalPairs) {
     const resourcePairRef = canonicalResourcePairRef(
-      { appId: mapping.sourceAppId, resourceRef: src },
-      { appId: mapping.targetAppId, resourceRef: tgt },
+      { appId: mapping.sourceAppId, resourceRef: sourceResourceRef },
+      { appId: mapping.targetAppId, resourceRef: targetResourceRef },
     );
     if (rulesByRef.has(resourcePairRef)) {
       continue;

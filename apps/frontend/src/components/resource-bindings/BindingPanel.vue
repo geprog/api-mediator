@@ -22,11 +22,15 @@ import ScopeBindingRow from "./ScopeBindingRow.vue";
  * resource's correction picker without a second fetch.
  *
  * Also hosts the SS-6/SS-9 scope path-parameter supply UI: each scope entry offers the
- * SS-9.2 kind choice (`constant` / `record-derived`, with `scope-link` disabled) and,
- * per kind, the input to supply — a `constant` value (SS-3) or a `record-derived`
- * `sourceScopeKey` (SS-8a). Confirming it clears the SS-5/SS-9 enablement blocker via the
- * same PATCH + query invalidation, so the panel and the enablement checklist both reflect
- * the satisfied item (SS-6.3 / SU-5.3).
+ * SS-9.2 kind choice and, per kind, the input to supply — a `constant` value (SS-3), a
+ * `record-derived` `sourceScopeKey` (SS-8a), or (SS-18.4) a `scope-link` `scopeKeyRef`,
+ * which becomes selectable once the mediator has proposed a `ScopeCorrespondence` for the
+ * resource's pair. Both SS-18.4 inputs come straight off the binding DTO
+ * (`scopeLinkAvailable` / `scopeKeyRefCandidates`), so the panel needs no pair context of
+ * its own — and the `scopeKeyRef` candidate is looked up **per parameter**, so a two-part
+ * container never pre-fills one component into both rows. Confirming clears the SS-5/SS-9 enablement blocker via the same PATCH + query
+ * invalidation, so the panel and the enablement checklist both reflect the satisfied item
+ * (SS-6.3 / SU-5.3).
  */
 const props = defineProps<{
   specId: string;
@@ -129,9 +133,10 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
             <h4 class="binding-card__scopes-title">Scope path parameters</h4>
             <p class="binding-card__scopes-hint">
               Non-record-id path parameters this resource is reached through. For each, choose how
-              it is filled — a <strong>constant</strong> you supply or a
-              <strong>record-derived</strong> source scope key — and confirm it; a rule cannot
-              enable until every one is confirmed (SS-5/SS-9).
+              it is filled — a <strong>constant</strong> you supply, a
+              <strong>record-derived</strong> source scope key, or a
+              <strong>scope-link</strong> container key — and confirm it; a rule cannot enable until
+              every one is confirmed (SS-5/SS-9).
             </p>
             <ScopeBindingRow
               v-for="scope in binding.scopeBindings"
@@ -140,6 +145,8 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
               :scope="scope"
               :readonly="scopeReadonly"
               :source-scope-key-options="props.sourceScopeKeyOptions"
+              :scope-link-available="binding.scopeLinkAvailable"
+              :scope-key-ref-candidate="binding.scopeKeyRefCandidates[scope.parameterName] ?? null"
               @confirm="applyUpdate"
             />
           </section>

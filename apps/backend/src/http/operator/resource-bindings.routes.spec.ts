@@ -4,6 +4,7 @@ import type {
   ResourceBindingScopeConstantDto,
   ResourceBindingScopeDto,
   ResourceBindingScopeRecordDerivedDto,
+  ResourceBindingScopeScopeLinkDto,
   ResourceBindingsResponse,
   UpdateResourceBindingResponse,
 } from "@mediator/contracts";
@@ -269,6 +270,18 @@ function constantScope(
 ): ResourceBindingScopeConstantDto {
   const entry = scopeEntry(binding, parameterName);
   if (entry.kind !== "constant") throw new Error(`scope entry '${parameterName}' is not constant`);
+  return entry;
+}
+
+/** {@link scopeEntry}, narrowed to the `scope-link` DTO member (kind-tagged union, SS-12/SS-18). */
+function scopeLinkScope(
+  binding: ResourceBindingDto,
+  parameterName: string,
+): ResourceBindingScopeScopeLinkDto {
+  const entry = scopeEntry(binding, parameterName);
+  if (entry.kind !== "scope-link") {
+    throw new Error(`scope entry '${parameterName}' is not scope-link`);
+  }
   return entry;
 }
 
@@ -797,5 +810,152 @@ describe("PATCH /api/resource-bindings/:id — scope record-derived (SS-8)", () 
     const repo = recordDerivedScope(response.json<UpdateResourceBindingResponse>(), "repo");
     expect(repo.confirmedBy).toBe("alice");
     expect(repo.sourceScopeKey).toBe("name");
+  });
+});
+
+describe("PATCH /api/resource-bindings/:id — scope-link (SS-18.4)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  it("SELECTING scope-link writes the entry UNCONFIRMED — nothing is auto-confirmed (SS-18.4/18.8)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "scope-link", scopeKeyRef: "id" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const owner = scopeLinkScope(response.json<UpdateResourceBindingResponse>(), "owner");
+    expect(owner.kind).toBe("scope-link");
+    expect(owner.scopeKeyRef).toBe("id");
+    // The choice is recorded; the confirmation is NOT stamped.
+    expect(owner.confirmedBy).toBeNull();
+    expect(owner.confirmedAt).toBeNull();
+    // The stale `constant` literal is dropped by the member rewrite (kind-tagged DTO).
+    expect("value" in owner).toBe(false);
+  });
+
+  it("an explicit confirm stamps the confirmation (SS-18.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "scope-link", scopeKeyRef: "id", confirm: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const owner = scopeLinkScope(response.json<UpdateResourceBindingResponse>(), "owner");
+    expect(owner.confirmedBy).toBe("operator");
+    expect(owner.confirmedAt).not.toBeNull();
+  });
+
+  it("rejects a scope-link without a scopeKeyRef — a confirmed entry always names its container key", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "scope-link", scopeKeyRef: "" },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a parameterName that is not a derived scope entry of the resource (SS-3.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "nope", kind: "scope-link", scopeKeyRef: "id" },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("is per-parameter: a scope-link select leaves the sibling constant untouched (SS-3.2)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "scope-link", scopeKeyRef: "id" },
+    });
+
+    const updated = response.json<UpdateResourceBindingResponse>();
+    const repo = constantScope(updated, "repo");
+    expect(repo.kind).toBe("constant");
+    expect(repo.value).toBe("");
+    expect(repo.confirmedBy).toBeNull();
+    expect(updated.refs.find((ref) => ref.kind === "nativeIdRef")?.confirmedBy).toBeNull();
+  });
+
+  it("is a mutation: a viewer is refused (OA-2 / SS-18.8)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const response = await injectAs(server.app, TEST_VIEWER, {
+      method: "PATCH",
+      url: `/api/resource-bindings/${bindingId(bindings)}`,
+      payload: { parameterName: "owner", kind: "scope-link", scopeKeyRef: "id" },
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("reports scope-link UNAVAILABLE while the pair has no proposed ScopeCorrespondence (SS-18.4)", async () => {
+    server = buildTestServer();
+    const { bindings } = await registerScopedAndGetBindings(server);
+
+    const issues = bindings.find((binding) => binding.resourceRef === "issues");
+    expect(issues?.scopeLinkAvailable).toBe(false);
+    expect(issues?.scopeKeyRefCandidates).toStrictEqual({});
+  });
+
+  it("reports scope-link AVAILABLE, with the derived scopeKeyRef, once one is proposed (SS-18.4)", async () => {
+    server = buildTestServer();
+    const { specId, bindings } = await registerScopedAndGetBindings(server);
+    const appId = server.store.specs.get(specId)?.appId ?? "";
+
+    // The SS-18.1 proposal has run for this pair. `issues` is the TARGET side here, so the
+    // derived `scopeKeyRef` is the leaf of the CONTAINER resource's `nativeIdRef` — the
+    // component SS-11 discovery keys a target `ScopeLink.appXScopeKey` by. This sample spec
+    // exposes only one resource, so it doubles as the container: what the case proves is the
+    // route -> resolver -> container-binding wiring, not the heuristic (covered in
+    // `scope-authoring.spec.ts` against purpose-built IR).
+    server.store.scopeCorrespondences.set("pair", {
+      id: "corr-1",
+      resourcePairRef: `app-other:tasks|${appId}:issues`,
+      scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      targetContainerRef: { appId, resourceRef: "issues" },
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+
+    const refreshed = await injectAs(server.app, TEST_OPERATOR, {
+      method: "GET",
+      url: `/api/specs/${specId}/resource-bindings`,
+    });
+    const issues = refreshed
+      .json<ResourceBindingsResponse>()
+      .bindings.find((binding) => binding.resourceRef === "issues");
+
+    expect(issues?.scopeLinkAvailable).toBe(true);
+    // Per PARAMETER: this scoped spec reaches `issues` through `{owner}` and `{repo}`, and
+    // `issues` is the TARGET side here, whose scope key has exactly one component.
+    expect(issues?.scopeKeyRefCandidates).toStrictEqual({ owner: "id", repo: "id" });
+    // A resource with NO scope path parameter is unaffected — no correspondence claims it.
+    const others = bindings.filter((binding) => binding.scopeBindings.length === 0);
+    expect(others.every((binding) => !binding.scopeLinkAvailable)).toBe(true);
   });
 });
