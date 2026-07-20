@@ -1,10 +1,16 @@
-import type { ConfirmableRef, OperationMapping, ResourceBinding } from "@mediator/domain";
+import type {
+  ConfirmableRef,
+  OperationMapping,
+  ResourceBinding,
+  ScopeCorrespondence,
+} from "@mediator/domain";
 
 import type {
   EnablementDecision,
   EnablementDegradation,
   EnablementInput,
   EnablementRequirement,
+  ScopeLinkGateInput,
 } from "./types.js";
 
 /**
@@ -103,6 +109,35 @@ function isScopeRecordDerivedConfirmed(binding: ResourceBinding, parameterName: 
       entry.parameterName === parameterName &&
       entry.confirmedBy !== null &&
       entry.confirmedAt !== null,
+  );
+}
+
+/**
+ * SS-12 — a resource's scope path parameter has a **confirmed `scope-link`** binding: an
+ * entry keyed by `parameterName` of that kind with both confirmation stamps set. The
+ * per-parameter half of a `scope-link` requirement (the SS-4/SS-12 resolver fills the
+ * parameter from the record's resolved `ScopeLink` — the target-side container key selected
+ * by the entry's `scopeKeyRef`); the rule-level correspondence / `ScopeLink` / container-list-op
+ * preconditions are the separate mode-aware {@link evaluateScopeLinkGate}. Kept **kind-strict**
+ * exactly like {@link isScopeConstantConfirmed} / {@link isScopeRecordDerivedConfirmed}: a
+ * `scope-link` requirement is satisfied only by a `scope-link` entry, never a `constant`.
+ */
+function isScopeLinkConfirmed(binding: ResourceBinding, parameterName: string): boolean {
+  return (binding.scopePathBindings ?? []).some(
+    (entry) =>
+      entry.kind === "scope-link" &&
+      entry.parameterName === parameterName &&
+      entry.confirmedBy !== null &&
+      entry.confirmedAt !== null,
+  );
+}
+
+/** SS-15.1 — the pair's `ScopeCorrespondence.scopeIdentityKey` is confirmed (both stamps set). */
+function isScopeIdentityKeyConfirmed(correspondence: ScopeCorrespondence | undefined): boolean {
+  return (
+    correspondence !== undefined &&
+    correspondence.confirmedBy !== null &&
+    correspondence.confirmedAt !== null
   );
 }
 
@@ -325,6 +360,19 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
           resourceRef: requirement.resourceRef,
         });
       }
+    } else if (requirement.kind === "scope-link") {
+      // SS-12 — a confirmed `scope-link` entry on the named side (kind-strict, so a
+      // `scope-link` scope parameter is never misreported as a missing `constant`). The
+      // rule-level correspondence / `ScopeLink` preconditions this binding also triggers
+      // are the mode-aware `scopeLinkGate` block below.
+      if (!isScopeLinkConfirmed(binding, requirement.parameterName)) {
+        stillNeeds.push({
+          kind: "scope-binding",
+          parameterName: requirement.parameterName,
+          side: requirement.side,
+          resourceRef: requirement.resourceRef,
+        });
+      }
     } else {
       // SS-9 — structural presence of BOTH halves (never value-space equivalence):
       //  (b) the `record-derived` binding entry confirmed on the named (target) side, and
@@ -350,9 +398,92 @@ export function evaluateEnablement(input: EnablementInput): EnablementDecision {
     }
   }
 
+  // ── SS-15: mode-aware `scope-link` preconditions ─────────────────────────────
+  // Present iff the rule carries any `kind: scope-link` scope binding (the SA layer decides;
+  // `undefined` for a non-scoped / L1-constant / L2-record-derived rule → no SS-15 blocker).
+  if (input.scopeLinkGate !== undefined) {
+    evaluateScopeLinkGate(input.scopeLinkGate, stillNeeds);
+  }
+
   // ── Verdict (BE-1.5 / BE-2.5) ────────────────────────────────────────────────
   if (stillNeeds.length > 0) {
     return { kind: "blocked", stillNeeds };
   }
   return { kind: "enable", backfillRequired: backfillWillRun, degradations };
+}
+
+/**
+ * SS-15.1/15.2 — the **mode-aware `scope-link` precondition check** (extends SS-5). Runs only
+ * for a rule carrying a `kind: scope-link` scope binding. Emits the **three distinct**
+ * SS-15.3 blockers so the operator knows exactly what to fix: an unconfirmed **scope identity
+ * key** ({@link ScopeIdentityKeyRequirement}), an absent/unresolved **`ScopeLink`**
+ * ({@link ScopeLinkRequirement}, `per-scope-pinned` only), and an unconfirmed **container list
+ * op** ({@link ContainerListOpRequirement}).
+ *
+ *  - The **scope identity key** is required in **every** mode (all container matching keys on
+ *    the value-preserving pairing).
+ *  - **cross-scope** (SS-13.1) — the confirmed **target** container list op makes on-demand /
+ *    harvest discovery viable; per-scope `ScopeLink`s are **not** pre-required.
+ *  - **per-scope-enumerated** (SS-13.2) — as cross-scope **plus** the confirmed **source**
+ *    container list op SS-17 enumerates; per-scope `ScopeLink`s are still **not** pre-required
+ *    (SS-17 establishes them live — a landscape that grows containers must stay enableable).
+ *  - **per-scope-pinned** (SS-13.4) — the source is not enumerable, so at least one **active**
+ *    `constant`/`manual` `ScopeLink` must cover the scopes in play (nothing lists them live).
+ */
+function evaluateScopeLinkGate(
+  gate: ScopeLinkGateInput,
+  stillNeeds: EnablementRequirement[],
+): void {
+  if (!isScopeIdentityKeyConfirmed(gate.correspondence)) {
+    stillNeeds.push({ kind: "scope-identity-key" });
+  }
+  switch (gate.effectiveMode) {
+    case "cross-scope":
+      requireContainerListOp(gate.targetContainerBinding, "target", stillNeeds);
+      break;
+    case "per-scope-enumerated":
+      requireContainerListOp(gate.targetContainerBinding, "target", stillNeeds);
+      requireContainerListOp(gate.sourceContainerBinding, "source", stillNeeds);
+      break;
+    case "per-scope-pinned":
+      if (!hasPinnedScopeLink(gate.scopeLinks)) {
+        stillNeeds.push({ kind: "scope-link" });
+      }
+      break;
+  }
+}
+
+/**
+ * SS-15.2 — a container list op is confirmed when the container resource's `collectionReadRef`
+ * is confirmed **and** (paging is meaningful only where a `paginationRef` exists — mirroring
+ * BE-2.2) its `paginationRef` is confirmed where present. An unresolved container binding
+ * (`undefined`) is treated as unconfirmed. Emits one {@link ContainerListOpRequirement} for
+ * `side` when unmet.
+ */
+function requireContainerListOp(
+  binding: ResourceBinding | undefined,
+  side: "source" | "target",
+  stillNeeds: EnablementRequirement[],
+): void {
+  const collectionConfirmed = isRefConfirmed(binding?.collectionReadRef);
+  const paginationUnconfirmed =
+    binding?.paginationRef !== undefined && !isRefConfirmed(binding.paginationRef);
+  if (!collectionConfirmed || paginationUnconfirmed) {
+    stillNeeds.push({ kind: "container-list-op", side });
+  }
+}
+
+/**
+ * SS-15.1 (per-scope-pinned) — the scopes are "covered" iff at least one **active**
+ * `establishedBy` `constant`/`manual` `ScopeLink` is pinned under the correspondence. In
+ * pinned mode the source is not enumerable and nothing lists scopes live, so the pinned links
+ * *are* the scope set — zero of them means no scope to poll (an `identity-match` link cannot
+ * arise without an enumerable/harvestable source, so it is not counted here).
+ */
+function hasPinnedScopeLink(scopeLinks: ScopeLinkGateInput["scopeLinks"]): boolean {
+  return scopeLinks.some(
+    (link) =>
+      link.status === "active" &&
+      (link.establishedBy === "constant" || link.establishedBy === "manual"),
+  );
 }

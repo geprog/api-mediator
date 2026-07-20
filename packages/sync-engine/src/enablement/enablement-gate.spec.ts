@@ -5,6 +5,8 @@ import type {
   IrRefTarget,
   OperationMapping,
   ResourceBinding,
+  ScopeCorrespondence,
+  ScopeLink,
   ScopePathBinding,
   SourceScopeRef,
   SyncRule,
@@ -12,7 +14,13 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import { evaluateEnablement } from "./enablement-gate.js";
-import type { EnablementDecision, EnablementInput, ScopeBindingRequirement } from "./types.js";
+import type {
+  EnablementDecision,
+  EnablementInput,
+  EnablementRequirement,
+  ScopeBindingRequirement,
+  ScopeLinkGateInput,
+} from "./types.js";
 
 /**
  * Unit tests for the `SyncRule` enablement gate (BE-1 all 6 criteria, BE-2 all 5).
@@ -1010,6 +1018,344 @@ describe("SS-9 — record-derived scope path-parameter bindings", () => {
         }),
       }),
     );
+    expectEnable(decision);
+  });
+});
+
+// ── SS-15 — mode-aware scope-link gate ─────────────────────────────────────────
+
+describe("SS-15 — mode-aware scope-link gate", () => {
+  const CORR_T0 = new Date("2026-07-19T00:00:00.000Z");
+
+  /** A confirmed `scope-link` scope binding entry (its presence is the SS-15 trigger in the SA layer). */
+  function confirmedScopeLink(parameterName: string, scopeKeyRef: string): ScopePathBinding {
+    return {
+      kind: "scope-link",
+      parameterName,
+      scopeKeyRef,
+      confirmedBy: "op",
+      confirmedAt: T0,
+    };
+  }
+  function unconfirmedScopeLink(parameterName: string, scopeKeyRef: string): ScopePathBinding {
+    return { kind: "scope-link", parameterName, scopeKeyRef, confirmedBy: null, confirmedAt: null };
+  }
+
+  /** A `ScopeCorrespondence` — confirmed scope identity key by default (override to null-out). */
+  function correspondence(overrides: Partial<ScopeCorrespondence> = {}): ScopeCorrespondence {
+    return {
+      id: "corr-1",
+      resourcePairRef: "pair-1",
+      scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      targetContainerRef: { appId: "app-tgt", resourceRef: "projects" },
+      confirmedBy: "op",
+      confirmedAt: CORR_T0,
+      ...overrides,
+    };
+  }
+
+  /** A container `ResourceBinding` with a confirmed `collectionReadRef` (the container list op). */
+  function containerBinding(overrides: Partial<ResourceBinding> = {}): ResourceBinding {
+    return {
+      id: "rb-container",
+      apiSpecId: "spec-container",
+      resourceRef: "projects",
+      collectionReadRef: confirmed(opTarget("listProjects")),
+      ...overrides,
+    };
+  }
+
+  /** An active `manual` `ScopeLink` (pinned coverage) — override status/establishedBy for edges. */
+  function scopeLink(overrides: Partial<ScopeLink> = {}): ScopeLink {
+    return {
+      id: "sl-1",
+      scopeCorrespondenceId: "corr-1",
+      appAId: "app-src",
+      appAScopeKey: { name: "phoenix" },
+      appBId: "app-tgt",
+      appBScopeKey: { id: "42" },
+      resourcePairRef: "pair-1",
+      establishedBy: "manual",
+      status: "active",
+      createdAt: CORR_T0,
+      ...overrides,
+    };
+  }
+
+  /** A `ScopeLinkGateInput` — cross-scope, everything discovery-viable by default. */
+  function gate(overrides: Partial<ScopeLinkGateInput> = {}): ScopeLinkGateInput {
+    return {
+      effectiveMode: "cross-scope",
+      correspondence: correspondence(),
+      targetContainerBinding: containerBinding(),
+      sourceContainerBinding: undefined,
+      scopeLinks: [],
+      ...overrides,
+    };
+  }
+
+  /** The scope-link `stillNeeds` kinds a blocked decision carries (order-independent). */
+  function scopeStillNeeds(decision: EnablementDecision): readonly EnablementRequirement[] {
+    return decision.kind === "blocked"
+      ? decision.stillNeeds.filter(
+          (r) =>
+            r.kind === "scope-identity-key" ||
+            r.kind === "scope-link" ||
+            r.kind === "container-list-op",
+        )
+      : [];
+  }
+
+  // ── cross-scope ──────────────────────────────────────────────────────────────
+
+  it("cross-scope: confirmed identity key + confirmed target container list op enables, WITHOUT pre-established ScopeLinks (SS-15.1)", () => {
+    const decision = evaluateEnablement(validInput({ scopeLinkGate: gate({ scopeLinks: [] }) }));
+    expectEnable(decision);
+  });
+
+  it("cross-scope: an unconfirmed scope identity key blocks with `scope-identity-key` (SS-15.1/15.3)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          correspondence: correspondence({ confirmedBy: null, confirmedAt: null }),
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toContainEqual({ kind: "scope-identity-key" });
+  });
+
+  it("cross-scope: a missing ScopeCorrespondence blocks with `scope-identity-key` (SS-15.1)", () => {
+    const decision = evaluateEnablement(
+      validInput({ scopeLinkGate: gate({ correspondence: undefined }) }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toContainEqual({ kind: "scope-identity-key" });
+  });
+
+  it("cross-scope: an unconfirmed target container list op blocks with `container-list-op` side target (SS-15.1/15.3)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          targetContainerBinding: containerBinding({
+            collectionReadRef: unconfirmed(opTarget("listProjects")),
+          }),
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toEqual([{ kind: "container-list-op", side: "target" }]);
+  });
+
+  it("cross-scope: an unresolved target container binding blocks with `container-list-op` side target", () => {
+    const decision = evaluateEnablement(
+      validInput({ scopeLinkGate: gate({ targetContainerBinding: undefined }) }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toContainEqual({ kind: "container-list-op", side: "target" });
+  });
+
+  it("cross-scope: does NOT require the source container list op (source unconfirmed → still enables)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          sourceContainerBinding: containerBinding({
+            resourceRef: "repos",
+            collectionReadRef: unconfirmed(opTarget("listRepos")),
+          }),
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  // ── per-scope-enumerated ─────────────────────────────────────────────────────
+
+  it("per-scope-enumerated: confirmed source+target container list ops enable, WITHOUT pre-established ScopeLinks (SS-15.1/15.2 + SS-17 invariant)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-enumerated",
+          sourceContainerBinding: containerBinding({ resourceRef: "repos" }),
+          scopeLinks: [], // no links yet — SS-17 establishes them live; must still enable
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("per-scope-enumerated: an unconfirmed SOURCE container list op blocks with `container-list-op` side source (SS-15.2)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-enumerated",
+          sourceContainerBinding: containerBinding({
+            resourceRef: "repos",
+            collectionReadRef: unconfirmed(opTarget("listRepos")),
+          }),
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toEqual([{ kind: "container-list-op", side: "source" }]);
+  });
+
+  it("per-scope-enumerated: a present-but-unconfirmed source paginationRef blocks (the list op pages — SS-15.2)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-enumerated",
+          sourceContainerBinding: containerBinding({
+            resourceRef: "repos",
+            paginationRef: unconfirmed(paramTarget("listRepos", "page")),
+          }),
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toContainEqual({ kind: "container-list-op", side: "source" });
+  });
+
+  it("per-scope-enumerated: does NOT block on missing ScopeLinks — only on the unconfirmed container op (SS-17 invariant)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-enumerated",
+          sourceContainerBinding: containerBinding({ resourceRef: "repos" }),
+          scopeLinks: [], // empty — must NOT surface a `scope-link` blocker
+        }),
+      }),
+    );
+    expectEnable(decision);
+    expect(scopeStillNeeds(decision)).not.toContainEqual({ kind: "scope-link" });
+  });
+
+  // ── per-scope-pinned ─────────────────────────────────────────────────────────
+
+  it("per-scope-pinned: an active constant/manual ScopeLink covers the scopes → enables (no container list op required)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-pinned",
+          correspondence: correspondence({ sourceContainerRef: undefined }),
+          targetContainerBinding: undefined, // pinned mode never demands a container list op
+          scopeLinks: [scopeLink({ establishedBy: "manual" })],
+        }),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("per-scope-pinned: zero pinned ScopeLinks blocks with `scope-link` (scopes not covered — SS-15.1/15.3)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({ effectiveMode: "per-scope-pinned", scopeLinks: [] }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toEqual([{ kind: "scope-link" }]);
+  });
+
+  it("per-scope-pinned: only an ARCHIVED / identity-match link does NOT cover — blocks with `scope-link`", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-pinned",
+          scopeLinks: [
+            scopeLink({ id: "sl-arch", establishedBy: "manual", status: "archived" }),
+            scopeLink({ id: "sl-id", establishedBy: "identity-match", status: "active" }),
+          ],
+        }),
+      }),
+    );
+    expectBlocked(decision);
+    expect(scopeStillNeeds(decision)).toContainEqual({ kind: "scope-link" });
+  });
+
+  it("per-scope-pinned: does NOT emit `container-list-op` (source is not enumerable — nothing to list)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-pinned",
+          targetContainerBinding: undefined,
+          scopeLinks: [scopeLink()],
+        }),
+      }),
+    );
+    expectEnable(decision);
+    expect(scopeStillNeeds(decision)).not.toContainEqual({
+      kind: "container-list-op",
+      side: "target",
+    });
+  });
+
+  // ── the three distinct still-needs reasons are distinguishable ────────────────
+
+  it("the three SS-15.3 reasons are distinct kinds (identity key vs ScopeLink vs container list op)", () => {
+    const identityKeyOnly = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          effectiveMode: "per-scope-pinned",
+          correspondence: correspondence({ confirmedBy: null, confirmedAt: null }),
+          scopeLinks: [scopeLink()], // covered, so only the identity-key reason remains
+        }),
+      }),
+    );
+    const containerOp = evaluateEnablement(
+      validInput({
+        scopeLinkGate: gate({
+          targetContainerBinding: containerBinding({
+            collectionReadRef: unconfirmed(opTarget("listProjects")),
+          }),
+        }),
+      }),
+    );
+    const pinnedGap = evaluateEnablement(
+      validInput({ scopeLinkGate: gate({ effectiveMode: "per-scope-pinned", scopeLinks: [] }) }),
+    );
+    expect(scopeStillNeeds(identityKeyOnly)).toEqual([{ kind: "scope-identity-key" }]);
+    expect(scopeStillNeeds(containerOp)).toEqual([{ kind: "container-list-op", side: "target" }]);
+    expect(scopeStillNeeds(pinnedGap)).toEqual([{ kind: "scope-link" }]);
+  });
+
+  // ── the per-parameter `scope-link` binding requirement (SS-12) ────────────────
+
+  it("a confirmed `scope-link` scope binding satisfies its param — NOT misreported as a missing constant", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [
+          { kind: "scope-link", parameterName: "id", side: "target", resourceRef: "tasks" },
+        ],
+        targetBinding: targetBinding({ scopePathBindings: [confirmedScopeLink("id", "id")] }),
+        scopeLinkGate: gate(),
+      }),
+    );
+    expectEnable(decision);
+  });
+
+  it("an unconfirmed `scope-link` scope binding blocks with the `scope-binding` requirement (SS-12)", () => {
+    const decision = evaluateEnablement(
+      validInput({
+        requiredScopeBindings: [
+          { kind: "scope-link", parameterName: "id", side: "target", resourceRef: "tasks" },
+        ],
+        targetBinding: targetBinding({ scopePathBindings: [unconfirmedScopeLink("id", "id")] }),
+        scopeLinkGate: gate(),
+      }),
+    );
+    expectBlocked(decision);
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tasks",
+    });
+  });
+
+  // ── no-regression: a non-scoped rule (absent scopeLinkGate) adds no SS-15 blocker ──
+
+  it("no-regression: an absent scopeLinkGate adds no SS-15 blocker (non-scoped / L1 / L2 rule)", () => {
+    const decision = evaluateEnablement(validInput()); // scopeLinkGate omitted
     expectEnable(decision);
   });
 });

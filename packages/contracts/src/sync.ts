@@ -97,6 +97,18 @@ export const enablementRequirementDtoSchema = z.discriminatedUnion("kind", [
     resourceRef: z.string(),
     sourceScopeKey: z.string(),
   }),
+  // SS-15.1/15.3 — the pair's `ScopeCorrespondence.scopeIdentityKey` is unconfirmed (or the
+  // pair has no correspondence), so a `scope-link` rule cannot resolve any record's container.
+  z.object({ kind: z.literal("scope-identity-key") }),
+  // SS-15.1/15.3 — a `per-scope-pinned` rule's scopes are not covered: no active
+  // constant/manual `ScopeLink` is pinned, and nothing lists them live.
+  z.object({ kind: z.literal("scope-link") }),
+  // SS-15.2/15.3 — a container list op is unconfirmed: the `source`/`target` container
+  // resource's `collectionReadRef` (which SS-11 discovery / SS-17 enumeration consume).
+  z.object({
+    kind: z.literal("container-list-op"),
+    side: z.enum(["source", "target"]),
+  }),
 ]);
 export type EnablementRequirementDto = z.infer<typeof enablementRequirementDtoSchema>;
 

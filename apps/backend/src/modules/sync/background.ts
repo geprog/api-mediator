@@ -499,6 +499,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       { backfillSkipped: options.backfillSkipped ?? false },
       ruleArtifactRepos,
       scopeLinks,
+      scopeCorrespondences,
     );
     if (!resolved.ok) {
       return { kind: "unresolved", reason: resolved.reason };
@@ -526,6 +527,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       { backfillSkipped: false },
       ruleArtifactRepos,
       scopeLinks,
+      scopeCorrespondences,
     );
     if (!resolved.ok) {
       logger.error({ ruleId, reason: resolved.reason }, "backfill retrigger: rule did not resolve");

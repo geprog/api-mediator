@@ -49,7 +49,7 @@ import type { EnableRuleGateResult } from "./background.js";
 import { pollScopeModeView, type PollScopeModeView } from "./poll-scope-mode.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos, type RuleArtifacts } from "./resolution.js";
 import type { EstablishLinkOutcome, ScopeDiscoveryService } from "./scope-discovery.js";
-import { computeRequiredScopeBindings } from "./scope-requirements.js";
+import { computeRequiredScopeBindings, computeScopeLinkGate } from "./scope-requirements.js";
 
 /**
  * **The Sync HTTP API application service (SA-1..SA-3)** — the seam between the
@@ -347,7 +347,9 @@ export class SyncOperatorService {
     const views: SyncRuleView[] = [];
     for (const rule of rules) {
       const artifacts = await resolveRuleArtifacts(rule.id, this.#repos);
-      views.push(this.#viewFor(rule, artifacts, await this.#pollScopeModeOf(rule, artifacts), now));
+      views.push(
+        await this.#viewFor(rule, artifacts, await this.#pollScopeModeOf(rule, artifacts), now),
+      );
     }
     return views;
   }
@@ -436,7 +438,7 @@ export class SyncOperatorService {
     const backfillSkipped = request.action === "skip-backfill";
 
     // Pre-check with the engine's own gate so a blocked enable changes nothing.
-    const decision = evaluateEnablement(this.#enablementInput(artifacts, backfillSkipped));
+    const decision = evaluateEnablement(await this.#enablementInput(artifacts, backfillSkipped));
     if (decision.kind === "blocked") {
       return { kind: "blocked", stillNeeds: decision.stillNeeds };
     }
@@ -971,12 +973,12 @@ export class SyncOperatorService {
     return pollScopeModeView(rule, artifacts.sourceBinding, correspondence);
   }
 
-  #viewFor(
+  async #viewFor(
     rule: SyncRule,
     artifacts: RuleArtifacts | undefined,
     scopeMode: PollScopeModeView | undefined,
     now: Date,
-  ): SyncRuleView {
+  ): Promise<SyncRuleView> {
     if (artifacts === undefined) {
       return {
         rule,
@@ -986,7 +988,7 @@ export class SyncOperatorService {
         pollScopeMode: scopeMode,
       };
     }
-    const decision = evaluateEnablement(this.#enablementInput(artifacts, false));
+    const decision = evaluateEnablement(await this.#enablementInput(artifacts, false));
     return {
       rule,
       resourcePair: {
@@ -1012,7 +1014,10 @@ export class SyncOperatorService {
     };
   }
 
-  #enablementInput(artifacts: RuleArtifacts, backfillSkipped: boolean): EnablementInput {
+  async #enablementInput(
+    artifacts: RuleArtifacts,
+    backfillSkipped: boolean,
+  ): Promise<EnablementInput> {
     return {
       rule: artifacts.rule,
       fieldMappings: artifacts.fieldMappings,
@@ -1023,6 +1028,12 @@ export class SyncOperatorService {
       targetCapabilities: artifacts.targetApp.capabilities,
       backfillSkipped,
       requiredScopeBindings: computeRequiredScopeBindings(artifacts, { backfillSkipped }),
+      // SS-15.1/15.2 — the mode-aware `scope-link` preconditions (undefined for a non-scoped rule).
+      scopeLinkGate: await computeScopeLinkGate(artifacts, {
+        correspondences: this.#scopeCorrespondences,
+        scopeLinks: this.#sync.scopeLinks,
+        repos: this.#repos,
+      }),
     };
   }
 

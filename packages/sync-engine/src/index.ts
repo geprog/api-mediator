@@ -286,6 +286,7 @@ export type {
   BindingRefUse,
   BlockedDecision,
   ConstantScopeBindingRequirement,
+  ContainerListOpRequirement,
   EnableDecision,
   EnablementDecision,
   EnablementDegradation,
@@ -301,6 +302,10 @@ export type {
   RecordDerivedScopeBindingRequirement,
   ScopeBindingRequirement,
   ScopeBindingUnconfirmedRequirement,
+  ScopeIdentityKeyRequirement,
+  ScopeLinkGateInput,
+  ScopeLinkRequirement,
+  ScopeLinkScopeBindingRequirement,
   SourceScopeRefUnconfirmedRequirement,
   TargetOperationRequirement,
 } from "./enablement/types.js";

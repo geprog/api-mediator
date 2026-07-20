@@ -25,7 +25,11 @@ import {
   type RuleArtifactRepos,
   type RuleArtifacts,
 } from "./resolution.js";
-import { computeRequiredScopeBindings } from "./scope-requirements.js";
+import {
+  computeRequiredScopeBindings,
+  computeScopeLinkGate,
+  type ScopeLinkGateDeps,
+} from "./scope-requirements.js";
 
 /**
  * **The enable-input resolver** — it turns persisted `SyncRule`/`ApprovedMapping`/
@@ -75,6 +79,7 @@ export async function resolveEnableRuleInput(
   options: { readonly backfillSkipped: boolean },
   repos: RuleArtifactRepos,
   scopeLinks: ScopeLinkStore,
+  correspondences: ScopeLinkGateDeps["correspondences"],
 ): Promise<EnableInputResolution | EnableInputUnresolved> {
   const artifacts = await resolveRuleArtifacts(ruleId, repos);
   if (artifacts === undefined) {
@@ -96,6 +101,8 @@ export async function resolveEnableRuleInput(
     requiredScopeBindings: computeRequiredScopeBindings(artifacts, {
       backfillSkipped: options.backfillSkipped,
     }),
+    // SS-15.1/15.2 — the mode-aware `scope-link` preconditions (undefined for a non-scoped rule).
+    scopeLinkGate: await computeScopeLinkGate(artifacts, { correspondences, scopeLinks, repos }),
   };
 
   const backfill = await buildBackfillRunInput(artifacts, repos, scopeLinks);
