@@ -129,6 +129,20 @@ export interface ResolutionContext {
    * read) rather than enumerating globally and fabricating a wrong match.
    */
   readonly targetContainerScope?: ReadonlyMap<string, string>;
+  /**
+   * SS-19 — the two sides' confirmed `ResourceBinding.recordAddressRef` field paths, so
+   * the stage can freeze each side's **container-relative address** onto the new
+   * `RecordLink` at establishment (`appARecordAddress` / `appBRecordAddress`).
+   *
+   * Absent per side when that side addresses records by its native id (no confirmed
+   * ref) — the link is then established with no address for that side and the write
+   * path falls back to the native id, exactly as before SS-19.
+   *
+   * Frozen rather than re-derived for the same reason `scopeRef` is (SS-12): a
+   * propagated **delete** has no live source record left to read an address out of.
+   */
+  readonly sourceRecordAddressPath?: string;
+  readonly targetRecordAddressPath?: string;
 }
 
 /** A target record a lookup matched: its native id + the record body (for the seed). */

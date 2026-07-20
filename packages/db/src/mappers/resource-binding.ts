@@ -129,6 +129,7 @@ export function mapResourceBinding(
     apiSpecId: bindingRow.apiSpecId,
     resourceRef: bindingRow.resourceRef,
     nativeIdRef: refs.nativeIdRef,
+    recordAddressRef: refs.recordAddressRef,
     collectionReadRef: refs.collectionReadRef,
     paginationRef: refs.paginationRef,
     deltaCursorRef: refs.deltaCursorRef,

@@ -12,8 +12,8 @@ export type RecordLinkInsert = typeof recordLink.$inferInsert;
  * (the `RecordLink` refinement requires it absent on a non-`tombstoned` link);
  * `tombstoned_at` stays nullable (`null` on an active/archived link). The
  * `establishing_queue_key` jsonb round-trips as the `RecordLinkEstablishingQueueKey`
- * discriminated union it was stored as. `scope_ref` (SS-10) collapses NULL → an
- * **absent** domain key (`scopeRef` is absent on a non-scoped rule's link); its
+ * discriminated union it was stored as. `app_{a,b}_record_address` (SS-19) and
+ * `scope_ref` (SS-10) collapse NULL → an **absent** domain key (`scopeRef` is absent on a non-scoped rule's link); its
  * `jsonb` union carries no `Date`, so it round-trips verbatim.
  */
 export function mapRecordLinkRow(row: RecordLinkRow): RecordLink {
@@ -21,8 +21,10 @@ export function mapRecordLinkRow(row: RecordLinkRow): RecordLink {
     id: row.id,
     appAId: row.appAId,
     appANativeId: row.appANativeId,
+    appARecordAddress: row.appARecordAddress ?? undefined,
     appBId: row.appBId,
     appBNativeId: row.appBNativeId,
+    appBRecordAddress: row.appBRecordAddress ?? undefined,
     resourcePairRef: row.resourcePairRef,
     establishedBy: row.establishedBy,
     status: row.status,
@@ -36,15 +38,19 @@ export function mapRecordLinkRow(row: RecordLinkRow): RecordLink {
 
 /**
  * Domain → insert. An absent `tombstoneReason` becomes a NULL column; an absent
- * `scopeRef` (a non-scoped rule's link) becomes a NULL `scope_ref` column.
+ * `scopeRef` (a non-scoped rule's link) becomes a NULL `scope_ref` column; an absent
+ * per-side `recordAddress` (that side addresses by its native id) becomes a NULL
+ * `app_{a,b}_record_address` column (SS-19).
  */
 export function toRecordLinkInsert(link: RecordLink): RecordLinkInsert {
   return {
     id: link.id,
     appAId: link.appAId,
     appANativeId: link.appANativeId,
+    appARecordAddress: link.appARecordAddress ?? null,
     appBId: link.appBId,
     appBNativeId: link.appBNativeId,
+    appBRecordAddress: link.appBRecordAddress ?? null,
     resourcePairRef: link.resourcePairRef,
     establishedBy: link.establishedBy,
     status: link.status,

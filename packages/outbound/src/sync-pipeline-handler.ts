@@ -6,6 +6,7 @@ import type {
   AuditLogEntry,
   FieldMapping,
   IrRefTarget,
+  RecordAddressing,
   OperationMapping,
   OutboundLoadLimits,
   ParkedConflict,
@@ -59,6 +60,7 @@ import {
 import {
   ContainerUnresolvedError,
   PermanentOutboundError,
+  RecordAddressUnresolvedError,
   settleOutboundResult,
 } from "./errors.js";
 import type {
@@ -119,6 +121,8 @@ export interface IdentityResolutionPort {
     change: DetectedChange,
     context: ResolutionContext,
     createdNativeId: string,
+    /** SS-19 — the created record's container-relative address, frozen onto the new link. */
+    createdRecordAddress?: string,
   ): Promise<RecordLink>;
   /** RL-5.3 — tombstone (never delete) a link on a processed deletion. */
   processDeletion(link: RecordLink, reason: TombstoneReason): Promise<RecordLink>;
@@ -254,6 +258,25 @@ export interface SyncPipelineContext {
    * rule (the delete op is already fully composed at load, so no per-record fill runs).
    */
   readonly scopePathBindings?: readonly ScopePathBinding[];
+  /**
+   * SS-19 — how the **target** resource addresses its records, decided once at load by
+   * `resolveRecordAddressing(targetBinding, isContainerScoped)`:
+   *
+   * - `native-id` — address from the `RecordLink`'s target-side native id. This is the
+   *   default when the key is **absent**, so every existing context builder, every
+   *   unscoped rule and every pre-SS-19 binding compose byte-for-byte as before.
+   * - `stored-address` — address from the `RecordLink`'s target-side frozen record
+   *   address (a Gitea issue's `number`).
+   * - `unconfirmed-address-ref` — a scoped target with a derived-but-unconfirmed
+   *   `recordAddressRef`: park, never guess.
+   */
+  readonly targetRecordAddressing?: RecordAddressing;
+  /**
+   * SS-19 — the **target** resource's confirmed `ResourceBinding.recordAddressRef`, so a
+   * **create**'s response yields the new record's container-relative address to freeze onto
+   * the new `RecordLink`. Absent on a native-id-addressed target.
+   */
+  readonly targetResourceRecordAddressRef?: IrRefTarget;
 }
 
 /**
@@ -514,6 +537,15 @@ export class SyncPipelineHandler {
       context.deletion.deletePropagation === "ignore"
         ? undefined
         : await this.#resolveLinkedContainer(context, change, link);
+    // SS-19.3/19.5 — resolve the record's container-relative address ONCE too, for exactly
+    // the same reason: a delete has no live source record to read it from, so it comes from
+    // the `RecordLink`. Unresolvable → a loud park (never the native id, which inside this
+    // container is either absent or a DIFFERENT record). An `ignore` delete addresses
+    // nothing, so it needs no address.
+    const recordAddress =
+      context.deletion.deletePropagation === "ignore"
+        ? undefined
+        : this.#resolveRecordAddress(context, link, sourceSide);
 
     const deletion = await this.#conflictDetection.evaluateDeletion(
       stripUndefined({
@@ -524,6 +556,8 @@ export class SyncPipelineHandler {
         override: directive?.deleteOverride,
         // SS-12.3 — the read-before-write drift-read routes to the stored container.
         resolvedContainerScopeValues: containerScope,
+        // SS-19.3 — ...and addresses the record by the same stored address the delete will.
+        resolvedRecordAddress: recordAddress,
       }),
     );
     switch (deletion.kind) {
@@ -556,11 +590,14 @@ export class SyncPipelineHandler {
       context,
       containerScope,
     );
-    const call: OutboundCall = {
+    const call: OutboundCall = stripUndefined({
       ...this.#commonCall(change, context, operation, link.id),
-      action: "delete",
+      action: "delete" as const,
       targetNativeId: targetNativeIdOf(link, sourceSide),
-    };
+      // SS-19.3 — the id path parameter is filled from this container-relative address when
+      // the target has one; `targetNativeId` still keys idempotency (identity, not address).
+      targetRecordAddress: recordAddress,
+    });
     const result = await this.#outbound.execute(call);
     settleOutboundResult(result); // throws → dispatcher parks / retries / defers
 
@@ -607,6 +644,10 @@ export class SyncPipelineHandler {
     const sourceSide = sideOf(change, context.resolution.appAId);
     const targetSide = opposite(sourceSide);
     const observed = requireObserved(change);
+    // SS-19.3/19.5 — and the record's container-relative address, resolved ONCE from the
+    // `RecordLink` for the same reason the container is: the PUT read-carry and the update
+    // write must address the SAME record. Unresolvable → a loud park before either happens.
+    const recordAddress = this.#resolveRecordAddress(context, link, sourceSide);
 
     // Step 3.4a — persist App A's source-side observation into `SyncFieldState` BEFORE
     // CF runs (the hard cross-slice contract: CF reads BOTH sides' observations from
@@ -626,6 +667,8 @@ export class SyncPipelineHandler {
         overrides: directive?.overrides,
         // SS-12.3 — the PUT read-carry routes to the stored container, not a captured scope.
         resolvedContainerScopeValues: containerScope,
+        // SS-19.3 — ...and addresses the record by the same stored address the write will.
+        resolvedRecordAddress: recordAddress,
       }),
     );
 
@@ -680,13 +723,16 @@ export class SyncPipelineHandler {
       context,
       containerScope,
     );
-    const call: OutboundCall = {
+    const call: OutboundCall = stripUndefined({
       ...this.#commonCall(change, context, operation, link.id),
-      action: "update",
+      action: "update" as const,
       payload,
       priorReconciledState,
       targetNativeId: targetNativeIdOf(link, sourceSide),
-    };
+      // SS-19.3 — as on the delete path: address container-relatively when the target has a
+      // confirmed address ref, else fall through to the native id exactly as before.
+      targetRecordAddress: recordAddress,
+    });
     const result = await this.#outbound.execute(call);
     settleOutboundResult(result); // throws → dispatcher
     if (result.outcome !== "success") {
@@ -766,6 +812,10 @@ export class SyncPipelineHandler {
       change,
       context.resolution,
       createdNativeId,
+      // SS-19.3 — freeze the created record's container-relative address onto the new link,
+      // so the very next update/delete of this record addresses it inside its container
+      // without re-reading a source record that may by then be gone.
+      result.writtenRepresentation.createdRecordAddress,
     );
 
     // Step 3.7 — EP-3 re-baseline both sides from the write response + observed source,
@@ -948,6 +998,9 @@ export class SyncPipelineHandler {
       operationMapping: operation.operationMapping,
       sourceNativeId: change.sourceNativeId,
       targetResourceNativeIdRef: context.targetResourceNativeIdRef,
+      // SS-19 — lets OC read a create response's container-relative address, the same way
+      // it reads the new native id. Absent on a native-id-addressed target.
+      targetResourceRecordAddressRef: context.targetResourceRecordAddressRef,
       relatedRuleId: change.ruleId,
       recordLinkId,
       targetAppLimits: context.targetAppLimits,
@@ -1011,6 +1064,52 @@ export class SyncPipelineHandler {
       );
     }
     return fillValues;
+  }
+
+  /**
+   * SS-19.3/19.5 — the **container-relative address** a linked update/delete addresses the
+   * target record by, resolved **once** per execution from the `RecordLink` so the
+   * drift-read / PUT read-carry and the write itself address the *same* record.
+   *
+   * Returns `undefined` for a native-id-addressed target (the caller then falls through to
+   * `targetNativeId`, byte-for-byte the pre-SS-19 composition), and throws a
+   * {@link RecordAddressUnresolvedError} — a permanent park, never a retry storm — in the
+   * two cases where the mediator does not know the address:
+   *
+   * - the target's `recordAddressRef` is derived but **unconfirmed**, so which of the
+   *   record's two identifiers the op addresses by is an open question; and
+   * - the ref is confirmed but this link carries **no frozen address** for the target side
+   *   (established before the ref was confirmed, or the record never exposed the field).
+   *
+   * Falling back to the native id here would compose a URL that 404s at best and, at
+   * worst, addresses a **different** record that happens to hold that number inside the
+   * resolved container. Parking is the only safe answer.
+   */
+  #resolveRecordAddress(
+    context: SyncPipelineContext,
+    link: RecordLink,
+    sourceSide: SyncFieldStateSide,
+  ): string | undefined {
+    const addressing = context.targetRecordAddressing ?? { kind: "native-id" };
+    switch (addressing.kind) {
+      case "native-id":
+        return undefined;
+      case "unconfirmed-address-ref":
+        throw new RecordAddressUnresolvedError(
+          "the target resource is container-scoped but its ResourceBinding.recordAddressRef is unconfirmed — confirm which field carries the container-relative record address, then replay",
+        );
+      case "stored-address": {
+        const address = targetRecordAddressOf(link, sourceSide);
+        if (address === undefined) {
+          throw new RecordAddressUnresolvedError(
+            "the RecordLink carries no container-relative address for the target side — it predates the confirmed recordAddressRef; re-link the record (or replay after a fresh backfill), then replay",
+          );
+        }
+        return address;
+      }
+      default:
+        return assertNeverAddressing(addressing);
+    }
   }
 
   /**
@@ -1317,6 +1416,25 @@ function sourceInputPaths(fieldMappings: readonly FieldMapping[]): string[] {
 /** The record's target-side native id — the opposite side of the change's source side. */
 function targetNativeIdOf(link: RecordLink, sourceSide: SyncFieldStateSide): string {
   return sourceSide === "A" ? link.appBNativeId : link.appANativeId;
+}
+
+/**
+ * SS-19 — the record's target-side **container-relative address** (the same-side mirror of
+ * {@link targetNativeIdOf}), or `undefined` when the link carries none for that side.
+ * Addressing only: the link still *correlates* by the native ids above.
+ */
+function targetRecordAddressOf(
+  link: RecordLink,
+  sourceSide: SyncFieldStateSide,
+): string | undefined {
+  return sourceSide === "A" ? link.appBRecordAddress : link.appARecordAddress;
+}
+
+/** Exhaustiveness guard for {@link RecordAddressing} — a new kind must be handled. */
+function assertNeverAddressing(addressing: never): never {
+  throw new PermanentOutboundError(
+    `unhandled record addressing kind: ${JSON.stringify(addressing)}`,
+  );
 }
 
 /**

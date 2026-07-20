@@ -138,19 +138,87 @@ function deriveBinding(
     ? fieldRef(representationFields, DELETION_MARKER_FIELD_NAMES)
     : undefined;
 
+  const scopePathBindings = deriveScopePathBindings(group);
+  const nativeIdRef = fieldRef(representationFields, NATIVE_ID_FIELD_NAMES);
+
   return stripUndefined({
     id: randomUUID(),
     apiSpecId,
     resourceRef: group.resourceRef,
-    nativeIdRef: fieldRef(representationFields, NATIVE_ID_FIELD_NAMES),
+    nativeIdRef,
+    recordAddressRef: deriveRecordAddressRef(
+      representationFields,
+      nativeIdRef,
+      scopePathBindings.length > 0,
+    ),
     collectionReadRef,
     paginationRef,
     changeTimestampRef,
     deltaCursorRef,
     deltaDeletionRef,
     sourceScopeRef: deriveSourceScopeRef(group, representationFields),
-    scopePathBindings: deriveScopePathBindings(group),
+    scopePathBindings,
   });
+}
+
+// ── recordAddressRef derivation (SS-19) ──────────────────────────────────
+
+// Field names that plausibly carry a record's **container-relative address** — the
+// value the API addresses the record by *within* its container, as opposed to the
+// globally-unique native id (Gitea issue `number` → the `{index}` of
+// `PATCH /repos/{owner}/{repo}/issues/{index}`; GitLab `iid`). Implementation-defined,
+// curated and deliberately conservative in exactly the way CONTAINER_NOUN_NAMES is: a
+// name outside this set is never guessed as an address, because a wrong guess would
+// address the WRONG record inside the right container. Matched by exact field name
+// (like NATIVE_ID_FIELD_NAMES), so both casings of a name are listed; first wins.
+const RECORD_ADDRESS_FIELD_NAMES = [
+  "number",
+  "iid",
+  "index",
+  "localId",
+  "local_id",
+  "shortId",
+  "short_id",
+  "seq",
+  "sequence",
+];
+
+/**
+ * Heuristically guess the resource's **`recordAddressRef`** (SS-19) — the field of
+ * its record carrying the **container-relative address** the API addresses records by
+ * — **unconfirmed**, or `undefined` (absent) when there is no evidence of the
+ * two-identities split.
+ *
+ * Two conditions must both hold, and being conservative here is the whole point: an
+ * absent ref reproduces the pre-SS-19 native-id addressing byte for byte, whereas a
+ * spurious ref would make an operator confirm (or the gate block) something the
+ * resource does not actually need.
+ *
+ * 1. **The resource is container-scoped** — it has at least one non-record-id (scope)
+ *    path parameter (`scopePathBindings` is non-empty). An unscoped resource has no
+ *    container for an address to be relative *to*, so its addressing parameter is its
+ *    native id by construction and no ref is derived.
+ * 2. **A distinct address-shaped field exists** — a representation field named in
+ *    {@link RECORD_ADDRESS_FIELD_NAMES} that is **not** the field `nativeIdRef`
+ *    already claimed. Guessing the native-id field itself would be a no-op ref that
+ *    only adds a confirmation chore; a resource whose address genuinely *is* its
+ *    native id correctly derives nothing.
+ */
+function deriveRecordAddressRef(
+  representationFields: readonly IrField[],
+  nativeIdRef: ConfirmableRef | undefined,
+  isScoped: boolean,
+): ConfirmableRef | undefined {
+  if (!isScoped) {
+    return undefined;
+  }
+  const nativeIdPath = nativeIdRef?.value.kind === "field" ? nativeIdRef.value.path : undefined;
+  const candidate = fieldRef(representationFields, RECORD_ADDRESS_FIELD_NAMES);
+  if (candidate === undefined) {
+    return undefined;
+  }
+  const candidatePath = candidate.value.kind === "field" ? candidate.value.path : undefined;
+  return candidatePath !== undefined && candidatePath === nativeIdPath ? undefined : candidate;
 }
 
 // ── sourceScopeRef derivation (SS-7) ─────────────────────────────────────────

@@ -11,7 +11,7 @@ import type {
 } from "@mediator/domain";
 import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore } from "@mediator/db";
-import { readPath, type JsonValue } from "@mediator/transform";
+import { readPath, type JsonRecord, type JsonValue } from "@mediator/transform";
 
 import { scopeQualifiedIdentityKey } from "../ordering/scoped-queue-key.js";
 import { stringifyIdentityValue, valuesAgree } from "./hash.js";
@@ -90,6 +90,59 @@ export interface ManualLinkParams {
    * Absent on a non-scoped rule; the container-linking UI that supplies it is SS-15.
    */
   readonly scopeRef?: RecordLinkScopeRef;
+  /**
+   * SS-19 — each side's **container-relative address**, frozen onto the link so a later
+   * update/delete addresses the record inside its container. Absent per side when that
+   * side addresses by its native id; the manual-linking UI resolves them from the two
+   * records it just paired.
+   */
+  readonly appARecordAddress?: string;
+  readonly appBRecordAddress?: string;
+}
+
+/**
+ * SS-19 — read a record's **container-relative address** at the given
+ * `ResourceBinding.recordAddressRef` field path, stringified for the path parameter it
+ * will fill. Returns `undefined` when there is no path (the side addresses by its native
+ * id), no record, the field is absent, or the value is not a scalar — never a fabricated
+ * or coerced address, because a wrong address hits the wrong record inside the right
+ * container. An absent result leaves the link's address unset, which the write path turns
+ * into a loud park (on a scoped, address-ref-confirmed side) rather than a guess.
+ */
+function readRecordAddress(
+  record: JsonRecord | undefined,
+  addressPath: string | undefined,
+): string | undefined {
+  if (record === undefined || addressPath === undefined) {
+    return undefined;
+  }
+  const read = readPath(record, recordRelativePath(addressPath));
+  if (!read.present) {
+    return undefined;
+  }
+  const value = read.value;
+  if (typeof value === "string") {
+    return value.length > 0 ? value : undefined;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * SS-19 — the per-side address keys to spread onto a new `RecordLink`, omitting each
+ * absent side entirely (`exactOptionalPropertyTypes`: an absent address is a missing
+ * key, never an explicit `undefined`).
+ */
+function recordAddressKeys(
+  appARecordAddress: string | undefined,
+  appBRecordAddress: string | undefined,
+): { appARecordAddress?: string; appBRecordAddress?: string } {
+  return {
+    ...(appARecordAddress !== undefined ? { appARecordAddress } : {}),
+    ...(appBRecordAddress !== undefined ? { appBRecordAddress } : {}),
+  };
 }
 
 /** Thrown when a fetch-and-match target fetch aborts on a partial page — never inferred. */
@@ -182,6 +235,7 @@ export class IdentityResolutionStage {
     change: DetectedChange,
     context: ResolutionContext,
     createdNativeId: string,
+    createdRecordAddress?: string,
   ): Promise<RecordLink> {
     const identityValue = this.#readIdentityValue(change, context);
     const preLinkKey = this.#preLinkQueueKey(change, context, identityValue);
@@ -189,6 +243,10 @@ export class IdentityResolutionStage {
       establishedBy: "create-propagation",
       targetNativeId: createdNativeId,
       establishingQueueKey: { kind: "identity-value", value: preLinkKey },
+      // SS-19 — the create response's container-relative address, read by OC from the
+      // written representation via the target's `recordAddressRef` (the same way it reads
+      // the new native id). `undefined` on a native-id-addressed target.
+      targetRecordAddress: createdRecordAddress,
     });
     await this.#links.insert(link);
     return link;
@@ -218,6 +276,10 @@ export class IdentityResolutionStage {
       tombstonedAt: null,
       // SS-12 — freeze the record's container (scoped rule) so a later delete routes from it.
       ...(params.scopeRef !== undefined ? { scopeRef: params.scopeRef } : {}),
+      // SS-19 — freeze whichever container-relative addresses the caller resolved. Absent
+      // keys leave the link native-id-addressed; a scoped, address-ref-confirmed side with
+      // no address here parks at write time rather than addressing the wrong record.
+      ...recordAddressKeys(params.appARecordAddress, params.appBRecordAddress),
     };
     await this.#links.insert(link);
     return link;
@@ -356,6 +418,8 @@ export class IdentityResolutionStage {
         kind: "identity-value",
         value: this.#preLinkQueueKey(change, context, identityValue),
       },
+      // SS-19 — the matched target record is in hand; freeze its container-relative address.
+      targetRecordAddress: readRecordAddress(matched.record, context.targetRecordAddressPath),
     });
     await this.#links.insert(link);
 
@@ -440,16 +504,37 @@ export class IdentityResolutionStage {
       readonly establishedBy: "create-propagation" | "identity-match";
       readonly targetNativeId: string;
       readonly establishingQueueKey: RecordLinkEstablishingQueueKey;
+      /**
+       * SS-19 — the **target** record's container-relative address, read from the record
+       * the target just returned: the create's write response (create-propagation) or the
+       * matched target record (identity-match). `undefined` when the target addresses by
+       * its native id, or when the record did not carry the field.
+       */
+      readonly targetRecordAddress?: string | undefined;
     },
   ): RecordLink {
     const { sourceSide } = sidesOf(change, context);
     const sourceIsA = sourceSide === "A";
+    // SS-19 — the SOURCE record's own container-relative address, read from the record the
+    // poller already fetched. Both sides are frozen now because a bidirectional pair shares
+    // this one link: the reverse direction writes into *this* side later, by which time a
+    // delete may have left no record to read it from.
+    const sourceRecordAddress = readRecordAddress(
+      change.observedRecord,
+      context.sourceRecordAddressPath,
+    );
     return {
       id: this.#newId(),
       appAId: context.appAId,
       appANativeId: sourceIsA ? change.sourceNativeId : opts.targetNativeId,
       appBId: context.appBId,
       appBNativeId: sourceIsA ? opts.targetNativeId : change.sourceNativeId,
+      // Addressing only — never identity. The native ids above remain what the link
+      // correlates by, so the unique-active invariants are untouched.
+      ...recordAddressKeys(
+        sourceIsA ? sourceRecordAddress : opts.targetRecordAddress,
+        sourceIsA ? opts.targetRecordAddress : sourceRecordAddress,
+      ),
       resourcePairRef: change.resourcePairRef,
       establishedBy: opts.establishedBy,
       status: "active",

@@ -87,9 +87,11 @@ describe("registeredAppDtoSchema", () => {
 });
 
 describe("RESOURCE_BINDING_REF_KINDS", () => {
-  it("lists exactly the six confirmable ref kinds", () => {
+  it("lists exactly the seven confirmable ref kinds", () => {
     expect(RESOURCE_BINDING_REF_KINDS).toEqual([
       "nativeIdRef",
+      // SS-19 — the container-relative addressing ref, beside (never replacing) nativeIdRef.
+      "recordAddressRef",
       "collectionReadRef",
       "paginationRef",
       "deltaCursorRef",

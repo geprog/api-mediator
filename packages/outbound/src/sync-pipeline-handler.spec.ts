@@ -34,6 +34,7 @@ import type { ScopeLinkReader } from "./container-scope.js";
 import {
   ContainerUnresolvedError,
   PermanentOutboundError,
+  RecordAddressUnresolvedError,
   RetryableOutboundError,
   ThrottledOutboundError,
   classifyOutboundFailure,
@@ -1619,5 +1620,119 @@ describe("SyncPipelineHandler — SS-12 scoped write container routing", () => {
     // Same record-id-aware path (SS-12.5) across every scope-binding kind → record id, not 42.
     expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/tasks/${B_NATIVE}`);
     expect(h.protocol.requests[0]?.url).not.toContain("/tasks/42");
+  });
+});
+
+// ── SS-19: container-relative record addressing + its parks ────────────────────
+
+describe("SyncPipelineHandler — SS-19 container-relative record addressing", () => {
+  /** A scoped, address-ref-confirmed target — the Gitea-shaped configuration. */
+  const STORED_ADDRESS: SyncPipelineContext["targetRecordAddressing"] = { kind: "stored-address" };
+
+  async function seedUndriftedUpdateRows(h: Harness): Promise<void> {
+    await h.fieldState.seed([
+      fieldRow("A", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("A", "name", { synced: "Old", observed: "Old" }),
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "Old" }),
+    ]);
+  }
+
+  /** An active link carrying a container-relative address distinct from its native id. */
+  async function insertAddressedLink(h: Harness, address: string | undefined): Promise<void> {
+    await h.links.insert(
+      stripUndefined({
+        id: LINK_ID,
+        appAId: APP_A,
+        appANativeId: A_NATIVE,
+        appBId: APP_B,
+        appBNativeId: B_NATIVE,
+        ...(address !== undefined ? { appBRecordAddress: address } : {}),
+        resourcePairRef: PAIR,
+        establishedBy: "identity-match" as const,
+        status: "active" as const,
+        establishingQueueKey: { kind: "identity-value" as const, value: "e@x" },
+        createdAt: T0,
+        tombstonedAt: null,
+      }),
+    );
+  }
+
+  it("stored-address: a linked update addresses by the link's record address, not its native id", async () => {
+    const h = setup();
+    await insertAddressedLink(h, "7");
+    await seedUndriftedUpdateRows(h);
+    h.loader = () => ({ ...baseContext(), targetRecordAddressing: STORED_ADDRESS });
+
+    await runHandle(h, updateChange({ email: "e@x", name: "New" }));
+
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/customers/7`);
+    // The globally-unique native id never reaches the URL...
+    expect(h.protocol.requests[0]?.url).not.toContain(B_NATIVE);
+    // ...but the link still stores and links by it.
+    expect((await h.links.getById(LINK_ID))?.appBNativeId).toBe(B_NATIVE);
+  });
+
+  it("stored-address: a linked DELETE addresses by the stored address (no source record exists)", async () => {
+    const h = setup();
+    await insertAddressedLink(h, "7");
+    await h.fieldState.seed([
+      fieldRow("B", "email", { synced: "e@x", observed: "e@x" }),
+      fieldRow("B", "name", { synced: "Old", observed: "Old" }),
+    ]);
+    h.loader = () => ({
+      ...baseContext(),
+      deletion: { ...baseContext().deletion, deletePropagation: "propagate" },
+      targetRecordAddressing: STORED_ADDRESS,
+    });
+
+    await runHandle(h, deleteChange());
+
+    expect(h.protocol.requests[0]?.method).toBe("DELETE");
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/customers/7`);
+  });
+
+  it("SS-19.5 park: an UNCONFIRMED address ref parks before any call — never a 404-by-guess", async () => {
+    const h = setup();
+    await insertAddressedLink(h, "7");
+    await seedUndriftedUpdateRows(h);
+    h.loader = () => ({
+      ...baseContext(),
+      targetRecordAddressing: { kind: "unconfirmed-address-ref" },
+    });
+
+    await expect(runHandle(h, updateChange({ email: "e@x", name: "New" }))).rejects.toThrow(
+      RecordAddressUnresolvedError,
+    );
+    // The park happens BEFORE the wire — no guessed URL was ever sent.
+    expect(h.protocol.requests).toHaveLength(0);
+  });
+
+  it("SS-19.5 park: a confirmed ref but NO stored address on the link parks — never falls back to the native id", async () => {
+    const h = setup();
+    // A link established before the address ref was confirmed: no frozen address.
+    await insertAddressedLink(h, undefined);
+    await seedUndriftedUpdateRows(h);
+    h.loader = () => ({ ...baseContext(), targetRecordAddressing: STORED_ADDRESS });
+
+    await expect(runHandle(h, updateChange({ email: "e@x", name: "New" }))).rejects.toThrow(
+      RecordAddressUnresolvedError,
+    );
+    // The dangerous fallback is exactly what must NOT happen: inside a container that id
+    // is either absent or a DIFFERENT record.
+    expect(h.protocol.requests).toHaveLength(0);
+  });
+
+  it("SS-19.4 fallback: with NO addressing decision in the context, composition is unchanged (native id)", async () => {
+    const h = setup();
+    // A link that even carries an address — it must be ignored while the context says
+    // nothing, which is exactly the state of every pre-SS-19 context builder.
+    await insertAddressedLink(h, "7");
+    await seedUndriftedUpdateRows(h);
+    h.loader = () => baseContext();
+
+    await runHandle(h, updateChange({ email: "e@x", name: "New" }));
+
+    expect(h.protocol.requests[0]?.url).toBe(`${BASE_URL}/customers/${B_NATIVE}`);
   });
 });

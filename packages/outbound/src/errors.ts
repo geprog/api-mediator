@@ -65,6 +65,35 @@ export class ContainerUnresolvedError extends PermanentOutboundError {
   }
 }
 
+/**
+ * The **record-addressing** park reason (SS-19.5) — the distinct `last_error` a record
+ * dead-lettered because its **container-relative address** could not be resolved carries.
+ * Deliberately separate from {@link CONTAINER_LINK_PARK_REASON}: the container resolved
+ * fine, so the operator's remedy is different — confirm the resource's
+ * `ResourceBinding.recordAddressRef` (and replay), not link a container. A non-secret note
+ * (ref names and parameter names are operator config, never a payload value).
+ */
+export const RECORD_ADDRESS_PARK_REASON = "record-address-unresolved";
+
+/**
+ * A linked record whose **container-relative address** could not be resolved for a write
+ * (SS-19.5): the target resource is container-scoped and either its
+ * `ResourceBinding.recordAddressRef` is still unconfirmed, or the `RecordLink` carries no
+ * frozen address for that side (a link established before the ref was confirmed).
+ *
+ * A {@link PermanentOutboundError} for exactly the reason {@link ContainerUnresolvedError}
+ * is one: no number of retries resolves it — an operator confirms a ref and replays. It
+ * exists so the mediator **never falls back to the native id here**: inside a container
+ * that id either does not exist (a 404) or, far worse, names a *different* record that the
+ * write would silently clobber. Failing loud is the only safe disposition.
+ */
+export class RecordAddressUnresolvedError extends PermanentOutboundError {
+  public constructor(detail: string, options?: { readonly cause?: unknown }) {
+    super(`${RECORD_ADDRESS_PARK_REASON}: ${detail}`, options);
+    this.name = "RecordAddressUnresolvedError";
+  }
+}
+
 /** A load-discipline throttle: defer without counting a failed attempt. */
 export class ThrottledOutboundError extends Error {
   /** How long to defer before retrying (the ceiling wait or `Retry-After`). */

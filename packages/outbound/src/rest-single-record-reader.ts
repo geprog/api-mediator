@@ -98,7 +98,11 @@ export class RestSingleRecordTargetReader implements SingleRecordTargetReader {
       );
     }
     try {
-      const outboundRequest = buildReadRequest(resolved, request.nativeId);
+      // SS-19 — fill the read op's record-id parameter from the record's
+      // **container-relative address** when the target resource has one confirmed; the
+      // globally-unique native id would 404 inside a container. Absent → the native id,
+      // exactly as before SS-19.
+      const outboundRequest = buildReadRequest(resolved, request.recordAddress ?? request.nativeId);
       const response = await this.#send(request.targetAppId, outboundRequest);
       return classifyRead(response);
     } finally {

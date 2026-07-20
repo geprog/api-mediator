@@ -138,6 +138,8 @@ export {
 export {
   CONTAINER_LINK_PARK_REASON,
   ContainerUnresolvedError,
+  RECORD_ADDRESS_PARK_REASON,
+  RecordAddressUnresolvedError,
   PermanentOutboundError,
   RetryableOutboundError,
   ThrottledOutboundError,
