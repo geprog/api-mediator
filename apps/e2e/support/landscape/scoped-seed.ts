@@ -22,6 +22,7 @@ import {
   mappingProposal,
   orderingQueue,
   parkedConflict,
+  pollSnapshot,
   recordLink,
   registeredApp,
   resourceBinding,
@@ -389,20 +390,26 @@ export async function seedScopedSyncScaffold(tokens: LandscapeTokens): Promise<S
     approvedAt: now(),
     status: "active",
   };
+  // `FieldMapping` paths are **resource-qualified** (`resourceRef/path`) — the form the
+  // approval path produces and `data-model.md` specifies, because one `ApprovedMapping` may
+  // cover N resource pairs and the prefix is the only thing saying which pair a field belongs
+  // to. The record-relative reduction happens where a path meets a live record
+  // (`packages/domain/src/field-ref.ts`). Seeding bare paths here would encode a contract
+  // production never produces.
   const v2gFields: FieldMapping[] = [
     {
       id: randomUUID(),
       mappingId: mappingV2GId,
-      sourcePath: "title",
-      targetPath: "title",
+      sourcePath: "tasks/title",
+      targetPath: "issues/title",
       transform: "rename",
       isIdentityKey: true,
     },
     {
       id: randomUUID(),
       mappingId: mappingV2GId,
-      sourcePath: "description",
-      targetPath: "body",
+      sourcePath: "tasks/description",
+      targetPath: "issues/body",
       transform: "rename",
     },
   ];
@@ -543,6 +550,26 @@ export async function listScopedRuleSyncEvents(
     ...(status !== undefined ? { status } : {}),
     limit: 100,
   });
+}
+
+/** The per-scope `poll_snapshot` rows of a rule (scopeKey -> the native ids it believes it knows). */
+export async function listPollSnapshots(
+  ruleId: string,
+): Promise<{ scopeKey: string; recordCount: number; ids: string[] }[]> {
+  const db = await getTestDb();
+  const rows = await db
+    .select({
+      scopeKey: pollSnapshot.scopeKey,
+      recordCount: pollSnapshot.recordCount,
+      entries: pollSnapshot.entries,
+    })
+    .from(pollSnapshot)
+    .where(eq(pollSnapshot.syncRuleId, ruleId));
+  return rows.map((row) => ({
+    scopeKey: row.scopeKey,
+    recordCount: row.recordCount,
+    ids: Object.keys(row.entries),
+  }));
 }
 
 /** An approved mapping's assembled field + operation mappings (what the sync pipeline reads). */

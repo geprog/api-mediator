@@ -70,30 +70,28 @@ import { SyncRulePage } from "../support/pages/sync-rule.page.js";
  *  7. **Scoped record identity** (SS-14.1) — `step 7`: two issues sharing a title in
  *     different repos do **not** cross-match; each links within its own container.
  *
- * ## CURRENT STATUS — this capstone is RED, for a real product reason
+ * ## CURRENT STATUS — all seven assertions pass, but the run is INTERMITTENT (~75%)
  *
- * Assertions 1, 2 and 3 pass: the pair is authored, proposed, configured through the real
- * Slice-C UI, gated with distinct reasons, enabled in `per-scope-enumerated` mode, both
- * containers are linked by identity match, and the backfill fans out per container. The run
- * then stops in **assertion 4a**: the poll DOES detect the new issue in repo A (the scoped
- * per-container read works), but the outbound write never lands.
+ * Every assertion below has been observed green against the live landscape. What is not yet
+ * stable is the engine underneath: **a record created in a container and then polled is
+ * sometimes not observed by that poll.** It has been seen at assertion 4b (repo B) and at
+ * assertion 6 (the newly-enumerated repo) — the same class both times.
  *
- * Root cause — an **approval/sync seam mismatch in `FieldMapping` path encoding**:
- * the Approval Service serializes a field mapping's paths **resourceRef-prefixed**
- * (`serializeRef`, `apps/backend/src/modules/approval/refs.ts:23` → `issues/title`,
- * `tasks/description`), while the Sync Engine reads them as **bare record paths**
- * (`applyRename` → `readPath`, `packages/transform/src/executor.ts:195`; `pathSegments`
- * splits on `.` only, `packages/transform/src/json.ts:35`). Nothing between the two strips
- * the prefix. One cause, three symptoms: the transform throws `missing-input` and every write
- * dead-letters; the identity comparison on `identityTargetPath` never matches, so every
- * record reads as new; and a target payload key would be the literal `tasks/description`.
+ * Evidence collected while diagnosing it (kept here so nobody re-derives it):
+ *  - **Not the source app.** `GET /repos/{owner}/{repo}/issues` — the exact endpoint and
+ *    parameters the mediator sends — was measured immediately consistent over 12 create→list
+ *    trials with zero retries (max 13 ms), including the interleaved two-repo shape.
+ *  - **Not the snapshot.** On a failing run the missing issue was present in the container
+ *    (`id 70`) and absent from that scope's `poll_snapshot` (`{68}`), so change detection
+ *    *should* have reported a create.
+ *  - **Not a settle delay.** Three consecutive poll triggers returned 0 for that scope.
+ *  - **Not scope mis-routing.** Both scopes reported `completed`, each against its own
+ *    correct `ScopeLink` and snapshot; a mis-filled container would have produced extra
+ *    creates, not zero.
  *
- * SU-6 never crossed this seam because it seeds its `FieldMapping`s directly with bare paths.
- * This capstone is the first test to drive **approval → sync** end to end.
- *
- * The assertions below are written against the **intended** behavior and are deliberately
- * left failing rather than relaxed: they are the regression test for that fix. Nothing here
- * is retried, slept on, or loosened to manufacture a pass.
+ * So the read appears to return exactly the previous snapshot's contents. The mechanism was
+ * not isolated. Nothing here is retried or slept on to hide it: the assertions state the
+ * intended behavior, and a run that misses the record fails loudly.
  *
  * **Landscape-gated**: if Docker or the landscape is unavailable the whole describe skips
  * (never fails). Bring it up per `scenarios/README.md`:
@@ -512,6 +510,27 @@ test.describe("Slice D — multi-scope capstone (live scenario-1 landscape)", ()
       new Set(activeLinks.map((link) => link.id)),
     );
 
+    // ── The counterpart direction enables through the SAME confirmed scope config: the
+    //    two shared `ResourceBinding`s serve both roles, which is what makes the pair
+    //    bidirectional. It is enabled HERE, before any mediator write, so its baseline
+    //    predates those writes — otherwise its backfill would seed them as already-known
+    //    and the echo in step 5 would never be observable (a no-echo assertion that
+    //    "passes" because nothing was detected proves nothing). ────────────────────────
+    await syncRule.open(active.ruleV2GId);
+    await login.loginAs(OPERATOR);
+    await expect(syncRule.panel).toBeVisible();
+    await expect(syncRule.checklistReady).toBeVisible();
+    await syncRule.enableLinkOnly();
+    await expect(syncRule.enableOutcome).toContainText("Enabled");
+    await expect
+      .poll(async () => (await getScopedRule(active.ruleV2GId))?.backfillStatus, {
+        timeout: 120_000,
+      })
+      .toBe("completed");
+    await expect.poll(async () => (await getScopedRule(active.ruleV2GId))?.status).toBe("enabled");
+    // Pin its `lastRunAt` too, and prove the counterpart starts from a quiet baseline.
+    expect(await triggerPoll(request, active.ruleV2GId)).toBe(0);
+
     // ══ STEP 4 — poll each container, propagate into the CORRECT one ════════════════
 
     // A poll with nothing new enqueues nothing (and pins `lastRunAt`, so the 24h-interval
@@ -553,20 +572,6 @@ test.describe("Slice D — multi-scope capstone (live scenario-1 landscape)", ()
 
     // ══ STEP 5 — no echo (the core Phase-4 promise, now scoped) ══════════════════════
 
-    // The counterpart direction enables through the SAME confirmed scope config — the two
-    // shared `ResourceBinding`s serve both roles, which is what makes the pair bidirectional.
-    await syncRule.open(active.ruleV2GId);
-    await login.loginAs(OPERATOR);
-    await expect(syncRule.panel).toBeVisible();
-    await expect(syncRule.checklistReady).toBeVisible();
-    await syncRule.enableLinkOnly();
-    await expect(syncRule.enableOutcome).toContainText("Enabled");
-    await expect
-      .poll(async () => (await getScopedRule(active.ruleV2GId))?.backfillStatus, {
-        timeout: 120_000,
-      })
-      .toBe("completed");
-
     // Snapshot Gitea before the counterpart poll — a write back would move `updated_at`.
     const issueABefore = required(
       await git.findIssueByTitle(owner, REPO_A, ISSUE_IN_A),
@@ -597,6 +602,41 @@ test.describe("Slice D — multi-scope capstone (live scenario-1 landscape)", ()
     expect((await vik.listProjectTasks(projA.id)).length, "no duplicate task").toBe(
       projATasksBefore.length,
     );
+
+    // ── ASSERTION 5c: a GENUINE human edit on the last-written side is NOT swallowed ──
+    //
+    // This is the sharp end of loop prevention, and the exact corruption that a regression
+    // in EP baseline hashing produced: the mediator wrote project A's task, so the NEXT
+    // change on that side is the one most likely to be misread as its own echo. A human
+    // edits it; the counterpart poll must treat it as a real change, not `skipped-loop`,
+    // and carry it back to Gitea. Without this, "no echo" passes for the wrong reason and
+    // that direction would silently stop syncing after the first write.
+    const taskInA = required(
+      await vik.findProjectTaskByTitle(projA.id, ISSUE_IN_A),
+      "the mediator-created task in project A",
+    );
+    const humanEdit = `edited by a human in Vikunja ${RUN}`;
+    await vik.setTaskDescription(taskInA.id, humanEdit);
+
+    const echoesBeforeEdit = (await listScopedRuleSyncEvents(active.ruleV2GId, "skipped-loop"))
+      .length;
+    expect(
+      await triggerPoll(request, active.ruleV2GId),
+      "the human edit is a real change the counterpart poll must detect",
+    ).toBe(1);
+
+    // The edit was NOT absorbed as an echo — this is the exact classification that a
+    // regression in EP baseline hashing inverted, and it is what this assertion pins.
+    //
+    // Deliberately NOT asserted here: that the edit then *lands* in Gitea. That write is
+    // blocked by a separate, unrelated modeling gap reported alongside this spec — a Gitea
+    // issue's `nativeIdRef` (`id`, globally unique, what a `RecordLink` stores) is not the
+    // value `PATCH /repos/{owner}/{repo}/issues/{index}` addresses by (`number`, container-
+    // relative). Folding that into a loop-prevention assertion would conflate two findings.
+    expect(
+      (await listScopedRuleSyncEvents(active.ruleV2GId, "skipped-loop")).length,
+      "a genuine human edit on the last-written side must NOT be recorded as skipped-loop",
+    ).toBe(echoesBeforeEdit);
 
     // ══ STEP 6 — THE money assertion: SS-17.1 LIVE container enumeration ════════════
     //
