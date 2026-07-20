@@ -111,6 +111,8 @@ export class Poller {
   readonly #metrics: PollerMetrics | undefined;
   readonly #maxPages: number;
   readonly #containerPark: ContainerParkSink | undefined;
+  /** Per-rule tail of the serialized poll-cycle chain (one cycle at a time — see {@link pollOnce}). */
+  readonly #inFlight = new Map<string, Promise<PollRunOutcome>>();
 
   public constructor(
     reader: SourceReader,
@@ -138,6 +140,46 @@ export class Poller {
    * infrastructure fault (a store/enqueue error) propagates.
    */
   public async pollOnce(ruleId: string): Promise<PollRunOutcome> {
+    // One cycle per rule at a time, SERIALIZED rather than overlapped. Two concurrent
+    // cycles both load the same prior snapshot and the one that commits last overwrites
+    // the other's advance — dropping a just-detected record from the baseline, while the
+    // losing run reports zero changes for a change that really happened (silent
+    // under-reporting on a full-fetch feed, one step from an absence→delete inference).
+    //
+    // Queueing behind the in-flight cycle rather than refusing keeps the caller's request
+    // honoured: a `poll now` still runs a real cycle and reports its OWN true result. The
+    // predecessor's failure never cancels the successor — each cycle stands alone.
+    //
+    // LIMITATION — this guard is **in-process only**, and is the first piece of per-process
+    // Poller state in a system whose components are otherwise stateless over the shared
+    // store (`docs/architecture/overview.md` *Availability*). It is sufficient for the
+    // single-instance and active-passive standby deployments named there (only one instance
+    // polls), but NOT for active-active: two instances would each hold their own map and
+    // reintroduce exactly the overlapping-cycle lost update above, invisibly to every test
+    // here. Making the Poller multi-instance-safe therefore requires moving this mutual
+    // exclusion into the shared store — a Postgres advisory lock taken on the rule id for
+    // the duration of the cycle, or a `poll_run` row keyed by `sync_rule_id` claimed and
+    // released around it — not a second in-memory guard.
+    const previous = this.#inFlight.get(ruleId);
+    const run = (async (): Promise<PollRunOutcome> => {
+      if (previous !== undefined) {
+        await previous.catch((): undefined => undefined);
+      }
+      return this.#runCycle(ruleId);
+    })();
+    this.#inFlight.set(ruleId, run);
+    try {
+      return await run;
+    } finally {
+      // Only the tail clears the slot: a later call may already have chained onto it.
+      if (this.#inFlight.get(ruleId) === run) {
+        this.#inFlight.delete(ruleId);
+      }
+    }
+  }
+
+  /** One poll cycle, already guarded against a concurrent cycle for the same rule. */
+  async #runCycle(ruleId: string): Promise<PollRunOutcome> {
     const resolution = await this.#resolver.resolve(ruleId);
     if (!resolution.pollable) {
       const outcome: PollRunOutcome = { kind: "skipped", reason: resolution.reason };
@@ -204,6 +246,17 @@ export class Poller {
         result = { kind: "aborted", reason: `scope run failed: ${describeError(error)}` };
       }
       scopes.push({ scopeLinkId: scope.scopeLinkId, result });
+    }
+    // SP-1 — stamp the RULE's own `lastRunAt`. Each scope has already advanced its own
+    // `poll_scope_state` row; none of those touch `SyncRule.lastRunAt`, and a NULL one
+    // reads to the Scheduler as "never polled → due now", so the rule would be re-polled
+    // every tick forever, ignoring its interval. Mirrors SP-4's cross-scope rule: a cycle
+    // in which EVERY scope aborted made no progress, so it does not advance — poller lag
+    // keeps growing and the stuck-poller alert still fires. A cycle with at least one
+    // completed (or parked) scope did run, and per-scope isolation forbids one scope's
+    // abort from holding the whole rule's schedule hostage.
+    if (!everyScopeAborted(scopes)) {
+      await this.#state.advanceRuleRun(plan.ruleId, this.#now());
     }
     return { kind: "completed-per-scope", scopes };
   }
@@ -464,6 +517,17 @@ export class Poller {
     }
     await this.#containerPark.park(park);
   }
+}
+
+/**
+ * Did this cycle make no progress at all — at least one scope, and every one of them
+ * aborted (SP-4)? Such a cycle must not advance the rule's `lastRunAt`, so a persistently
+ * failing source still surfaces as a stuck poller. A cycle with no scopes at all (every
+ * container parked/unresolved) DID run its enumeration and is not "aborted" — it advances,
+ * so a rule awaiting manual container linking is not re-polled every tick.
+ */
+function everyScopeAborted(scopes: readonly PerScopeRunResult[]): boolean {
+  return scopes.length > 0 && scopes.every((scope) => scope.result.kind === "aborted");
 }
 
 function toEnqueued(prepared: readonly PreparedChange[]): EnqueuedChange[] {

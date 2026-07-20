@@ -59,6 +59,16 @@ export class DbPollStateStore implements PollStateStore {
     await this.#advanceCrossScope(advance);
   }
 
+  /**
+   * SS-13.3 — stamp only `sync_rule.last_run_at` after a per-scope fan-out. No cursor, no
+   * snapshot ref, no scope row: the scopes advanced their own `poll_scope_state` rows, and
+   * this is the rule-level run marker the Scheduler's SP-1 due-ness gate reads. Without it
+   * a per-scope rule's `last_run_at` stays NULL and the Scheduler polls it every tick.
+   */
+  public async advanceRuleRun(ruleId: string, lastRunAt: Date): Promise<void> {
+    await new SyncRuleRepository(this.#db).applyAdvance(ruleId, { lastRunAt });
+  }
+
   /** SS-13.1 — the cross-scope advance (`sync_rule` + sentinel snapshot), unchanged from SP-5. */
   async #advanceCrossScope(advance: PollAdvance): Promise<void> {
     await tx(this.#db, async (txn) => {

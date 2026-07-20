@@ -34,7 +34,9 @@ import {
 import {
   DbPollStateStore,
   FakeSourceReader,
+  decidePoll,
   type EnablementInput,
+  type PollCandidateView,
   type ResolutionContext,
 } from "@mediator/sync-engine";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -42,6 +44,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type {
   BackfillRunInput,
   BackfillRunResult,
+  BackfillScopeResult,
   LinkOnlyBackfillContext,
 } from "./backfill-runner.js";
 import {
@@ -374,5 +377,114 @@ suite("SS-17.5 per-scope backfill seeding integration (requires Postgres)", () =
     // The aborted scope seeded no snapshot AND no scope-state row.
     expect(await store.loadSnapshot(RULE, SCOPE_B)).toBeUndefined();
     expect(await new PollScopeStateRepository(db).load(RULE, SCOPE_B)).toBeUndefined();
+  });
+
+  /**
+   * SP-1/BE-6 regression — the enable path had the SAME `scopeKey`-routing gap as the
+   * poll path: every per-scope go-live seed passes `scopeKey`, so it writes only
+   * `poll_scope_state` and `sync_rule.last_run_at` was never stamped. The rule then went
+   * live with a NULL `lastRunAt`, which the REAL `decidePoll` gate reads as "never polled
+   * → due now" — polling on the very next tick regardless of the interval, and racing any
+   * concurrent poll trigger. The cross-scope seed has always stamped it.
+   *
+   * Proven end-to-end here: real `RuleEnabler` → real `DbPollStateStore` → real Postgres →
+   * real `SyncRuleRepository.listPollCandidates` → real `decidePoll`.
+   */
+  async function decideFor(now: Date): Promise<ReturnType<typeof decidePoll>> {
+    const candidate = (await new SyncRuleRepository(db).listPollCandidates()).find(
+      (entry) => entry.rule.id === RULE,
+    );
+    if (candidate === undefined) {
+      throw new Error("expected the enabled rule to be a poll candidate");
+    }
+    return decidePoll(candidate satisfies PollCandidateView, now);
+  }
+
+  function completedScope(scopeLinkId: string, nativeId: string): BackfillScopeResult[] {
+    return [
+      {
+        scopeLinkId,
+        outcome: {
+          outcome: "completed",
+          enumeratedCount: 1,
+          snapshotEntries: new Map([[nativeId, `hash-${nativeId}`]]),
+          records: [],
+          counts: ZERO_COUNTS,
+        },
+      },
+    ];
+  }
+
+  it("a completed per-scope backfill stamps the rule's own last_run_at → NOT due within the interval", async () => {
+    const result: BackfillRunResult = {
+      outcome: "completed-per-scope",
+      mode: "link-only",
+      scopes: [...completedScope(SCOPE_A, "issue-1"), ...completedScope(SCOPE_B, "issue-9")],
+    };
+
+    expect((await enablerWith(result).enable(enableInput())).kind).toBe("enabled");
+
+    // The rule-level marker is stamped, and agrees with the per-scope seeds' `seededAt`.
+    const rule = await new SyncRuleRepository(db).getById(RULE);
+    expect(rule?.lastRunAt?.toISOString()).toBe(T0.toISOString());
+    expect((await new PollScopeStateRepository(db).load(RULE, SCOPE_A))?.lastRunAt).toStrictEqual(
+      T0,
+    );
+
+    // Without the stamp this is `poll` — the rule would be polled on the very next tick.
+    expect(await decideFor(new Date(T0.getTime() + 1_000))).toMatchObject({ kind: "not-due" });
+    // …and it still becomes due once the interval really has elapsed.
+    expect(await decideFor(new Date(T0.getTime() + 60_001))).toMatchObject({ kind: "poll" });
+  });
+
+  it("a PARTIAL fan-out still goes live and still stamps it (SS-17.5 isolation)", async () => {
+    const result: BackfillRunResult = {
+      outcome: "completed-per-scope",
+      mode: "link-only",
+      scopes: [
+        ...completedScope(SCOPE_A, "issue-1"),
+        {
+          scopeLinkId: SCOPE_B,
+          outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 0 },
+        },
+      ],
+    };
+
+    expect((await enablerWith(result).enable(enableInput())).kind).toBe("enabled");
+
+    // One scope's abort never freezes the whole rule's schedule.
+    expect((await new SyncRuleRepository(db).getById(RULE))?.lastRunAt?.toISOString()).toBe(
+      T0.toISOString(),
+    );
+    expect(await decideFor(new Date(T0.getTime() + 1_000))).toMatchObject({ kind: "not-due" });
+  });
+
+  it("an ALL-scopes-failed fan-out stamps NOTHING and leaves polling held by SP-1", async () => {
+    const result: BackfillRunResult = {
+      outcome: "completed-per-scope",
+      mode: "link-only",
+      scopes: [
+        {
+          scopeLinkId: SCOPE_A,
+          outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 0 },
+        },
+        {
+          scopeLinkId: SCOPE_B,
+          outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 0 },
+        },
+      ],
+    };
+
+    expect((await enablerWith(result).enable(enableInput())).kind).toBe("backfill-aborted");
+
+    // No seed, no `lastRunAt` — matching the documented single-scope abort behaviour…
+    const rule = await new SyncRuleRepository(db).getById(RULE);
+    expect(rule?.lastRunAt).toBeUndefined();
+    expect(rule?.backfillStatus).toBe("running");
+    // …and SP-1 keeps polling held, so the NULL marker never reaches the due-ness branch.
+    expect(await decideFor(new Date(T0.getTime() + 1_000))).toMatchObject({
+      kind: "hold",
+      reason: "backfill-not-done",
+    });
   });
 });

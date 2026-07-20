@@ -80,6 +80,11 @@ function pending(queue: FakeOrderingQueue): Record<string, unknown>[] {
   return queue.listByStatus("pending").map((entry) => entry.payload);
 }
 
+/** How many changes a scope's completed result enqueued (0 for aborted/parked). */
+function enqueuedCountOf(result: PerScopeRunResult): number {
+  return result.result.kind === "completed" ? result.result.enqueued.length : 0;
+}
+
 function perScopeResults(outcome: PollRunOutcome): readonly PerScopeRunResult[] {
   if (outcome.kind !== "completed-per-scope") {
     throw new Error(`expected completed-per-scope, got ${outcome.kind}`);
@@ -194,5 +199,105 @@ describe("Poller — SS-13.2/13.3 per-scope enumeration", () => {
     expect(h.reader.scopeCalls.some((call) => call.scopeLinkId === "repo-99")).toBe(false);
     // The resolvable scope still polled and completed.
     expect(results.find((r) => r.scopeLinkId === SCOPE_A)?.result.kind).toBe("completed");
+  });
+});
+
+/**
+ * SP-1 regression — the per-scope fan-out must stamp the **rule's own** `lastRunAt`.
+ *
+ * Found by the live scoped-sync capstone: every per-scope `advance` carries a `scopeKey`,
+ * so it writes only `poll_scope_state` and `SyncRule.lastRunAt` stayed NULL forever. The
+ * Scheduler's SP-1 gate reads exactly that field and treats NULL as "never polled → due
+ * now", so a per-scope rule was re-polled on **every tick** (1/s) no matter its interval —
+ * flooding the source and racing the deterministic poll trigger, whose own run then found
+ * the change already consumed and reported `enqueuedCount: 0`.
+ */
+describe("Poller — SP-1 rule-level lastRunAt after a per-scope fan-out", () => {
+  it("stamps the rule's own lastRunAt, so the Scheduler sees the rule as polled", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("a1")] }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("b1")] }], SCOPE_B);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    // Without this the rule's `lastRunAt` is NULL and `decidePoll` returns `poll` forever.
+    expect(h.state.ruleLastRunAt(RULE_ID)).toStrictEqual(NOW);
+    // …and it is a RULE-level marker only: no cross-scope snapshot/cursor bucket appears.
+    expect(h.state.stateOf(RULE_ID)).toBeUndefined();
+  });
+
+  it("does NOT stamp it when EVERY scope aborted — a run with no progress stays stuck (SP-4)", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ fail: "page 0 exploded" }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ fail: "page 0 exploded" }], SCOPE_B);
+
+    const outcome = await h.poller.pollOnce(RULE_ID);
+
+    expect(perScopeResults(outcome).every((r) => r.result.kind === "aborted")).toBe(true);
+    // Lag keeps growing → the stuck-poller alert still fires for a persistently failing source.
+    expect(h.state.ruleLastRunAt(RULE_ID)).toBeUndefined();
+  });
+
+  it("stamps it when only SOME scopes aborted — one scope's failure never freezes the rule's schedule", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ fail: "page 0 exploded" }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("b1")] }], SCOPE_B);
+
+    await h.poller.pollOnce(RULE_ID);
+
+    expect(h.state.ruleLastRunAt(RULE_ID)).toStrictEqual(NOW);
+  });
+});
+
+/**
+ * Two concurrent cycles for ONE rule are unsound: both load the same prior snapshot, and
+ * whichever commits last overwrites the other's advance — dropping a just-detected record
+ * from the baseline and reporting zero changes for a change that did happen. The second
+ * caller is therefore SERIALIZED behind the first, not refused: its cycle still runs and
+ * still reports its own true result.
+ */
+describe("Poller — one poll cycle per rule at a time", () => {
+  it("serializes a second concurrent cycle instead of racing it", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("a1")] }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("b1")] }], SCOPE_B);
+
+    const [first, second] = await Promise.all([
+      h.poller.pollOnce(RULE_ID),
+      h.poller.pollOnce(RULE_ID),
+    ]);
+
+    // Both cycles really ran — neither was dropped or refused.
+    expect(first.kind).toBe("completed-per-scope");
+    expect(second.kind).toBe("completed-per-scope");
+    // The first consumed both records; the second, running AFTER it, correctly finds
+    // nothing new. Overlapped, both would have diffed the same empty baseline and
+    // double-enqueued, and the later advance would have clobbered the earlier one.
+    expect(pending(h.queue)).toHaveLength(2);
+    expect(perScopeResults(second).every((r) => enqueuedCountOf(r) === 0)).toBe(true);
+  });
+
+  it("a failing cycle never cancels the one queued behind it", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("a1")] }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("b1")] }], SCOPE_B);
+    // The first cycle's advance throws for every scope (crash-before-advance, SP-5).
+    h.state.throwOnNextAdvance();
+
+    const [, second] = await Promise.all([h.poller.pollOnce(RULE_ID), h.poller.pollOnce(RULE_ID)]);
+
+    // The successor still ran a full cycle of its own.
+    expect(second.kind).toBe("completed-per-scope");
+  });
+
+  it("releases the slot when a cycle finishes, so a later cycle runs normally", async () => {
+    const h = harness(perScopePlan());
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("a1")] }], SCOPE_A);
+    h.reader.setFullFetch(RULE_ID, [{ records: [rec("b1")] }], SCOPE_B);
+
+    await h.poller.pollOnce(RULE_ID);
+    const second = await h.poller.pollOnce(RULE_ID);
+
+    expect(second.kind).toBe("completed-per-scope");
   });
 });

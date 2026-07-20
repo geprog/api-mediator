@@ -288,6 +288,19 @@ export interface PollStateStore {
    * after every detected change of that (scope's) run is durably enqueued.
    */
   advance(advance: PollAdvance): Promise<void>;
+  /**
+   * SS-13.3 — stamp the **rule's own** `SyncRule.lastRunAt` after a per-scope fan-out,
+   * touching nothing else (no cursor, no snapshot, no scope row).
+   *
+   * A per-scope run's {@link advance} calls all carry a `scopeKey`, so they write only
+   * `poll_scope_state` — which leaves `SyncRule.lastRunAt` NULL forever. That is not a
+   * cosmetic gap: the Scheduler's SP-1 due-ness gate reads `SyncRule.lastRunAt`, and a
+   * NULL one means "never polled → due now", so a per-scope rule would be re-polled on
+   * **every tick** regardless of its configured interval (breaking SP-1.1, flooding the
+   * source against OC-3, and racing any concurrent poll trigger). The per-scope state
+   * keeps its own `last_run_at` for per-scope staleness; this is the rule-level one.
+   */
+  advanceRuleRun(ruleId: string, lastRunAt: Date): Promise<void>;
 }
 
 // ── The durable enqueue seam (SP-5) ──────────────────────────────────────────
