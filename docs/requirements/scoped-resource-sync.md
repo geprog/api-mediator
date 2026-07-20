@@ -614,10 +614,16 @@ Blocked by SS-11, SS-4, Phase-4 OC-4 (park mechanics). Precedes SS-13, SS-14.
 ### Out of scope
 
 - The per-scope cursor **seeding** specifics beyond "per scope, same rules as BE-6" — reuse BE-6 per scope.
+- **Live re-listing** the source container set at poll time and the **per-scope backfill fetch fan-out** —
+  deferred to **SS-17**. SS-13 as built iterates the *already-established* `ScopeLink`s; SS-17 re-lists the
+  live enumerable container list each poll cycle (its "enumerate scopes" step) and fans out backfill per
+  scope, closing the two SS-13-review gaps that leave a **per-scope-enumerated** rule un-runnable
+  end-to-end (a container created after the first discovery pass is otherwise never polled, and per-scope
+  backfill reads the collection with no scope fill and aborts fail-loud).
 
 ### Dependencies
 
-Blocked by SS-12, Phase-4 SP-2/SP-5/BE-6. Precedes SS-14, SS-15.
+Blocked by SS-12, Phase-4 SP-2/SP-5/BE-6. Precedes SS-14, SS-15, SS-17.
 
 ---
 
@@ -668,31 +674,64 @@ rule enables only when it can resolve every record's container.
 ### Acceptance criteria
 
 1. **Given** a rule with any `kind: scope-link` scope binding, **when** the gate runs (extends SS-5),
-   **then** it requires the pair's `ScopeCorrespondence.scopeIdentityKey` **confirmed** and the relevant
-   `ScopeLink`(s) **resolvable** — a confirmed scope identity key for discovery, or `constant`/`manual`
-   links covering the scopes in play.
-2. **Given** per-scope enumeration is the read mode (SS-13), **when** the gate runs, **then** the source
-   container's `collectionReadRef` (and `paginationRef` where paging) must be confirmed, and the
-   `targetContainerRef`'s `collectionReadRef` must be confirmed for discovery.
+   **then** it requires the pair's `ScopeCorrespondence.scopeIdentityKey` **confirmed** and, **by the
+   rule's effective poll-scope mode (SS-13.5)**, the `ScopeLink`(s) it needs **resolvable**:
+   - **cross-scope** (SS-13.1) — discovery must be **viable**: the confirmed `scopeIdentityKey` plus the
+     confirmed **target** container list op (`targetContainerRef.collectionReadRef`, which the SS-11.3
+     harvest lists to match records' captured scopes against). The gate **does not** require the per-scope
+     `ScopeLink`s pre-established — the steady-state harvest / on-demand resolution (SS-11.3/11.4)
+     establishes them from streamed records.
+   - **per-scope-enumerated** (SS-13.2) — as cross-scope, **plus** the confirmed **source** container list
+     op of criterion 2; the gate still **does not** require the per-scope `ScopeLink`s pre-established,
+     because **SS-17 establishes them live** (the enablement discovery pass, re-listed each poll cycle and
+     at backfill fan-out) — a landscape that grows containers after enablement must not become permanently
+     un-enableable.
+   - **per-scope-pinned** (SS-13.4) — the source container is not enumerable, so the gate requires
+     `constant`/`manual` `ScopeLink`s **covering the scopes in play** (nothing lists them live).
+2. **Given** the effective mode is **per-scope-enumerated** (SS-13.2 / SS-17), **when** the gate runs,
+   **then** the source container's `collectionReadRef` (and `paginationRef` where it pages) must be
+   confirmed on the pair's `ScopeCorrespondence.sourceContainerRef`, and the `targetContainerRef`'s
+   `collectionReadRef` must be confirmed — these are exactly the ops **SS-17**'s poll-time enumeration and
+   per-scope backfill fan-out consume, so an enumerated-mode rule whose container list ops are unconfirmed
+   can neither discover nor poll its scopes and is blocked.
 3. **Given** an unmet scope precondition, **when** enable is attempted, **then** it is blocked and listed
-   in "still needs" (extends BE-1/BE-2, SU-5), **distinguishing** an unconfirmed **scope identity key**, an
-   unresolved **`ScopeLink`**, and an unconfirmed **container list op**.
+   in "still needs" (extends BE-1/BE-2, SU-5), **distinguishing** an unconfirmed **scope identity key**,
+   an absent/unresolved **`ScopeLink`** (per-scope-pinned — the scopes are not covered), and an unconfirmed
+   **container list op** (per-scope-enumerated — SS-17 cannot enumerate without it).
 4. **Given** a **scope-identity-key confirmation panel** (mirrors the record identity-key panel / RB-3),
    **when** it renders, **then** the operator confirms the value-preserving pairing *source `sourceScopeRef`
    component ↔ target container field* (derive-then-correct — the mediator pre-selects a candidate).
 5. **Given** the **container-linking screen** (mirrors SU-2), **when** it renders, **then** it lists
-   unresolved/ambiguous/**parked** container matches (SS-11.5 / SS-12.4) with candidate target containers
-   and lets the operator link/unlink `ScopeLink`s; a parked record leaves the queue once its container is
-   linked and it replays.
+   unresolved/ambiguous/**parked** container matches from SS-11.5 / SS-12.4 **and SS-17** (a new container
+   the poll-time re-list or backfill fan-out could not auto-resolve) with candidate target containers, and
+   lets the operator link/unlink `ScopeLink`s; a parked record or scope leaves the queue once its container
+   is linked and it replays.
 6. **Given** a `viewer`, **when** they open any of these surfaces, **then** they render read-only (OA-2).
+7. **[Carried-over SS-14 hardening, folded into this gate slice]** **Given** the pre-link ordering-queue
+   key resolver is handed a **scoped** context (a confirmed target scope path binding present) but **no**
+   `PreLinkScopeResolver` is wired, **when** it resolves a key, **then** it **throws** (fail-loud) rather
+   than falling through to the non-scoped identity-value key — mirroring the Poller's "scoped park but no
+   sink wired" throw (the `not-scoped` fall-through at
+   `packages/sync-engine/src/ordering/queue-key-resolver.ts:192` today): a scoped rule must never be keyed
+   as if it were non-scoped.
+
+> **Carried-over SS-14 review item (documented gate-gating, no code change).** The container-park sink
+> skips dedup for a parked record whose **captured scope is absent**
+> (`apps/backend/src/modules/sync/pre-link-scope.ts:100`). Because this gate requires a scoped rule's
+> `ScopeCorrespondence.scopeIdentityKey` confirmed (criterion 1) and that key is built on the source
+> `sourceScopeRef` (SS-7), a **gated** scoped rule always has a confirmed `sourceScopeRef` — so a parked
+> record that captured no scope is an anomaly and that dedup-skip is **unreachable in a gated rule**. It is
+> folded into this slice as a documented gate-gating, **not** a code change; if a future mode ever allows a
+> scoped rule without a `sourceScopeRef`, revisit it.
 
 ### Out of scope
 
-- The discovery engine — SS-11.
+- The discovery engine — SS-11. The **live-enumeration + per-scope backfill fan-out engine** — SS-17.
 
 ### Dependencies
 
-Blocked by SS-11..SS-14, Phase-4 SU-1/SU-2/SU-5.
+Blocked by SS-11..SS-14, Phase-4 SU-1/SU-2/SU-5. The gate is coherent standalone (it blocks enablement),
+but a **per-scope-enumerated** rule only *runs* once **SS-17** ships — see the slice ordering below.
 
 ---
 
@@ -731,6 +770,85 @@ Blocked by SS-1, SS-10, and the Phase-6 spec-update lifecycle.
 
 ---
 
+## SS-17 — Live container enumeration for enumerable per-scope sources (poll + backfill fan-out)
+
+**As an** operator, **I** have an **enumerable** per-scope source's containers **re-listed live** — each
+poll cycle and at backfill — so that a container added after enablement is discovered, linked, backfilled,
+and polled without a manual step, **so that** "the mediator lists all available scopes and polls each"
+holds for a *growing* landscape, not only for the scopes that existed at enablement.
+
+> **Why this story exists.** The SS-13 review found a **per-scope-enumerated** rule is not yet end-to-end
+> runnable, because two things were deferred (both **fail-safe** — no corruption, no guessed container, no
+> false delete — but blocking): **Call 5** — the Poller iterates only the **already-established**
+> `ScopeLink`s (`RepoPollPlanResolver.#resolveScopes` over `listByCorrespondence`), so a container created
+> *after* the first discovery pass is silently never polled (the sweep's `needsDiscovery` returns false
+> once *any* link exists, and the SS-11.4 on-demand harvest can't fire without a record, which per-scope
+> mode never reads for a not-yet-enumerated container); **Call 6** — a per-scope rule's initial backfill
+> reads the collection with **no scope fill** and aborts fail-loud, so it cannot seed its baseline. This
+> story closes both **by reusing SS-11 establishment and SS-13 per-scope state** — it adds only the
+> *triggers* that feed the SS-11 discovery pass at poll and backfill time (the read-side realization of the
+> user's stated ideal: *"detect that we first need to query for all available scopes and do the polling for
+> each scope"*). It coins **no new domain term** and needs **no migration**.
+
+### Acceptance criteria
+
+1. **Given** a rule whose effective poll-scope mode is **per-scope-enumerated** (SS-13.5 — a confirmed
+   `scope-link` **source** scope binding **and** a confirmed `ScopeCorrespondence.sourceContainerRef`),
+   **when** its poll cycle runs, **then** **before** the per-scope loop the Poller **re-lists the live
+   source container list** via the confirmed `sourceContainerRef.collectionReadRef` (paged to exhaustion)
+   and runs the **SS-11 enablement discovery pass** (`establishByIdentityMatch`) over it — establishing a
+   `ScopeLink` for every newly-appeared container whose `scopeIdentityKey` value matches a target container
+   — and only then enumerates the (now-refreshed) active `ScopeLink`s as the scope set (SS-13.2). It
+   **reuses** SS-11.2, never re-implementing container matching.
+2. **Given** container discovery is defined as enablement-time + on-demand + sweep + manual — **not** a
+   second scheduler (Finalized L3 decision 2), **when** the poll-time re-list runs, **then** it executes
+   **on the Poller's existing per-rule cadence** as the "enumerate scopes" step of a per-scope-enumerated
+   poll (SS-13.2), **not** as a new background loop; the reconciliation sweep's `needsDiscovery`
+   (crash-recovery re-trigger for a pair with **zero** links) is left **unchanged**.
+3. **Given** the live container re-list, **when** the container fetch is **incomplete/partial** (a page
+   failed), **then** the re-list **aborts** (SP-4 discipline) and the poll proceeds over the
+   **previously-established** `ScopeLink`s only — never mass-polling, never dropping a known scope; and a
+   newly-appeared container that is **ambiguous or unresolvable** is **parked** for manual container
+   linking (SS-11.5 / SS-12.4), never polled as a guessed container.
+4. **Given** a rule whose effective mode is **per-scope** — enumerated **or** pinned — **when** its initial
+   backfill runs, **then** instead of a single un-scoped collection read it **fans out**: it resolves the
+   scope set (enumerated: the SS-17.1 live re-list + SS-11 establishment; pinned: the operator's
+   `constant`/`manual` `ScopeLink`s — SS-13.4) and runs the source `collectionReadRef` **once per scope**,
+   filled with that scope's confirmed **source-side** scope path parameters (SS-4 / SS-12 fill, source
+   side), linking + seeding baselines per scope (BE-4 `link-only` / BE-5 `push` behavior unchanged within a
+   scope).
+5. **Given** per-scope backfill fan-out, **when** a scope completes, **then** it seeds that scope's **own**
+   snapshot / cursor in `poll_scope_state`, keyed by its `ScopeLink` id (SS-13.3 / BE-6, per scope); an
+   **incomplete** fetch within one scope **aborts only that scope** (never seeds its snapshot, never
+   mass-deletes — SP-4 per scope) and does **not** abort the others; a scope whose source-side fill does
+   not resolve, or whose container cannot be resolved, is **parked** (SS-11.5) and skipped, never guessed.
+6. **Given** a **cross-scope** rule (SS-13.1 / SS-8), **when** it polls or backfills, **then** it is
+   **untouched** — one cross-scope call, single per-rule cursor/snapshot, record-carried capture; the
+   source container is neither re-listed nor fanned out (it may not even be enumerable — scenario-1's
+   trimmed Gitea has no repo-list). **Given** a **per-scope-pinned** rule (SS-13.4), **when** it polls,
+   **then** it keeps polling exactly the operator-pinned links with **no** live re-list (there is no
+   `sourceContainerRef` to enumerate).
+7. **Given** SS-17 is built, **when** its persistence is reviewed, **then** it introduces **no** new entity
+   or column: it reuses `ScopeLink` (SS-10) for establishment, `poll_scope_state` (SS-13) for the per-scope
+   cursor/snapshot, and the SS-11 discovery service / establishment pass — so it ships **without a
+   migration**.
+
+### Out of scope
+
+- The gate that lets an enumerated rule be enabled — SS-15 (reused). Scoped identity match **within** a
+  container — SS-14 (reused). Non-enumerable sources — SS-13.4 pinned (no re-list) / SS-8 cross-scope
+  (record-carried).
+- A **continuous container scheduler** — explicitly *not* this (Finalized L3 decision 2); the re-list rides
+  the Poller's existing cadence.
+
+### Dependencies
+
+Blocked by SS-11 (establishment / discovery pass), SS-12 (source-side scope fill), SS-13 (per-scope state +
+modes), SS-14 (scoped identity within a container), Phase-4 BE-4/BE-5/BE-6 (backfill + seeding). Precedes
+the per-scope-enumerated capstone e2e. **No migration.**
+
+---
+
 ## Out of scope (whole file)
 
 - **The Adapter-Engine `ParameterMapping` path (Phase 5).** Separate mechanism (fills from an inbound
@@ -751,7 +869,7 @@ Blocked by SS-1, SS-10, and the Phase-6 spec-update lifecycle.
 |---|---|---|---|---|
 | **L1** (SS-1..6) | `constant` scope bindings | one-repo↔one-board Gitea↔Vikunja | **Yes** | No |
 | **L2** (SS-7..9) | `record-derived` + cross-scope read (single cursor) | cross-container polling where value-spaces shared | (already gone) | partial (read side) |
-| **L3** (SS-10..16) | `ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` + discovery + per-scope poll + scoped identity | **true multi-repo → multi-project** (+ fixes L2 record-derived delete routing) | (already gone) | **Yes** |
+| **L3** (SS-10..17) | `ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` + discovery + per-scope poll + scoped identity + live container enumeration | **true multi-repo → multi-project** (+ fixes L2 record-derived delete routing) | (already gone) | **Yes** |
 
 ## Suggested build order
 
@@ -760,7 +878,38 @@ SU-6 workaround, smallest surface). Then L2 (record-carried scope, single cursor
 shared value-spaces). Then L3 (the entities + discovery + per-scope polling — the largest slice). Within
 L3: SS-10 (`ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` domain) → SS-11 (establish/discover)
 → SS-12 (`scope-link` fill + delete routing) → SS-13 (poll modes) → SS-14 (scoped identity) → SS-15
-(gate/UI + scope-identity-key panel) → SS-16 (lifecycle).
+(gate + scope-identity-key panel + container-linking UI) → SS-16 (lifecycle) → **SS-17 (live enumeration +
+per-scope backfill fan-out)**.
+
+### Remaining scoped-sync slices (each an independently reviewable/mergeable feature branch)
+
+SS-10..SS-14 are **built and merged**. What remains ships as four cohesive-module slices — order and
+dependencies below. **None needs a migration** (all reuse `ScopeLink` + `poll_scope_state` +
+`ScopeCorrespondence`, already migrated).
+
+1. **Slice A — Enablement gate (backend), SS-15.1–3 + SS-15.7 + the SS-14 dedup note.** The mode-aware
+   scope-link gate (extends the SS-5 / BE-2 gate) plus the two carried-over SS-14 hardening items folded in
+   (the fail-loud queue-key throw at `queue-key-resolver.ts:192`; the documented gate-gating of the
+   `pre-link-scope.ts:100` dedup skip). Backend only. **Blocked by** SS-10..SS-14 (built). Unblocks
+   enabling a scoped rule; precedes B, C, D.
+2. **Slice B — Live-enumeration + per-scope backfill fan-out engine, SS-17.** Closes Call 5 + Call 6 (the
+   read-side realization of the user's ideal). Pure engine (Poller + backfill + the reused SS-11 discovery
+   service). **Blocked by** SS-11/SS-12/SS-13/SS-14 (built) **and Slice A** (so an enumerated rule can be
+   enabled to exercise it). Unit/integration-testable against fakes independently of the UI. Precedes D.
+3. **Slice C — Scope-identity-key confirmation panel + container-linking UI (Vue), SS-15.4–6.** Mirrors
+   SU-1 (blockers/checklist), SU-2 (manual linking), SU-5 (binding-blocker surfacing) — no new UI patterns.
+   **Blocked by** Slice A (the gate API + its "still needs" distinctions) and Slice B (the container-linking
+   screen also lists SS-17's newly-parked containers, SS-15.5). May proceed in parallel with D once A + B
+   land.
+4. **Slice D — Capstone scoped e2e.** A real Gitea↔Vikunja multi-scope round: per-scope enable → backfill →
+   poll each container → propagate → **no echo** (mirrors SU-6). **Blocked by** Slices A + B (enable + run)
+   and C where the journey is UI-driven. **Fixture caveat — see open question 9:** scenario-1's *trimmed*
+   Gitea spec has **no repo-list**, so per-scope-**enumerated** read (SS-17.1) cannot run against it; the
+   capstone either (a) ingests the **full** Gitea spec (repo-list present) to exercise SS-17's enumerated
+   read + backfill fan-out, or (b) runs the multi-scope round in **cross-scope read + per-scope
+   `ScopeLink` write** mode (which the trimmed spec supports, SS-12.8) and leaves SS-17's per-scope
+   fan-out to Slice B's deterministic unit/integration tests. Recommended: (a) for a true "poll each
+   container" e2e; keep (b) as the deterministic backstop.
 
 ## Open questions for a human (concept silent or a decision to ratify)
 
@@ -789,3 +938,13 @@ L3: SS-10 (`ScopeCorrespondence` + `ScopeLink` + `RecordLink.scopeRef` domain) �
 8. **Should this become its own phase (e.g. Phase 4.5 / a Phase-6 addendum)?** *Recommended:* yes — it is a
    phase-sized feature; L1/L2 already shipped inside Phase 4's tail (L1 dropped the SU-6 workaround), and
    L3 is the largest remaining slice.
+9. **[RESOLVED by the human, 2026-07-20 — full Gitea spec]** The SS-17 per-scope-enumerated capstone
+   (Slice D) runs against the **full** Gitea spec (which has a repo-list), for a **true "poll each
+   container"** e2e that genuinely exercises SS-17.1's live enumeration + backfill fan-out; the deterministic
+   Slice-B unit/integration tests cover the same fan-out as a backstop. (The trimmed-spec cross-scope-read
+   round remains available but is not the capstone.)
+10. **[RESOLVED by the human, 2026-07-20 — ratified as specified]** The poll-time live re-list (SS-17.1) is
+    accepted as the "enumerate scopes" step *of* a per-scope-enumerated poll — **not** a second scheduler:
+    it rides the Poller's existing per-rule cadence, enumerated mode only (cross-scope + pinned untouched),
+    and is the read-side realization of the user's stated ideal ("query for all available scopes and poll
+    each"). SS-17 is greenlit as written; Finalized L3 decision 2 stands (no new background loop).
