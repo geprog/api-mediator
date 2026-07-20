@@ -70,8 +70,16 @@ export function parseFieldRef(serialized: string): FieldRef | undefined {
  * every producer in the system emits it (the Phase-4 SU-6 capstone and much of the
  * unit-test corpus seed bare paths directly), so a strict parse here would fail
  * records it can read perfectly well. The tolerance is safe in the direction that
- * matters: a bare path stays bare, so this can never *introduce* the absent-read
- * that qualification caused — it only ever removes it.
+ * matters for **every path containing no `/`**: such a path is returned unchanged,
+ * so for it this can never *introduce* the absent-read that qualification caused —
+ * it only ever removes it.
+ *
+ * The claim is exactly that narrow. An *unqualified* path whose leading segment is
+ * followed by a literal `/` (`data/v1.title`, meant as a single record-relative key)
+ * parses as a ref and reduces to `v1.title`, which then reads absent. Judged
+ * unreachable — an IR field path is dot-separated and `/` is the qualification
+ * separator, so no producer emits one — and left as-is rather than guarded, since
+ * any guard would have to distinguish the two by convention anyway.
  */
 export function recordRelativePath(fieldPath: string): string {
   return parseFieldRef(fieldPath)?.path ?? fieldPath;

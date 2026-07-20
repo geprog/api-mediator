@@ -63,8 +63,15 @@ export function resourcePairKey(sourceResourceRef: string, targetResourceRef: st
  * The resource-pair key component of a stored field path, for the AS-5 identity-key
  * invariants below. A well-formed stored path is resource-qualified (`issues/title`),
  * so this is its `resourceRef`; an **unqualified** path names no resource and falls
- * back to the whole path as its own component — preserving these invariants' exact
- * long-standing behavior (two identity fields collide iff they name the same pair).
+ * back to the whole path as its own component — preserving these invariants' intent
+ * (two identity fields collide iff they name the same pair).
+ *
+ * On **degenerate** inputs it is marginally stricter than the local `split("/")` it
+ * replaced: `"/title"` and `"issues/"` have an empty component on one side, which
+ * {@link parseFieldRef} rejects as unqualified, so they fall back to the whole path
+ * instead of yielding an empty `resourceRef`. Both forms are rejected by edit-path
+ * validation long before assembly, so the difference is unreachable; it is called out
+ * here only so "same behavior" is not read as byte-identical on all inputs.
  *
  * Built on the shared {@link fieldResourceRef} parse rather than a local `split("/")`,
  * so the qualified↔bare boundary has exactly one definition system-wide.

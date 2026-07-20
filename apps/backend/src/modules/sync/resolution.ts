@@ -152,6 +152,16 @@ export function findIdentityField(
  * corpus seed bare paths). Only a field that positively identifies itself as
  * belonging to a *different* pair is excluded, so this can never drop a field a rule
  * legitimately needs.
+ *
+ * The cost of that tolerance is over-retention on a **mixed-qualification** mapping:
+ * an unqualified field is retained for *every* pair, so on a mapping that covers
+ * N > 1 pairs and qualifies only some of its fields, the unqualified one is
+ * transformed into every pair's write — the exact cross-pair leak the filter exists
+ * to stop. This is not producible today (a real `ApprovedMapping` is assembled with
+ * every path qualified, so a multi-pair mapping is uniformly qualified and the
+ * unqualified corpus is all single-pair), which is why the tolerance is kept rather
+ * than hardened into a rejection. A producer that starts emitting mixed
+ * qualification would have to revisit it.
  */
 export function fieldMappingsForResourcePair(
   fieldMappings: readonly FieldMapping[],
