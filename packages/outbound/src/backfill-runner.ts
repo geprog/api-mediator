@@ -23,6 +23,8 @@ import {
   type LoopPreventionContext,
   type MatchedTargetRecord,
   type ObservedRecord,
+  type PollScope,
+  type PollScopeUnresolved,
   type RecordWriteInput,
   type ResolutionContext,
   type ResolutionOutcome,
@@ -197,10 +199,29 @@ export interface PushBackfillContext extends LinkOnlyBackfillContext {
   readonly targetChangeTimestampRef?: string;
 }
 
+/**
+ * SS-17.4 — the per-scope backfill fan-out: the scope set the runner reads the source
+ * collection once per (each `PollScope`'s source-side container fill) + links/seeds within,
+ * plus the unresolvable scopes it surfaces as parked (never guessed). Absent on the run
+ * input → a cross-scope rule: one un-scoped collection read (unchanged).
+ */
+export interface BackfillFanOut {
+  readonly scopes: readonly PollScope[];
+  readonly unresolvedScopes: readonly PollScopeUnresolved[];
+}
+
 /** The backfill to run — discriminated by mode so the context always matches (BE-4 vs BE-5). */
 export type BackfillRunInput =
-  | { readonly mode: "link-only"; readonly context: LinkOnlyBackfillContext }
-  | { readonly mode: "push"; readonly context: PushBackfillContext };
+  | {
+      readonly mode: "link-only";
+      readonly context: LinkOnlyBackfillContext;
+      readonly fanOut?: BackfillFanOut;
+    }
+  | {
+      readonly mode: "push";
+      readonly context: PushBackfillContext;
+      readonly fanOut?: BackfillFanOut;
+    };
 
 // ── The per-record note + the run summary (discriminated unions) ──────────────
 
@@ -280,7 +301,45 @@ export type BackfillRunResult =
       readonly mode: BackfillMode;
       readonly reason: string;
       readonly enumeratedCount: number;
+    }
+  // SS-17.4/17.5 — a per-scope fan-out: each scope's own branch result (completed / aborted
+  // / parked) beside the others. The `RuleEnabler` seeds each `completed` scope's own
+  // `poll_scope_state` keyed by `scopeLinkId`; an aborted/parked scope seeds nothing.
+  | {
+      readonly outcome: "completed-per-scope";
+      readonly mode: BackfillMode;
+      readonly scopes: readonly BackfillScopeResult[];
     };
+
+/**
+ * SS-17.5 — one backfill BRANCH's terminal outcome: `completed` (its scoped enumeration +
+ * link/seed done, its own `snapshotEntries` ready to seed that scope's `poll_scope_state`)
+ * or `aborted` (SP-4 per scope — a partial fetch aborts only this branch, seeds nothing).
+ * The cross-scope `run` returns this shape (+ `mode`); each fan-out scope stores it too.
+ */
+export type BackfillBranchOutcome =
+  | {
+      readonly outcome: "completed";
+      readonly enumeratedCount: number;
+      readonly snapshotEntries: ReadonlyMap<string, string>;
+      readonly records: readonly BackfillRecordNote[];
+      readonly counts: BackfillCounts;
+    }
+  | { readonly outcome: "aborted"; readonly reason: string; readonly enumeratedCount: number };
+
+/**
+ * SS-17.5 — how ONE fan-out scope's branch ended: a {@link BackfillBranchOutcome}, or
+ * `parked` (an unresolvable/ambiguous container — SS-11.5, skipped, never guessed). An
+ * unresolvable scope never enumerates, so `parked` is produced by the fan-out directly.
+ */
+export type BackfillScopeOutcome =
+  BackfillBranchOutcome | { readonly outcome: "parked"; readonly reason: string };
+
+/** One scope's fan-out result, keyed by its `ScopeLink` id (`"__unresolved__"` when parked). */
+export interface BackfillScopeResult {
+  readonly scopeLinkId: string;
+  readonly outcome: BackfillScopeOutcome;
+}
 
 // ── Construction ──────────────────────────────────────────────────────────────
 
@@ -312,6 +371,8 @@ export interface BackfillRunnerOptions {
 
 const DEFAULT_ACTOR = "system";
 const DEFAULT_MAX_PAGES = 100_000;
+/** SS-17.5 — the scope-link id a parked (unresolvable) fan-out scope is recorded under. */
+const UNRESOLVED_SCOPE_MARKER = "__unresolved__";
 
 export class BackfillRunner {
   readonly #reader: SourceReader;
@@ -350,27 +411,78 @@ export class BackfillRunner {
 
   /**
    * Run the one-time backfill. Enumerates the source to exhaustion (abort-on-partial),
-   * processes each record per the mode, and returns the discriminated summary. Never
+   * links + seeds each record per the mode, and returns the discriminated summary. Never
    * advances any live polling state — the caller ({@link RuleEnabler}) seeds cursor /
-   * snapshot from {@link BackfillRunResult.snapshotEntries} at go-live (BE-6).
+   * snapshot from the result at go-live (BE-6). SS-17.4 — a per-scope rule (an `input.fanOut`)
+   * fans out: one scoped enumeration + link/seed per scope, each isolated, returning a
+   * `completed-per-scope` result; a cross-scope rule runs the single un-scoped read.
    */
   public async run(input: BackfillRunInput): Promise<BackfillRunResult> {
     const startedAt = this.#clock();
+    try {
+      if (input.fanOut !== undefined) {
+        return await this.#runPerScope(input, input.fanOut);
+      }
+      // A cross-scope rule: one un-scoped collection read (SP behaviour, unchanged).
+      const body = await this.#runScope(input, undefined);
+      return { ...body, mode: input.mode };
+    } finally {
+      this.#metrics.recordDuration(input.context.ruleId, this.#elapsed(startedAt));
+    }
+  }
+
+  /**
+   * SS-17.4/17.5 — the per-scope fan-out: read the source collection **once per scope**
+   * (each `PollScope`'s source-side container fill) and link/seed within it, keeping each
+   * scope's own result — its `snapshotEntries` (seeded to its `poll_scope_state` by the
+   * `RuleEnabler`, keyed by `scopeLinkId` — BE-6 per scope) or its own `aborted` (a partial
+   * fetch aborts ONLY this scope) — beside the others (per-scope isolation). An unresolvable
+   * scope is surfaced as `parked` (SS-11.5), skipped, never polled with a guessed container.
+   */
+  async #runPerScope(input: BackfillRunInput, fanOut: BackfillFanOut): Promise<BackfillRunResult> {
+    const scopes: BackfillScopeResult[] = [];
+    // Surface every unresolvable container as a parked scope first (fail-loud, never guessed).
+    for (const unresolved of fanOut.unresolvedScopes) {
+      scopes.push({
+        scopeLinkId: UNRESOLVED_SCOPE_MARKER,
+        outcome: {
+          outcome: "parked",
+          reason: `unresolved container ${unresolved.container}: ${unresolved.reason}`,
+        },
+      });
+    }
+    for (const scope of fanOut.scopes) {
+      // Per-scope isolation: this scope's enumeration/link/seed is independent — its abort
+      // (SP-4) seeds nothing and never aborts or touches another scope's branch.
+      const outcome = await this.#runScope(input, scope);
+      scopes.push({ scopeLinkId: scope.scopeLinkId, outcome });
+    }
+    return { outcome: "completed-per-scope", mode: input.mode, scopes };
+  }
+
+  /**
+   * Run ONE backfill branch — the whole rule (cross-scope, `scope` undefined) or one
+   * container (`scope` set, SS-17.4). Enumerates the source (scoped when `scope` is set) to
+   * exhaustion (abort-on-partial), links + seeds each record per the mode, and returns the
+   * branch's `completed` body (its own snapshot) or its `aborted` — never advances live state.
+   */
+  async #runScope(
+    input: BackfillRunInput,
+    scope: PollScope | undefined,
+  ): Promise<BackfillBranchOutcome> {
     const { context } = input;
-    const enumeration = await this.#enumerate(context.ruleId);
+    const enumeration = await this.#enumerate(context.ruleId, scope);
     if (!enumeration.ok) {
-      // Abort-on-partial (BE-4.1): a truncated fetch is NOT "no more records".
-      this.#metrics.recordDuration(context.ruleId, this.#elapsed(startedAt));
+      // Abort-on-partial (BE-4.1 / SP-4 per scope): a truncated fetch is NOT "no more records".
       return {
         outcome: "aborted",
-        mode: input.mode,
         reason: enumeration.reason,
         enumeratedCount: enumeration.partialCount,
       };
     }
 
     const records = enumeration.records;
-    // The complete enumeration doubles as the first snapshot (BE-6.1).
+    // The complete enumeration doubles as the first snapshot (BE-6.1, per scope — SS-14.5).
     const snapshotEntries = new Map<string, string>();
     for (const record of records) {
       snapshotEntries.set(record.nativeId, contentHashOfRecord(record.record));
@@ -392,10 +504,8 @@ export class BackfillRunner {
       this.#metrics.recordProgress(context.ruleId, processed, records.length);
     }
 
-    this.#metrics.recordDuration(context.ruleId, this.#elapsed(startedAt));
     return {
       outcome: "completed",
-      mode: input.mode,
       enumeratedCount: records.length,
       snapshotEntries,
       records: notes,
@@ -407,6 +517,7 @@ export class BackfillRunner {
 
   async #enumerate(
     ruleId: string,
+    scope: PollScope | undefined,
   ): Promise<
     | { readonly ok: true; readonly records: readonly ObservedRecord[] }
     | { readonly ok: false; readonly reason: string; readonly partialCount: number }
@@ -414,7 +525,9 @@ export class BackfillRunner {
     const byNativeId = new Map<string, ObservedRecord>();
     let continuation: string | undefined;
     for (let page = 0; page < this.#maxPages; page += 1) {
-      const outcome = await this.#reader.readCollectionPage(ruleId, continuation);
+      // SS-17.4 — pass the scope so a per-scope enumeration fills the source read's
+      // container path params (a Gitea `{owner}/{repo}`); `undefined` is the cross-scope read.
+      const outcome = await this.#reader.readCollectionPage(ruleId, continuation, scope);
       if (!outcome.ok) {
         return { ok: false, reason: outcome.reason, partialCount: byNativeId.size };
       }

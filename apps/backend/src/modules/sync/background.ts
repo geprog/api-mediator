@@ -383,10 +383,18 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     // SS-13 — the resolver derives the poll-enumeration mode (+ honors the operator
     // override) and, for a per-scope rule, resolves its scope set from the pair's
     // ScopeCorrespondence + established ScopeLinks.
-    new RepoPollPlanResolver(ruleArtifactRepos, {
-      scopeCorrespondences: scopeCorrespondences,
-      scopeLinks,
-    }),
+    new RepoPollPlanResolver(
+      ruleArtifactRepos,
+      {
+        scopeCorrespondences: scopeCorrespondences,
+        scopeLinks,
+      },
+      // SS-17.1 — the SS-11 discovery service drives the poll-time live container re-list
+      // for a per-scope-enumerated rule (the "enumerate scopes" step of the poll, riding
+      // the existing per-rule cadence — SS-17.2, NOT a second scheduler; the sweep is
+      // untouched). The re-list REUSES the SS-11 establishment pass, never a fork.
+      scopeDiscovery,
+    ),
     new DbPollStateStore(db),
     orderingQueue,
     // SS-14.2/14.3 — for a scoped rule the pre-link ordering-queue key is scope-qualified via
@@ -500,6 +508,9 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       ruleArtifactRepos,
       scopeLinks,
       scopeCorrespondences,
+      // SS-17.4 — drives the SS-17.1 live re-list for a per-scope-enumerated rule's backfill
+      // fan-out (per-scope-pinned fans out with no re-list; cross-scope attaches none).
+      scopeDiscovery,
     );
     if (!resolved.ok) {
       return { kind: "unresolved", reason: resolved.reason };
@@ -528,6 +539,8 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
       ruleArtifactRepos,
       scopeLinks,
       scopeCorrespondences,
+      // SS-17.4 — same fan-out scope-set resolution as the operator enable path.
+      scopeDiscovery,
     );
     if (!resolved.ok) {
       logger.error({ ruleId, reason: resolved.reason }, "backfill retrigger: rule did not resolve");

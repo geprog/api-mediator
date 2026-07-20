@@ -4,15 +4,12 @@ import type {
   ScopeLink,
   SourceScopeRef,
 } from "@mediator/domain";
-import { resolveScopeLinkScopeValues, targetScopeKeyOf } from "@mediator/outbound";
 import type {
   CrossScopePollPlan,
   PerScopePollPlan,
   PollPlanCommon,
   PollPlanResolution,
   PollPlanResolver,
-  PollScope,
-  PollScopeUnresolved,
 } from "@mediator/sync-engine";
 
 import { hasConfirmedScopePathBinding } from "./container-routing.js";
@@ -25,6 +22,7 @@ import {
   type RuleArtifactRepos,
   type RuleArtifacts,
 } from "./resolution.js";
+import { resolveScopeSet, type EnumerationRelister } from "./scope-set-resolver.js";
 
 /**
  * The narrow scope-resolution reader ports the per-scope plan (SS-13.2/13.4) needs, on
@@ -61,14 +59,27 @@ export interface ScopeResolutionRepos {
  *    (each with the container's scope-path-param fill from its source-side scope key),
  *    and any `ScopeLink` whose source-side fill does not resolve is surfaced as an
  *    `unresolvedScopes` entry the Poller parks — never a guessed container (fail-loud).
+ *
+ * **SS-17.1 — live container re-list (per-scope-enumerated).** Before enumerating the
+ * scope set for a **per-scope-enumerated** rule, it drives the injected SS-11 discovery
+ * pass ({@link EnumerationRelister}) as the "enumerate scopes" step — re-listing the live
+ * source container list and establishing a `ScopeLink` for every newly-appeared container
+ * — so a container created after enablement is polled without a manual step. This rides
+ * the Poller's existing per-rule cadence (SS-17.2, **not** a second scheduler).
  */
 export class RepoPollPlanResolver implements PollPlanResolver {
   readonly #repos: RuleArtifactRepos;
   readonly #scopeRepos: ScopeResolutionRepos;
+  readonly #relister: EnumerationRelister | undefined;
 
-  public constructor(repos: RuleArtifactRepos, scopeRepos: ScopeResolutionRepos) {
+  public constructor(
+    repos: RuleArtifactRepos,
+    scopeRepos: ScopeResolutionRepos,
+    relister?: EnumerationRelister,
+  ) {
     this.#repos = repos;
     this.#scopeRepos = scopeRepos;
+    this.#relister = relister;
   }
 
   public async resolve(ruleId: string): Promise<PollPlanResolution> {
@@ -128,79 +139,27 @@ export class RepoPollPlanResolver implements PollPlanResolver {
       return { pollable: true, plan };
     }
 
-    // SS-13.2/13.4 — per-scope: resolve the scope set from the pair's `ScopeLink`s.
+    // SS-13.2/13.4 + SS-17.1 — per-scope: resolve the scope set from the pair's
+    // `ScopeLink`s. For per-scope-ENUMERATED `resolveScopeSet` first re-lists the live
+    // source container list and runs the SS-11 establishment pass (the "enumerate scopes"
+    // step of the poll, riding the existing per-rule cadence — SS-17.2), so a container
+    // created after the first discovery pass is discovered, linked, and polled;
+    // per-scope-PINNED never re-lists (SS-17.6). The re-list reuses the SS-11 discovery
+    // service — never a fork.
     const plan: PerScopePollPlan = {
       ...common,
       scopeMode: "per-scope",
-      ...(await this.#resolveScopes(
-        artifacts,
-        effectiveMode === "per-scope-pinned",
+      ...(await resolveScopeSet({
+        effectiveMode,
+        resourcePairRef: artifacts.rule.resourcePairRef,
+        sourceAppId: artifacts.sourceApp.id,
+        sourceScopePathBindings: artifacts.sourceBinding.scopePathBindings ?? [],
         correspondence,
-      )),
+        links: this.#scopeRepos.scopeLinks,
+        relister: this.#relister,
+      })),
     };
     return { pollable: true, plan };
-  }
-
-  /**
-   * SS-13.2/13.4 — resolve the rule's scope set from the established `ScopeLink`s under
-   * the pair's `ScopeCorrespondence`. `pinnedOnly` (per-scope-pinned, SS-13.4) restricts
-   * to `constant`/`manual` links; otherwise (per-scope-enumerated, SS-13.2) every active
-   * link is polled. Each scope's `fillValues` come from the link's **source-side** scope
-   * key run through the source read's `scope-link` bindings (SS-12's container fill,
-   * source side). A link whose source-side fill does not resolve — or a pair with no
-   * `ScopeCorrespondence` — is surfaced as `unresolvedScopes` the Poller parks (fail-loud,
-   * never a guessed container — SS-11.5 / SS-12.6).
-   */
-  async #resolveScopes(
-    artifacts: RuleArtifacts,
-    pinnedOnly: boolean,
-    correspondence: ScopeCorrespondence | undefined,
-  ): Promise<{
-    readonly scopes: readonly PollScope[];
-    readonly unresolvedScopes: readonly PollScopeUnresolved[];
-  }> {
-    if (correspondence === undefined) {
-      return {
-        scopes: [],
-        unresolvedScopes: [
-          {
-            container: artifacts.rule.resourcePairRef,
-            reason:
-              "no ScopeCorrespondence for the pair — confirm the scope identity key and link containers",
-          },
-        ],
-      };
-    }
-    const links = await this.#scopeRepos.scopeLinks.listByCorrespondence(correspondence.id);
-    const scopes: PollScope[] = [];
-    const unresolvedScopes: PollScopeUnresolved[] = [];
-    const bindings = artifacts.sourceBinding.scopePathBindings ?? [];
-    for (const link of links) {
-      if (link.status !== "active") {
-        continue; // an archived link is not polled (its records route deletes via scopeRef).
-      }
-      if (pinnedOnly && link.establishedBy !== "constant" && link.establishedBy !== "manual") {
-        continue; // SS-13.4 — pinned mode polls only operator-pinned links.
-      }
-      const sourceScopeKey = targetScopeKeyOf(link, artifacts.sourceApp.id);
-      if (sourceScopeKey === undefined) {
-        unresolvedScopes.push({
-          container: link.id,
-          reason: `ScopeLink ${link.id} does not address source app ${artifacts.sourceApp.id}`,
-        });
-        continue;
-      }
-      const fillValues = resolveScopeLinkScopeValues(bindings, sourceScopeKey);
-      if (fillValues.size === 0) {
-        unresolvedScopes.push({
-          container: link.id,
-          reason: `source scope path parameters did not resolve for ScopeLink ${link.id}`,
-        });
-        continue;
-      }
-      scopes.push({ scopeLinkId: link.id, fillValues });
-    }
-    return { scopes, unresolvedScopes };
   }
 
   #pollOperationConfirmed(

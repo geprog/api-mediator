@@ -6,6 +6,7 @@ import type {
 import type { FieldMapping, RecordLink } from "@mediator/domain";
 import {
   FakeRecordLinkStore,
+  FakeSourceReader,
   FakeSyncFieldStateStore,
   FakeTargetIdentityLookup,
   hashFieldValue,
@@ -628,5 +629,127 @@ describe("SS-13 backfill establishes RecordLink.scopeRef (discharges the SS-12 d
     const link = h.links.all()[0];
     expect(link?.scopeRef).toBeUndefined();
     expect(link !== undefined && "scopeRef" in link).toBe(false);
+  });
+});
+
+// ── SS-17.4/17.5: per-scope backfill fan-out ──────────────────────────────────
+
+describe("SS-17.4/17.5 per-scope backfill fan-out", () => {
+  /** A `PollScope` with a source-side container fill (the reader keys pages by its id). */
+  function scope(
+    scopeLinkId: string,
+    owner: string,
+  ): { scopeLinkId: string; fillValues: Map<string, string> } {
+    return { scopeLinkId, fillValues: new Map([["owner", owner]]) };
+  }
+
+  it("SS-17.4: reads the source collection ONCE per scope and seeds each scope's OWN snapshot", async () => {
+    const h = setup();
+    const reader = new FakeSourceReader();
+    reader.setFullFetch(
+      RULE,
+      [{ records: [record("a1", { id: "a1", email: "a1@x.com", name: "A1" })] }],
+      "sl-a",
+    );
+    reader.setFullFetch(
+      RULE,
+      [{ records: [record("b1", { id: "b1", email: "b1@x.com", name: "B1" })] }],
+      "sl-b",
+    );
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    const result = await runner.run({
+      mode: "link-only",
+      context: linkOnlyContext(),
+      fanOut: { scopes: [scope("sl-a", "alice"), scope("sl-b", "bob")], unresolvedScopes: [] },
+    });
+
+    expect(result.outcome).toBe("completed-per-scope");
+    if (result.outcome !== "completed-per-scope") return;
+    // Read once per scope, each with its own container fill (SS-17.4).
+    expect(reader.scopeCalls.map((c) => c.scopeLinkId).sort()).toStrictEqual(["sl-a", "sl-b"]);
+    // Each scope's branch completed with ITS OWN snapshot keyed by native id within it (SS-17.5).
+    const a = result.scopes.find((s) => s.scopeLinkId === "sl-a");
+    const b = result.scopes.find((s) => s.scopeLinkId === "sl-b");
+    expect(a?.outcome.outcome).toBe("completed");
+    expect(b?.outcome.outcome).toBe("completed");
+    if (a?.outcome.outcome !== "completed" || b?.outcome.outcome !== "completed") return;
+    expect([...a.outcome.snapshotEntries.keys()]).toStrictEqual(["a1"]);
+    expect([...b.outcome.snapshotEntries.keys()]).toStrictEqual(["b1"]);
+  });
+
+  it("SS-17.5: an incomplete fetch in ONE scope aborts only that scope — the others complete", async () => {
+    const h = setup();
+    const reader = new FakeSourceReader();
+    reader.setFullFetch(
+      RULE,
+      [{ records: [record("a1", { id: "a1", email: "a1@x.com", name: "A1" })] }],
+      "sl-a",
+    );
+    reader.setFullFetch(RULE, [{ fail: "page 0 timed out" }], "sl-b"); // SP-4 per scope
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    const result = await runner.run({
+      mode: "link-only",
+      context: linkOnlyContext(),
+      fanOut: { scopes: [scope("sl-a", "alice"), scope("sl-b", "bob")], unresolvedScopes: [] },
+    });
+
+    expect(result.outcome).toBe("completed-per-scope");
+    if (result.outcome !== "completed-per-scope") return;
+    const a = result.scopes.find((s) => s.scopeLinkId === "sl-a");
+    const b = result.scopes.find((s) => s.scopeLinkId === "sl-b");
+    expect(a?.outcome.outcome).toBe("completed"); // sibling unaffected (isolation)
+    expect(b?.outcome.outcome).toBe("aborted"); // this scope only — no snapshot seeded
+    if (b?.outcome.outcome === "aborted") {
+      expect(b.outcome.reason).toBe("page 0 timed out");
+    }
+  });
+
+  it("SS-17.5: an unresolvable scope is PARKED and skipped — its container is never read", async () => {
+    const h = setup();
+    const reader = new FakeSourceReader();
+    reader.setFullFetch(
+      RULE,
+      [{ records: [record("a1", { id: "a1", email: "a1@x.com", name: "A1" })] }],
+      "sl-a",
+    );
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    const result = await runner.run({
+      mode: "link-only",
+      context: linkOnlyContext(),
+      fanOut: {
+        scopes: [scope("sl-a", "alice")],
+        unresolvedScopes: [
+          { container: "sl-unresolved", reason: "source scope path parameters did not resolve" },
+        ],
+      },
+    });
+
+    expect(result.outcome).toBe("completed-per-scope");
+    if (result.outcome !== "completed-per-scope") return;
+    const parked = result.scopes.find((s) => s.outcome.outcome === "parked");
+    expect(parked?.scopeLinkId).toBe("__unresolved__");
+    expect(parked?.outcome.outcome).toBe("parked");
+    // The unresolvable container was never polled with a guessed fill.
+    expect(reader.scopeCalls.map((c) => c.scopeLinkId)).toStrictEqual(["sl-a"]);
+  });
+
+  it("SS-17.6 regression: a CROSS-SCOPE backfill (no fanOut) is untouched — one un-scoped read", async () => {
+    const h = setup();
+    const reader = new FakeSourceReader();
+    reader.setFullFetch(RULE, [
+      { records: [record("x1", { id: "x1", email: "x1@x.com", name: "X1" })] },
+    ]);
+    const runner = runnerWith(h, reader, h.countingOutbound);
+
+    const result = await runner.run({ mode: "link-only", context: linkOnlyContext() });
+
+    expect(result.outcome).toBe("completed"); // NOT completed-per-scope
+    if (result.outcome !== "completed") return;
+    expect([...result.snapshotEntries.keys()]).toStrictEqual(["x1"]);
+    // No scoped read happened (the cross-scope path passes `scope: undefined`).
+    expect(reader.scopeCalls).toHaveLength(0);
   });
 });

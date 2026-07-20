@@ -3,6 +3,7 @@ import { stripUndefined } from "@mediator/domain";
 import type { ScopeLinkStore } from "@mediator/db";
 import type {
   BackfillContainerResolution,
+  BackfillFanOut,
   BackfillRunInput,
   EnableRuleInput,
   LinkOnlyBackfillContext,
@@ -17,6 +18,7 @@ import {
   buildResolutionContext,
   resolveTargetOperations,
 } from "./context-builders.js";
+import { derivePollScopeMode } from "./poll-scope-mode.js";
 import {
   confirmedFieldPath,
   confirmedValue,
@@ -30,6 +32,7 @@ import {
   computeScopeLinkGate,
   type ScopeLinkGateDeps,
 } from "./scope-requirements.js";
+import { resolveScopeSet, type EnumerationRelister } from "./scope-set-resolver.js";
 
 /**
  * **The enable-input resolver** — it turns persisted `SyncRule`/`ApprovedMapping`/
@@ -43,6 +46,14 @@ import {
  *
  * The backfill enumerates the **rule's own forward direction** (`sourceAppId →
  * targetAppId`), so its RL/EP contexts are built for that direction.
+ *
+ * **SS-17.4 — per-scope backfill fan-out.** For a **per-scope** rule (enumerated or
+ * pinned) it resolves the rule's scope set (enumerated: the SS-17.1 live re-list + SS-11
+ * establishment; pinned: the operator's `constant`/`manual` links — SS-13.4) via the
+ * shared {@link resolveScopeSet} and attaches it as {@link BackfillFanOut}, so the runner
+ * reads the source collection **once per scope** with that scope's source-side container
+ * fill and seeds per-scope state (BE-6 per scope). A cross-scope rule attaches no fan-out
+ * (one un-scoped collection read, unchanged).
  */
 export interface EnableInputResolution {
   ok: true;
@@ -73,6 +84,10 @@ const PLACEHOLDER_IDENTITY: FieldMapping = {
  * rule/mapping/binding/IR state is missing (a base URL-less app, an unparseable
  * `resourcePairRef`, an absent spec/group/binding) — a state the enable action cannot
  * act on and surfaces to the operator rather than silently backfilling from nothing.
+ *
+ * `relister` is the SS-11 discovery service that drives the SS-17.1 live re-list for a
+ * per-scope-enumerated rule's backfill fan-out (absent → no re-list; the backfill fans
+ * out over the previously-established links only).
  */
 export async function resolveEnableRuleInput(
   ruleId: string,
@@ -80,6 +95,7 @@ export async function resolveEnableRuleInput(
   repos: RuleArtifactRepos,
   scopeLinks: ScopeLinkStore,
   correspondences: ScopeLinkGateDeps["correspondences"],
+  relister?: EnumerationRelister,
 ): Promise<EnableInputResolution | EnableInputUnresolved> {
   const artifacts = await resolveRuleArtifacts(ruleId, repos);
   if (artifacts === undefined) {
@@ -105,7 +121,13 @@ export async function resolveEnableRuleInput(
     scopeLinkGate: await computeScopeLinkGate(artifacts, { correspondences, scopeLinks, repos }),
   };
 
-  const backfill = await buildBackfillRunInput(artifacts, repos, scopeLinks);
+  const backfill = await buildBackfillRunInput(
+    artifacts,
+    repos,
+    scopeLinks,
+    correspondences,
+    relister,
+  );
   const pollSeed = buildPollSeed(artifacts);
 
   return { ok: true, input: { enablement, backfill, pollSeed } };
@@ -115,6 +137,8 @@ async function buildBackfillRunInput(
   artifacts: RuleArtifacts,
   repos: RuleArtifactRepos,
   scopeLinks: ScopeLinkStore,
+  correspondences: ScopeLinkGateDeps["correspondences"],
+  relister: EnumerationRelister | undefined,
 ): Promise<BackfillRunInput> {
   const identityField = findIdentityField(artifacts.fieldMappings) ?? PLACEHOLDER_IDENTITY;
   const operations = resolveTargetOperations(
@@ -151,6 +175,10 @@ async function buildBackfillRunInput(
     });
   };
 
+  // SS-17.4 — a per-scope rule's backfill fans out over its scope set (undefined = a
+  // cross-scope rule, one un-scoped collection read — unchanged).
+  const fanOut = await resolveBackfillFanOut(artifacts, correspondences, scopeLinks, relister);
+
   const linkOnly: LinkOnlyBackfillContext = stripUndefined({
     ruleId: artifacts.rule.id,
     mappingId: artifacts.mapping.id,
@@ -164,7 +192,7 @@ async function buildBackfillRunInput(
   });
 
   if ((artifacts.rule.backfillMode ?? "link-only") !== "push") {
-    return { mode: "link-only", context: linkOnly };
+    return { mode: "link-only", context: linkOnly, ...(fanOut !== undefined ? { fanOut } : {}) };
   }
 
   const counterpartFields = await loadCounterpartFields(artifacts, repos);
@@ -191,7 +219,40 @@ async function buildBackfillRunInput(
     sourceChangeTimestampRef: confirmedFieldPath(artifacts.sourceBinding.changeTimestampRef),
     targetChangeTimestampRef: confirmedFieldPath(artifacts.targetBinding.changeTimestampRef),
   });
-  return { mode: "push", context };
+  return { mode: "push", context, ...(fanOut !== undefined ? { fanOut } : {}) };
+}
+
+/**
+ * SS-17.4 — resolve the backfill's per-scope fan-out, or `undefined` for a cross-scope
+ * rule (which backfills the single un-scoped collection read, unchanged). The effective
+ * poll-scope mode is derived from the source container binding + the operator override —
+ * the SAME derivation the `RepoPollPlanResolver` polls in, so the backfill fans out over
+ * exactly the scopes the rule will poll. Enumerated mode runs the SS-17.1 live re-list +
+ * SS-11 establishment (via `resolveScopeSet`); pinned mode uses the operator-pinned links
+ * with no re-list (SS-17.6).
+ */
+async function resolveBackfillFanOut(
+  artifacts: RuleArtifacts,
+  correspondences: ScopeLinkGateDeps["correspondences"],
+  scopeLinks: ScopeLinkStore,
+  relister: EnumerationRelister | undefined,
+): Promise<BackfillFanOut | undefined> {
+  const correspondence = await correspondences.getByResourcePair(artifacts.rule.resourcePairRef);
+  const effectiveMode =
+    artifacts.rule.pollScopeMode ?? derivePollScopeMode(artifacts.sourceBinding, correspondence);
+  if (effectiveMode === "cross-scope") {
+    return undefined;
+  }
+  const { scopes, unresolvedScopes } = await resolveScopeSet({
+    effectiveMode,
+    resourcePairRef: artifacts.rule.resourcePairRef,
+    sourceAppId: artifacts.sourceApp.id,
+    sourceScopePathBindings: artifacts.sourceBinding.scopePathBindings ?? [],
+    correspondence,
+    links: scopeLinks,
+    relister,
+  });
+  return { scopes, unresolvedScopes };
 }
 
 /**
