@@ -1,4 +1,4 @@
-import type { APIRequestContext } from "@playwright/test";
+import { request as apiRequestContext, type APIRequestContext } from "@playwright/test";
 
 import {
   BACKEND_ORIGIN,
@@ -23,11 +23,15 @@ import {
   type LandscapeBringUp,
 } from "../support/landscape/env.js";
 import {
+  approveSyncScaffold,
   cleanupSyncScaffold,
+  getMapping,
   getRule,
+  listMappingArtifacts,
   listRuleSyncEvents,
   seedSyncScaffold,
   SYNCED_ITEM_TITLE,
+  type ApprovedSyncArtifacts,
   type SyncScaffold,
 } from "../support/landscape/seed.js";
 import { SyncRulePage } from "../support/pages/sync-rule.page.js";
@@ -35,9 +39,13 @@ import { SyncRulePage } from "../support/pages/sync-rule.page.js";
 /**
  * **SU-6 — the Phase-4 capstone e2e: a real sync round with no echo, against a RUNNING
  * scenario-1 landscape.** This is the one journey that runs against the **live** Gitea +
- * Vikunja containers, not a fake backend — only the LLM/mapping is replayed (seeded as
- * the `SyncScaffold`). It proves the Sync Engine's core promises end to end:
+ * Vikunja containers, not a fake backend — only the **LLM** is replayed (as seeded
+ * `MappingProposal`s). It proves the Sync Engine's core promises end to end:
  *
+ *  - **SU-6.0** the three replayed proposals are approved through the **real** approval
+ *    API, and everything downstream — `ApprovedMapping`s, their resource-qualified
+ *    `FieldMapping`s, the counterpart link, the instantiated `SyncRule`s — is what
+ *    production produced, never what a fixture asserted it would look like.
  *  - **SU-6.1** both peer-peer rules (issues↔tasks, title = identity) enable through the
  *    SU-1 gate UI with `link-only` backfill, then poll. The Gitea `issues` source poll is
  *    **scoped** — `GET /repos/{owner}/{repo}/issues` — so the Layer-1 scope gate (SS-5)
@@ -51,6 +59,22 @@ import { SyncRulePage } from "../support/pages/sync-rule.page.js";
  *  - **SU-6.4** re-polling with no new change enqueues nothing → **no duplicate** task.
  *  - **SU-6.5** the identity-less comments pair is **blocked** on "still needs identity key".
  *  - **SU-6.6** a **viewer** driving enablement is blocked (UI absent + API 403, OA-2).
+ *
+ * ## Why the approval is driven for real (and what it cost to learn)
+ *
+ * This spec used to hand-seed its `ApprovedMapping`s and `FieldMapping`s straight into
+ * Postgres, with **bare** record paths (`title`). The real Approval Service stores
+ * **resource-qualified** paths (`issues/title`, `docs/architecture/data-model.md`
+ * *FieldMapping*). So the approval→sync seam was never once crossed by any test, and a P0
+ * shipped behind a green capstone: every real approval's propagation dead-lettered with
+ * `missing-input`, and fetch-and-match compared an absent identity path, so **every record
+ * read as new — silent duplicate creation**. It also poisoned `SyncFieldState` baselines
+ * (breaking echo detection) and the drift-check/PUT read-carry.
+ *
+ * The journey therefore now starts at the same place the Slice-D capstone
+ * (`scenario-1-scoped-sync.landscape.spec.ts`) does: a replayed proposal, decided and
+ * approved through `POST /api/mapping-proposals/:id/approve`. Nothing between the
+ * proposal and the outbound write is authored by the fixture.
  *
  * **Landscape-gated:** if Docker or the landscape is unavailable the whole describe skips
  * (never fails), so `pnpm --filter @mediator/e2e test:e2e` on a box with only the compose
@@ -68,11 +92,13 @@ const BASELINE_BODY = "SU-6 baseline body — normalized before enable.";
 
 let bringUp: LandscapeBringUp = "unavailable";
 let scaffold: SyncScaffold | undefined;
+let approved: ApprovedSyncArtifacts | undefined;
+let setupApi: APIRequestContext | undefined;
 let landscapeAvailable = false;
 
 test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)", () => {
-  // Live containers + real backfill + several poll cycles + async dispatch need headroom.
-  test.describe.configure({ timeout: 180_000 });
+  // Live containers + a real approval + real backfill + several poll cycles + async dispatch.
+  test.describe.configure({ timeout: 240_000 });
 
   test.beforeAll(async () => {
     try {
@@ -87,6 +113,10 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     }
     landscapeAvailable = true;
     scaffold = await seedSyncScaffold(readLandscapeTokens());
+    // The approval runs once for the whole describe (all three tests need its rules), so it
+    // needs an API context of its own — the per-test `request` fixture does not exist yet.
+    setupApi = await apiRequestContext.newContext();
+    approved = await approveSyncScaffold(setupApi, scaffold);
   });
 
   test.beforeEach(() => {
@@ -97,11 +127,20 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     if (scaffold !== undefined) {
       await cleanupSyncScaffold(scaffold);
     }
+    await setupApi?.dispose();
     await closeTestDb();
     if (bringUp === "started") {
       teardownScenario1Landscape();
     }
   });
+
+  /** Narrow a `beforeAll` value, failing loudly rather than with a `!`. */
+  function required<T>(value: T | undefined, what: string): T {
+    if (value === undefined) {
+      throw new Error(`${what} was not initialized`);
+    }
+    return value;
+  }
 
   /** Drive one deterministic poll cycle for a rule (SP-5); assert it completed; return the enqueued count. */
   async function triggerPoll(request: APIRequestContext, ruleId: string): Promise<number> {
@@ -131,15 +170,65 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     expect(response.status(), `scope-patch ${parameterName} → ${await response.text()}`).toBe(200);
   }
 
+  test("SU-6.0: the real approval produced resource-qualified artifacts and linked the counterpart", async () => {
+    const active = required(approved, "approved artifacts");
+
+    // ── The contract the old hand-seeded scaffold silently violated ──────────────
+    //
+    // `FieldMapping` paths are resource-qualified (`issues/title`), because one
+    // `ApprovedMapping` covers N resource pairs and the leading `resourceRef` is the only
+    // thing saying which pair a field belongs to. Pinning it HERE is what makes the rest of
+    // this journey a real test of the approval→sync seam: with bare paths, every assertion
+    // below still passed while production was broken.
+    const g2v = await listMappingArtifacts(active.mappingG2VId);
+    const g2vPairs = g2v.fieldMappings
+      .map((field) => `${field.sourcePath}→${field.targetPath}`)
+      .sort();
+    expect(g2vPairs, "the approval path stores resource-qualified field paths").toEqual([
+      "issues/body→tasks/description",
+      "issues/title→tasks/title",
+    ]);
+
+    const v2g = await listMappingArtifacts(active.mappingV2GId);
+    const v2gPairs = v2g.fieldMappings
+      .map((field) => `${field.sourcePath}→${field.targetPath}`)
+      .sort();
+    expect(v2gPairs).toEqual(["tasks/description→issues/body", "tasks/title→issues/title"]);
+
+    // AS-5: exactly one identity key per direction, and it is the title pairing.
+    const g2vIdentity = g2v.fieldMappings.filter((field) => field.isIdentityKey === true);
+    expect(g2vIdentity).toHaveLength(1);
+    expect(g2vIdentity[0]?.sourcePath).toBe("issues/title");
+    expect(g2vIdentity[0]?.targetPath).toBe("tasks/title");
+
+    // AS-4: Vikunja UPDATES with POST, so the reviewer's override beat the method heuristic.
+    const g2vUpdate = g2v.operationMappings.find(
+      (operation) => operation.targetOperationRef === "tasks/vikunjaUpdateTask",
+    );
+    expect(g2vUpdate?.action, "POST /tasks/{id} is an UPDATE").toBe("update");
+    expect(g2vUpdate?.targetIdParamRef).toBe("tasks/vikunjaUpdateTask#id");
+
+    // The counterpart link is the approval service's own doing (AS-5 shared-pairing lock +
+    // automatic linking), not a fixture's `setCounterpart` write.
+    expect((await getMapping(active.mappingG2VId))?.counterpartMappingId).toBe(active.mappingV2GId);
+    expect((await getMapping(active.mappingV2GId))?.counterpartMappingId).toBe(active.mappingG2VId);
+
+    // The identity-less comments mapping was approved WITHOUT an identity key — the
+    // precondition SU-6.5 then proves the enablement gate blocks on.
+    const comments = await listMappingArtifacts(active.mappingCommentsId);
+    expect(
+      comments.fieldMappings.map((field) => `${field.sourcePath}→${field.targetPath}`),
+    ).toEqual(["comments/body→comments/comment"]);
+    expect(comments.fieldMappings.some((field) => field.isIdentityKey === true)).toBe(false);
+  });
+
   test("SU-6.1–6.4: a real Gitea→Vikunja round propagates once and does NOT echo back", async ({
     page,
     login,
     request,
   }) => {
-    const active = scaffold;
-    if (active === undefined) {
-      throw new Error("scaffold was not seeded");
-    }
+    const active = required(approved, "approved artifacts");
+    const seeded = required(scaffold, "scaffold");
     const { gitea, vikunja } = landscapeClients(readLandscapeTokens());
     const syncRule = new SyncRulePage(page);
 
@@ -192,8 +281,8 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
 
     // Confirm the scope constants (the real bootstrapped repo owner/name) through the SS-3
     // scope-patch API — one PATCH per parameter, against the shared Gitea issues binding.
-    await confirmScope(request, active.giteaIssuesBindingId, "owner", GITEA_OWNER);
-    await confirmScope(request, active.giteaIssuesBindingId, "repo", GITEA_REPO);
+    await confirmScope(request, seeded.giteaIssuesBindingId, "owner", GITEA_OWNER);
+    await confirmScope(request, seeded.giteaIssuesBindingId, "repo", GITEA_REPO);
 
     // ── SU-6.1: with the scope confirmed, enable BOTH rules through the SU-1 gate UI,
     //    link-only backfill (G2V polls Gitea as source, V2G looks it up as target — the
@@ -271,10 +360,7 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     login,
     request,
   }) => {
-    const active = scaffold;
-    if (active === undefined) {
-      throw new Error("scaffold was not seeded");
-    }
+    const active = required(approved, "approved artifacts");
     const syncRule = new SyncRulePage(page);
 
     // The SU-1 gate surfaces the missing identity key as a checklist blocker, and never
@@ -311,10 +397,7 @@ test.describe("SU-6 — capstone sync round, no echo (live scenario-1 landscape)
     login,
     request,
   }) => {
-    const active = scaffold;
-    if (active === undefined) {
-      throw new Error("scaffold was not seeded");
-    }
+    const active = required(approved, "approved artifacts");
     const syncRule = new SyncRulePage(page);
 
     await syncRule.open(active.ruleCommentsId);
