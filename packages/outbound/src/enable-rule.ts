@@ -211,6 +211,38 @@ export class RuleEnabler {
       };
     }
 
+    if (result.outcome === "completed-per-scope") {
+      // SS-17.5 — seed each COMPLETED scope's OWN poll_scope_state, keyed by its ScopeLink
+      // id (BE-6 per scope). An aborted/parked scope seeds nothing — its next poll re-lists
+      // + re-seeds (per-scope isolation; SP-4 per scope). The rule still goes live: one
+      // isolated scope's abort never blocks the others.
+      const seededAt = this.#clock();
+      for (const scope of result.scopes) {
+        if (scope.outcome.outcome !== "completed") {
+          continue;
+        }
+        const scopeSnapshot =
+          input.pollSeed.kind === "full-fetch" ? scope.outcome.snapshotEntries : undefined;
+        await this.#pollState.advance(
+          buildAdvance({
+            ruleId,
+            scopeKey: scope.scopeLinkId,
+            lastRunAt: seededAt,
+            cursor: cursorSeed,
+            snapshotEntries: scopeSnapshot,
+            // The snapshot's captured-at is the deliberately-early enumeration start.
+            capturedAt: scopeSnapshot !== undefined ? earlyAt : undefined,
+          }),
+        );
+      }
+      await this.#rules.applyEnableTransition(ruleId, { backfillStatus: "completed" });
+      return {
+        kind: "enabled",
+        backfill: { kind: "ran", result },
+        degradations: decision.degradations,
+      };
+    }
+
     // BE-6 — seed the go-live poll state from the backfill (a full-fetch rule's
     // `lastSnapshotRef` from the complete enumeration, BE-6.1; the changed-since /
     // cursor-returning cursor captured above), THEN flip to completed so the Scheduler
@@ -262,10 +294,15 @@ function defaultChangedSinceCursor(at: Date): string {
   return at.toISOString();
 }
 
-/** Assemble a {@link PollAdvance}, dropping the optional cursor/snapshot/capturedAt when absent. */
+/**
+ * Assemble a {@link PollAdvance}, dropping the optional scopeKey/cursor/snapshot/capturedAt
+ * when absent. SS-17.5 — `scopeKey` (a scope's `ScopeLink` id) routes the seed to that
+ * scope's own `poll_scope_state`; absent it is the cross-scope seed (SP-5), unchanged.
+ */
 function buildAdvance(fields: {
   readonly ruleId: string;
   readonly lastRunAt: Date;
+  readonly scopeKey?: string | undefined;
   readonly cursor?: string | undefined;
   readonly snapshotEntries?: ReadonlyMap<string, string> | undefined;
   readonly capturedAt?: Date | undefined;
@@ -273,6 +310,7 @@ function buildAdvance(fields: {
   return stripUndefined({
     ruleId: fields.ruleId,
     lastRunAt: fields.lastRunAt,
+    scopeKey: fields.scopeKey,
     cursor: fields.cursor,
     snapshotEntries: fields.snapshotEntries,
     capturedAt: fields.capturedAt,

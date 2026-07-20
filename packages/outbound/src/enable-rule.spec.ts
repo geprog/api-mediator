@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type {
   BackfillRunInput,
   BackfillRunResult,
+  BackfillScopeResult,
   LinkOnlyBackfillContext,
 } from "./backfill-runner.js";
 import {
@@ -499,5 +500,109 @@ describe("BE-6 enablement seeding", () => {
     expect(h.rules.transitions).toStrictEqual([{ status: "enabled", backfillStatus: "running" }]);
     expect(h.rules.backfillStatus).toBe("running");
     expect(h.pollState.stateOf(RULE)).toBeUndefined();
+  });
+});
+
+// ── SS-17.5: per-scope backfill fan-out seeding ───────────────────────────────
+
+describe("SS-17.5 per-scope fan-out seeding", () => {
+  const ZERO_COUNTS = {
+    matched: 0,
+    unmatched: 0,
+    created: 0,
+    overwritten: 0,
+    ambiguous: 0,
+    severed: 0,
+    skipped: 0,
+    writeFailed: 0,
+    disagreedFields: 0,
+  };
+
+  function completedScope(
+    scopeLinkId: string,
+    entries: ReadonlyMap<string, string>,
+  ): BackfillScopeResult {
+    return {
+      scopeLinkId,
+      outcome: {
+        outcome: "completed",
+        enumeratedCount: entries.size,
+        snapshotEntries: new Map(entries),
+        records: [],
+        counts: ZERO_COUNTS,
+      },
+    };
+  }
+
+  function perScopeResult(scopes: readonly BackfillScopeResult[]): BackfillRunResult {
+    return { outcome: "completed-per-scope", mode: "link-only", scopes };
+  }
+
+  it("seeds EACH completed scope's own poll_scope_state (keyed by scopeLinkId); cross-scope untouched", async () => {
+    const result = perScopeResult([
+      completedScope("sl-a", new Map([["a1", "h-a1"]])),
+      completedScope("sl-b", new Map([["b1", "h-b1"]])),
+    ]);
+    const h = setup({ result });
+
+    const outcome = await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(outcome.kind).toBe("enabled");
+    // Each scope seeded its OWN snapshot, keyed by its ScopeLink id (SS-17.5).
+    expect([...(h.pollState.stateOf(RULE, "sl-a")?.entries.keys() ?? [])]).toStrictEqual(["a1"]);
+    expect([...(h.pollState.stateOf(RULE, "sl-b")?.entries.keys() ?? [])]).toStrictEqual(["b1"]);
+    expect(h.pollState.stateOf(RULE, "sl-a")?.advanceCount).toBe(1);
+    // The cross-scope state was never touched (per-scope rule).
+    expect(h.pollState.stateOf(RULE)).toBeUndefined();
+    // The rule went live.
+    expect(h.rules.backfillStatus).toBe("completed");
+  });
+
+  it("an aborted scope seeds NOTHING; its sibling still seeds (per-scope isolation)", async () => {
+    const result = perScopeResult([
+      completedScope("sl-a", new Map([["a1", "h-a1"]])),
+      {
+        scopeLinkId: "sl-b",
+        outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 0 },
+      },
+    ]);
+    const h = setup({ result });
+
+    await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(h.pollState.stateOf(RULE, "sl-a")?.entries.size).toBe(1);
+    expect(h.pollState.stateOf(RULE, "sl-b")).toBeUndefined(); // never seeded
+    expect(h.rules.backfillStatus).toBe("completed"); // the rule still goes live
+  });
+
+  it("a parked (unresolvable) scope seeds NOTHING", async () => {
+    const result = perScopeResult([
+      completedScope("sl-a", new Map([["a1", "h-a1"]])),
+      {
+        scopeLinkId: "__unresolved__",
+        outcome: { outcome: "parked", reason: "no active ScopeLink" },
+      },
+    ]);
+    const h = setup({ result });
+
+    await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(h.pollState.stateOf(RULE, "sl-a")?.entries.size).toBe(1);
+    expect(h.pollState.stateOf(RULE, "__unresolved__")).toBeUndefined();
+  });
+
+  it("a delta per-scope rule seeds each completed scope's OWN cursor (changed-since), no snapshot", async () => {
+    const result = perScopeResult([
+      completedScope("sl-a", new Map([["a1", "h-a1"]])),
+      completedScope("sl-b", new Map([["b1", "h-b1"]])),
+    ]);
+    const h = setup({ result });
+
+    await h.enabler.enable(input({ pollSeed: { kind: "delta-changed-since" } }));
+
+    // The changed-since cursor (= the deliberately-early capture) is seeded per scope; no snapshot.
+    expect(h.pollState.stateOf(RULE, "sl-a")?.cursor).toBe(T0.toISOString());
+    expect(h.pollState.stateOf(RULE, "sl-b")?.cursor).toBe(T0.toISOString());
+    expect(h.pollState.stateOf(RULE, "sl-a")?.snapshotRef).toBeUndefined();
   });
 });
