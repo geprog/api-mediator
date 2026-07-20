@@ -9,7 +9,7 @@ import type {
   SyncFieldStateSide,
   TombstoneReason,
 } from "@mediator/domain";
-import { stripUndefined } from "@mediator/domain";
+import { recordRelativePath, stripUndefined } from "@mediator/domain";
 import type { RecordLinkSideRef, RecordLinkStore } from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
 
@@ -335,7 +335,7 @@ export class IdentityResolutionStage {
       }
       // In-memory comparison on the identity target path — value used AS-IS.
       return result.records.filter((candidate) => {
-        const read = readPath(candidate.record, context.identityTargetPath);
+        const read = readPath(candidate.record, recordRelativePath(context.identityTargetPath));
         return read.present && valuesAgree(read.value, identityValue);
       });
     }
@@ -490,7 +490,7 @@ export class IdentityResolutionStage {
     if (change.observedRecord === undefined) {
       return undefined;
     }
-    const read = readPath(change.observedRecord, context.identitySourcePath);
+    const read = readPath(change.observedRecord, recordRelativePath(context.identitySourcePath));
     return read.present ? read.value : undefined;
   }
 

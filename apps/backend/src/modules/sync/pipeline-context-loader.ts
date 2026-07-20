@@ -26,6 +26,7 @@ import {
 import {
   confirmedFieldPath,
   confirmedValue,
+  fieldMappingsForResourcePair,
   findIdentityField,
   resolveRuleArtifacts,
   type RuleArtifactRepos,
@@ -173,7 +174,16 @@ export class RepoSyncPipelineContextLoader implements SyncPipelineContextLoader 
     if (counterpartMappingId === undefined || counterpartMappingId === null) {
       return [];
     }
-    return this.#repos.mappingArtifacts.listFieldMappings(counterpartMappingId);
+    const fields = await this.#repos.mappingArtifacts.listFieldMappings(counterpartMappingId);
+    // Same resource-pair scoping as the rule's own fields, with the sides SWAPPED: the
+    // counterpart runs the reverse direction, so its `sourcePath` lives in this rule's
+    // target resource and its `targetPath` in this rule's source resource. Without this,
+    // a foreign pair's fields would widen the echo compare's participating-field set.
+    return fieldMappingsForResourcePair(
+      fields,
+      artifacts.targetResourceRef,
+      artifacts.sourceResourceRef,
+    );
   }
 
   #buildConflictContext(

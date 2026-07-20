@@ -28,6 +28,7 @@ export * from "./mapping-proposal-item.js";
 export * from "./approved-mapping-enums.js";
 export * from "./approved-mapping.js";
 export * from "./field-mapping.js";
+export * from "./field-ref.js";
 export * from "./operation-mapping.js";
 export * from "./downstream-artifacts.js";
 export * from "./audit-log.js";
