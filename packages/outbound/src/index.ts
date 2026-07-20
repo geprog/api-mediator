@@ -116,6 +116,8 @@ export {
 export {
   fillScopePathParameters,
   findUnfilledPathParam,
+  hasConfirmedScopeLinkBinding,
+  perScopeDeferredParamNames,
   scopeParamNamesOf,
 } from "./path-template.js";
 

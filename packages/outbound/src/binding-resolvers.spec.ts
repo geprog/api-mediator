@@ -50,6 +50,7 @@ import { AppLoadGovernor } from "./load-governor.js";
 import { fillScopePathParameters, findUnfilledPathParam } from "./path-template.js";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "./protocol-client.js";
 import { RestSingleRecordTargetReader } from "./rest-single-record-reader.js";
+import { RestSourceReader } from "./rest-source-reader.js";
 
 /**
  * Unit tests for the Sync-Engine binding resolvers — the IR + confirmed
@@ -1515,3 +1516,210 @@ const _operationMappingPort: OperationMappingReader = {
   listOperationMappings: () => Promise.resolve([]),
 };
 void _operationMappingPort;
+
+// ── 10. SS-13.2/SS-17: the REAL resolver composes a per-scope templated path ────
+
+/**
+ * **The regression these tests exist for.** SS-13/SS-17 drove the source reader and the
+ * binding resolver through **fakes** (`FixedBindingResolver`, the poller's `FakeSourceReader`),
+ * so the *real* repo-backed resolver was never exercised in per-scope mode — and it
+ * refused to produce the templated path `RestSourceReader.withScopeFill` is built to
+ * fill. Every scope aborted with `no source-read binding for <ruleId>` and an L3 rule
+ * could not poll at all ([[fakes-must-mirror-real-repos]]: a fake-only proof closes
+ * nothing).
+ *
+ * So these drive the real {@link RepoRestSourceBindingResolver} over the `FakeRepos` of
+ * section 7 with a source binding whose `scopePathBindings` are confirmed **`scope-link`**
+ * entries, and then the real {@link RestSourceReader} — asserting the composed path is
+ * still **templated** and that the per-scope fill turns it into each container's own URL.
+ */
+
+/** A `scope-link` scope path-parameter binding (SS-12 shape), confirmed by default. */
+function scopeLink(parameterName: string, scopeKeyRef: string, confirmed = true): ScopePathBinding {
+  return {
+    kind: "scope-link",
+    parameterName,
+    scopeKeyRef,
+    confirmedBy: confirmed ? "operator" : null,
+    confirmedAt: confirmed ? CONFIRMED_AT : null,
+  };
+}
+
+/** The scenario-1 L3 Gitea source: `{owner}`/`{repo}` resolved per scope via a `ScopeLink`. */
+const GITEA_SCOPE_LINK = [scopeLink("owner", "owner"), scopeLink("repo", "name")];
+
+const L3_MAPPING: ApprovedMapping = {
+  id: "mapping-1",
+  sourceSpecId: "spec-gitea",
+  targetSpecId: "spec-tgt",
+  sourceAppId: "app-src",
+  targetAppId: "app-tgt",
+  variant: "peer-peer",
+  approvedBy: "op",
+  approvedAt: CONFIRMED_AT,
+  status: "active",
+};
+
+/** The section-7 `FakeRepos` wired to the Gitea issues resource with the given scope bindings. */
+function l3Repos(
+  scope: ScopePathBinding[],
+  ruleOverrides: Partial<SyncRule> = {},
+): BindingResolverRepositories {
+  return new FakeRepos(
+    new Map([
+      ["r1", rule({ id: "r1", resourcePairRef: "app-src:issues|app-tgt:tasks", ...ruleOverrides })],
+    ]),
+    new Map([["mapping-1", L3_MAPPING]]),
+    new Map([
+      [
+        "spec-gitea",
+        apiSpec({ id: "spec-gitea", appId: "app-src", parsedIR: [giteaIssuesGroup()] }),
+      ],
+    ]),
+    new Map([["spec-gitea", [giteaIssuesBinding(scope)]]]),
+    new Map([["app-src", app("app-src")]]),
+  );
+}
+
+describe("RepoRestSourceBindingResolver — SS-13.2 per-scope source read (the real resolver)", () => {
+  it("composes a STILL-TEMPLATED path for a scope-link-bound source read (not undefined)", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(l3Repos(GITEA_SCOPE_LINK)).resolve(
+      "r1",
+    );
+
+    // Before the fix this was `undefined` — the scope-link params matched no confirmed
+    // constant, no `scopeValues` reach the poll path, and nothing was deferred.
+    expect(resolved).toBeDefined();
+    expect(resolved?.path).toBe("/repos/{owner}/{repo}/issues");
+  });
+
+  it("the deferred container params then fill per scope into that container's URL", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(l3Repos(GITEA_SCOPE_LINK)).resolve(
+      "r1",
+    );
+    expect(resolved).toBeDefined();
+
+    const requested: string[] = [];
+    const protocol = new FakeProtocolClient((request) => {
+      requested.push(request.url);
+      return { status: 200, headers: {}, body: [] };
+    });
+    const reader = new RestSourceReader(
+      { resolve: () => Promise.resolve(resolved) },
+      protocol,
+      new FakeCredentialAccess(),
+      new AppLoadGovernor(),
+      { applyCredential: APPLY_CREDENTIAL },
+    );
+
+    // Two scopes of the same rule — each fills its OWN container (SS-13.2/SS-17).
+    const phoenix = await reader.readCollectionPage("r1", undefined, {
+      scopeLinkId: "link-1",
+      fillValues: new Map([
+        ["owner", "alice"],
+        ["repo", "phoenix"],
+      ]),
+    });
+    const griffin = await reader.readCollectionPage("r1", undefined, {
+      scopeLinkId: "link-2",
+      fillValues: new Map([
+        ["owner", "bob"],
+        ["repo", "griffin"],
+      ]),
+    });
+
+    expect(phoenix.ok).toBe(true);
+    expect(griffin.ok).toBe(true);
+    expect(requested).toStrictEqual([
+      "https://app-src.test/repos/alice/phoenix/issues",
+      "https://app-src.test/repos/bob/griffin/issues",
+    ]);
+  });
+
+  it("a scope the fill does not cover is REFUSED at the backstop — never a literal-brace URL", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(l3Repos(GITEA_SCOPE_LINK)).resolve(
+      "r1",
+    );
+    const protocol = new FakeProtocolClient(() => ({ status: 200, headers: {}, body: [] }));
+    const reader = new RestSourceReader(
+      { resolve: () => Promise.resolve(resolved) },
+      protocol,
+      new FakeCredentialAccess(),
+      new AppLoadGovernor(),
+      { applyCredential: APPLY_CREDENTIAL },
+    );
+
+    // `{repo}` is left unfilled by this scope → abort before the wire (SS-4.5).
+    const outcome = await reader.readCollectionPage("r1", undefined, {
+      scopeLinkId: "link-1",
+      fillValues: new Map([["owner", "alice"]]),
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(protocol.requests).toStrictEqual([]);
+  });
+
+  it("an UNCONFIRMED scope-link binding still unresolves the whole binding (SS-4.4 fail-loud)", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(
+      l3Repos([scopeLink("owner", "owner"), scopeLink("repo", "name", false)]),
+    ).resolve("r1");
+
+    // Not per-container (nothing confirmed on `repo`) → nothing is deferred → the unfilled
+    // `{repo}` unresolves, exactly as before. A half-authored L3 binding never polls.
+    expect(resolved).toBeUndefined();
+  });
+
+  it("a CONSTANT scope param still fills at resolve time — L1 is byte-for-byte unchanged", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(l3Repos(GITEA_SCOPE)).resolve("r1");
+
+    expect(resolved?.path).toBe("/repos/alice/phoenix/issues");
+    expect(resolved?.path).not.toContain("{");
+  });
+
+  it("a MIXED binding defers only the scope-link param; the constant fills at resolve time", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(
+      l3Repos([scopeConstant("owner", "alice"), scopeLink("repo", "name")]),
+    ).resolve("r1");
+
+    expect(resolved?.path).toBe("/repos/alice/{repo}/issues");
+  });
+
+  it("the SS-13.5 operator override to cross-scope keeps the resolve-time fill (no deferral)", async () => {
+    const resolved = await new RepoRestSourceBindingResolver(
+      l3Repos(GITEA_SCOPE_LINK, { pollScopeMode: "cross-scope" }),
+    ).resolve("r1");
+
+    // Overridden to cross-scope: the reader supplies no scope, so deferring would strand a
+    // `{…}` on the wire. It unresolves instead — fail-loud, and the mode stays honored.
+    expect(resolved).toBeUndefined();
+  });
+
+  it("the SS-14.1 identity-lookup path is untouched — no perScopePoll, container via scopeValues", () => {
+    // The scoped identity lookup resolves the SAME function with an already-resolved
+    // container and NO per-scope flag: it must still fill (never come back templated).
+    const resolved = resolveSourceReadBinding({
+      ...SOURCE_INPUT_BASE,
+      rule: rule(),
+      sourceCapabilities: caps(),
+      sourceGroup: giteaIssuesGroup(),
+      sourceBinding: giteaIssuesBinding(GITEA_SCOPE_LINK),
+      scopeValues: new Map([
+        ["owner", "alice"],
+        ["repo", "phoenix"],
+      ]),
+    });
+
+    expect(resolved?.path).toBe("/repos/alice/phoenix/issues");
+
+    // …and with no container resolved it still unresolves (SS-14.3 parks, never guesses).
+    expect(
+      resolveSourceReadBinding({
+        ...SOURCE_INPUT_BASE,
+        rule: rule(),
+        sourceCapabilities: caps(),
+        sourceGroup: giteaIssuesGroup(),
+        sourceBinding: giteaIssuesBinding(GITEA_SCOPE_LINK),
+      }),
+    ).toBeUndefined();
+  });
+});

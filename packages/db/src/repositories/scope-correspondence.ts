@@ -1,5 +1,5 @@
 import type { ScopeCorrespondence } from "@mediator/domain";
-import { eq, isNull, like, or } from "drizzle-orm";
+import { eq, isNull, like, or, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import {
@@ -92,8 +92,31 @@ export class ScopeCorrespondenceRepository {
    *   arm to rows that are still **unconfirmed** (`confirmed_by IS NULL`), so an
    *   operator-ratified `scopeIdentityKey` / container pairing survives every later
    *   re-derivation untouched;
-   * - **an unconfirmed candidate may be refreshed** — a newer derivation overwrites
-   *   the stale candidate's `scopeIdentityKey` + container refs.
+   * - **an unconfirmed candidate may be refreshed** — a newer derivation from the
+   *   **same direction** overwrites the stale candidate's `scopeIdentityKey` +
+   *   container refs.
+   *
+   * ## Direction stability — the counterpart approval must not invert the pair
+   *
+   * `resource_pair_ref` is **direction-agnostic**, so both directions of a bidirectional
+   * pair land on the same row, but a derivation is inherently **directional**: it reads
+   * the *target* side's write ops for the container parameter and the *source* side's
+   * `sourceScopeRef` for the identity key. Approving the counterpart direction therefore
+   * re-derives the pair mirrored — swapping `targetContainerRef`/`sourceContainerRef` and
+   * flipping the mode `derivePollScopeMode` reads off them (`per-scope-enumerated` ⇄
+   * `per-scope-pinned`) — which would silently re-point an already-authored pair at the
+   * wrong containers.
+   *
+   * So the update arm additionally requires the stored row's **authoring direction** to
+   * match the candidate's: the direction is identified by `target_container_ref->>'appId'`
+   * — the app whose container the direction writes into — which is necessarily *different*
+   * for the two directions of a pair and *identical* across re-derivations of one
+   * direction. A counterpart proposal thus leaves the row untouched and gets it back
+   * unchanged, exactly as a confirmed row does; the container **resource** may still move
+   * within the same direction (a re-ingested spec), which the `appId`-only key allows.
+   *
+   * First-authored direction wins, deliberately: the operator can still re-point the pair
+   * explicitly through the SS-15.4 panel ({@link confirmOrUpdate}), which is unrestricted.
    *
    * It never writes `confirmed_by`/`confirmed_at`: a proposal is unconfirmed by
    * construction and the SS-15.4 panel ({@link confirmOrUpdate}) stays the **only**
@@ -116,16 +139,21 @@ export class ScopeCorrespondenceRepository {
           targetContainerRef: insert.targetContainerRef,
           sourceContainerRef: insert.sourceContainerRef,
         },
-        // SS-18.6 — refresh an unconfirmed candidate only; a confirmed row is left
-        // byte-identical (no row comes back from the update arm, handled below).
-        setWhere: isNull(scopeCorrespondence.confirmedBy),
+        // SS-18.6 — refresh an unconfirmed candidate only (a confirmed row is left
+        // byte-identical), and only from the SAME authoring direction, so the counterpart
+        // direction's approval cannot mirror an existing pair's container refs and with
+        // them the derived poll-scope mode. Either way the update arm matches nothing and
+        // no row comes back — handled below. Composed as one `sql` because Drizzle's
+        // `and()` is `SQL | undefined`, which `setWhere` does not accept.
+        setWhere: sql`${isNull(scopeCorrespondence.confirmedBy)} and ${scopeCorrespondence.targetContainerRef}->>'appId' = ${insert.targetContainerRef.appId}`,
       })
       .returning();
     if (row !== undefined) {
       return mapScopeCorrespondenceRow(row);
     }
-    // The conflicting row was confirmed → the update arm matched nothing. The row
-    // exists (the conflict proves it), so re-read and return it unchanged.
+    // The conflicting row was confirmed, or was authored by the counterpart direction →
+    // the update arm matched nothing. The row exists (the conflict proves it), so re-read
+    // and return it unchanged.
     const existing = await this.getByResourcePair(candidate.resourcePairRef);
     if (existing === undefined) {
       throw new Error("propose found no row after a resource_pair_ref conflict");

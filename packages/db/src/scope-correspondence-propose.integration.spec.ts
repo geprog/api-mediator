@@ -188,6 +188,78 @@ suite("ScopeCorrespondenceRepository.propose — SS-18.6 (requires Postgres)", (
     expect(upgraded.sourceContainerRef).toStrictEqual({ appId: APP_A, resourceRef: "repos" });
   });
 
+  it("a COUNTERPART-direction proposal never inverts the pair's container refs or mode", async () => {
+    // Direction A (app A -> app B) is approved first: A's repos are the enumerable source
+    // container, B's projects the write target -> `derivePollScopeMode` reads
+    // `per-scope-enumerated` off the present `sourceContainerRef`.
+    const directionA = await repo.propose(candidateOf());
+
+    // Direction B of the same BIDIRECTIONAL pair is approved. `resource_pair_ref` is
+    // direction-agnostic, so it lands on the same row, but it derives the pair MIRRORED:
+    // B's container becomes the write target and A's the source. Before the fix this
+    // overwrote the row — flipping the derived mode to `per-scope-pinned` (no
+    // sourceContainerRef derived for B) and re-pointing both refs.
+    const counterpart = candidateOf({
+      scopeIdentityKey: [{ sourceScopeKey: "title", targetFieldPath: "name" }],
+      targetContainerRef: { appId: APP_A, resourceRef: "repos" },
+    });
+    // Direction B derives no source container (the trimmed Gitea spec has no repo-list),
+    // which is exactly what would flip the mode to `per-scope-pinned`.
+    delete counterpart.sourceContainerRef;
+    const afterCounterpart = await repo.propose(counterpart);
+
+    // The pair is unchanged: still A-authored, still enumerable, same identity key.
+    expect(afterCounterpart.id).toBe(directionA.id);
+    expect(afterCounterpart.targetContainerRef).toStrictEqual({
+      appId: APP_B,
+      resourceRef: "projects",
+    });
+    expect(afterCounterpart.sourceContainerRef).toStrictEqual({
+      appId: APP_A,
+      resourceRef: "repos",
+    });
+    expect(afterCounterpart.scopeIdentityKey).toStrictEqual([
+      { sourceScopeKey: "name", targetFieldPath: "title", transform: { kind: "rename" } },
+    ]);
+    // …and it is still exactly one row, still unconfirmed (nothing auto-confirmed).
+    const rows = await db.select().from(scopeCorrespondence);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.confirmedBy).toBeNull();
+  });
+
+  it("the SAME direction may still refresh after a counterpart proposal (SS-18.6 preserved)", async () => {
+    await repo.propose(candidateOf());
+    await repo.propose(
+      candidateOf({ id: randomUUID(), targetContainerRef: { appId: APP_A, resourceRef: "repos" } }),
+    );
+
+    // A re-ingest of the authoring direction still re-derives it — including moving the
+    // container to a different RESOURCE of the same app.
+    const refreshed = await repo.propose(
+      candidateOf({
+        id: randomUUID(),
+        scopeIdentityKey: [{ sourceScopeKey: "slug", targetFieldPath: "identifier" }],
+        targetContainerRef: { appId: APP_B, resourceRef: "boards" },
+      }),
+    );
+
+    expect(refreshed.targetContainerRef).toStrictEqual({ appId: APP_B, resourceRef: "boards" });
+    expect(refreshed.scopeIdentityKey).toStrictEqual([
+      { sourceScopeKey: "slug", targetFieldPath: "identifier" },
+    ]);
+  });
+
+  it("the counterpart direction still INSERTS when the pair has no correspondence yet", async () => {
+    // Direction stability only protects an EXISTING row; whichever direction is approved
+    // first authors the pair.
+    const stored = await repo.propose(
+      candidateOf({ targetContainerRef: { appId: APP_A, resourceRef: "repos" } }),
+    );
+
+    expect(stored.targetContainerRef).toStrictEqual({ appId: APP_A, resourceRef: "repos" });
+    expect(await repo.getByResourcePair(PAIR_REF)).toStrictEqual(stored);
+  });
+
   it("listByResourceSide finds the pair from either side, and only that pair (SS-18.4)", async () => {
     await repo.propose(candidateOf());
     await repo.propose(candidateOf({ resourcePairRef: OTHER_PAIR_REF }));
