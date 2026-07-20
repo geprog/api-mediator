@@ -99,6 +99,14 @@ export class RepoContainerParkSink implements ContainerParkSink {
   public async park(park: ContainerParkRecord): Promise<void> {
     const sourceScopeKey =
       park.capturedScope !== undefined ? scopeKeyFromCaptured(park.capturedScope) : undefined;
+    // SS-15 gate-gating (carried-over SS-14 review item, documentation only — no behavior
+    // change): the `sourceScopeKey === undefined` path below skips SS-11.7 dedup for a parked
+    // record whose captured scope is absent. This is **unreachable for a gated scoped rule**:
+    // the SS-15.1 gate requires the pair's `ScopeCorrespondence.scopeIdentityKey` confirmed, and
+    // that key is built on the source `sourceScopeRef` (SS-7), so a gated scoped rule always has
+    // a confirmed `sourceScopeRef` and thus a non-empty captured scope here. A parked record that
+    // captured no scope is therefore an anomaly, not a normal flow. If a future mode ever admits a
+    // scoped rule without a `sourceScopeRef`, revisit this dedup-skip.
     if (sourceScopeKey !== undefined) {
       // SS-11.7 — reuse an already-open park for this container; mint no duplicate event.
       const existing = await this.#parkReader.findOpenContainerPark(

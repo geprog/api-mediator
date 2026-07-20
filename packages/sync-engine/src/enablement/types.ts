@@ -2,7 +2,10 @@ import type {
   AppCapabilities,
   FieldMapping,
   OperationMapping,
+  PollScopeMode,
   ResourceBinding,
+  ScopeCorrespondence,
+  ScopeLink,
   SyncRule,
 } from "@mediator/domain";
 
@@ -85,6 +88,68 @@ export interface EnablementInput {
    * no scope blocker (backward-compatible).
    */
   readonly requiredScopeBindings: readonly ScopeBindingRequirement[];
+  /**
+   * SS-15.1/15.2 — the **mode-aware `scope-link` precondition input**, precomputed by the
+   * SA layer, or **`undefined`** when the rule carries **no** `kind: scope-link` scope
+   * binding (a non-scoped, L1-`constant`, or L2-`record-derived` rule adds no SS-15 blocker
+   * — backward-compatible). Present iff the rule has any `scope-link` binding, whereupon the
+   * gate (extends SS-5) requires the pair's `ScopeCorrespondence.scopeIdentityKey` confirmed
+   * and — by the {@link ScopeLinkGateInput.effectiveMode effective poll-scope mode} — the
+   * `ScopeLink`(s) it needs resolvable (see {@link ScopeLinkGateInput}).
+   *
+   * Kept an **input** (not derived here, like {@link requiredScopeBindings}) so the gate
+   * stays pure: the async resolution — the pair's `ScopeCorrespondence`, the container
+   * resources' `ResourceBinding`s, the established `ScopeLink`s, and the SS-13.5 effective
+   * mode (`derivePollScopeMode` honoring the operator override) — lives in the SA layer; the
+   * gate only reads confirmation off the resolved objects and emits the matching blockers.
+   */
+  readonly scopeLinkGate?: ScopeLinkGateInput | undefined;
+}
+
+/**
+ * SS-15.1/15.2 — the resolved `scope-link` precondition state the gate branches on **by the
+ * rule's effective poll-scope mode** (SS-13.5). Every field is an already-loaded domain
+ * object read `readonly`; the gate mutates nothing and performs no I/O.
+ *
+ * - **cross-scope** (SS-13.1) — discovery must be viable: the pair's `scopeIdentityKey`
+ *   confirmed **plus** the confirmed **target** container list op
+ *   ({@link targetContainerBinding}'s `collectionReadRef`, which the SS-11.3 harvest lists to
+ *   match records' captured scopes). The gate does **not** require pre-established
+ *   `ScopeLink`s — the steady-state harvest / on-demand resolution establishes them.
+ * - **per-scope-enumerated** (SS-13.2) — as cross-scope, **plus** the confirmed **source**
+ *   container list op ({@link sourceContainerBinding}'s `collectionReadRef`, + `paginationRef`
+ *   where it pages) — the ops SS-17 consumes at poll-time enumeration + backfill fan-out. Still
+ *   **no** pre-established `ScopeLink`s required — **SS-17 establishes them live**, so a
+ *   landscape that grows containers after enablement is never permanently un-enableable.
+ * - **per-scope-pinned** (SS-13.4) — the source container is not enumerable, so the gate
+ *   requires `constant`/`manual` `ScopeLink`s covering the scopes in play: at least one
+ *   **active** `establishedBy` `constant`/`manual` link under the correspondence (nothing
+ *   lists them live).
+ */
+export interface ScopeLinkGateInput {
+  /** The rule's SS-13.5 **effective** poll-scope mode (`override ?? derived`) the gate branches on. */
+  readonly effectiveMode: PollScopeMode;
+  /** The pair's `ScopeCorrespondence` (home of the scope identity key), or `undefined` when the pair has none. */
+  readonly correspondence: ScopeCorrespondence | undefined;
+  /**
+   * The `ScopeCorrespondence.targetContainerRef` resource's `ResourceBinding` (whose
+   * `collectionReadRef` is the target container list op), or `undefined` when it does not
+   * resolve — resolved **regardless of confirmation** so the gate reports an unconfirmed list op.
+   */
+  readonly targetContainerBinding: ResourceBinding | undefined;
+  /**
+   * The `ScopeCorrespondence.sourceContainerRef` resource's `ResourceBinding` (the source
+   * container list op SS-17 enumerates), or `undefined` when the source is not enumerable /
+   * does not resolve — only consulted in `per-scope-enumerated` mode.
+   */
+  readonly sourceContainerBinding: ResourceBinding | undefined;
+  /**
+   * Every `ScopeLink` established under the correspondence, whatever its status/kind
+   * (`ScopeLinkStore.listByCorrespondence`) — the gate filters to **active**
+   * `constant`/`manual` links for the `per-scope-pinned` coverage check. Empty when the pair
+   * has no correspondence.
+   */
+  readonly scopeLinks: readonly ScopeLink[];
 }
 
 // ── Requirements (the machine-consumable "still needs" list) ──────────────────
@@ -113,7 +178,9 @@ export type EnablementSide = "source" | "target";
  *   component {@link SourceScopeRefUnconfirmedRequirement}.
  */
 export type ScopeBindingRequirement =
-  ConstantScopeBindingRequirement | RecordDerivedScopeBindingRequirement;
+  | ConstantScopeBindingRequirement
+  | RecordDerivedScopeBindingRequirement
+  | ScopeLinkScopeBindingRequirement;
 
 /** SS-5 — a scope parameter filled by a confirmed `constant` binding on {@link ConstantScopeBindingRequirement.side}. */
 export interface ConstantScopeBindingRequirement {
@@ -144,6 +211,26 @@ export interface RecordDerivedScopeBindingRequirement {
   readonly sourceResourceRef: string;
   /** The captured-scope component `key` the binding selects (SS-8 `sourceScopeKey`). */
   readonly sourceScopeKey: string;
+}
+
+/**
+ * SS-12 / SS-15 — a scope parameter filled by a confirmed `scope-link` binding (the arbitrary
+ * value-space case, resolved through a `ScopeLink`). Satisfied by the structural presence of a
+ * confirmed `scope-link` `scopePathBindings` entry for `parameterName` on `side` — the
+ * per-parameter half; the **rule-level** correspondence / `ScopeLink` / container-list-op
+ * preconditions a `scope-link` binding also triggers are the separate mode-aware
+ * {@link ScopeLinkGateInput}. An unmet entry emits {@link ScopeBindingUnconfirmedRequirement}
+ * (the same `scope-binding` blocker as the `constant`/`record-derived`-target halves), so a
+ * `scope-link` scope parameter is **not** misreported as a missing `constant`.
+ */
+export interface ScopeLinkScopeBindingRequirement {
+  readonly kind: "scope-link";
+  /** The scope path parameter's name (as it appears in the operation's path template + the binding entry). */
+  readonly parameterName: string;
+  /** Which side's `ResourceBinding` must carry the confirmed `scope-link` entry (SS-5.5). */
+  readonly side: EnablementSide;
+  /** The `resourceRef` of the binding the parameter is checked against — the side's mapped resource. */
+  readonly resourceRef: string;
 }
 
 /**
@@ -181,7 +268,10 @@ export type EnablementRequirement =
   | BindingRefRequirement
   | IdentityLookupPathRequirement
   | ScopeBindingUnconfirmedRequirement
-  | SourceScopeRefUnconfirmedRequirement;
+  | SourceScopeRefUnconfirmedRequirement
+  | ScopeIdentityKeyRequirement
+  | ScopeLinkRequirement
+  | ContainerListOpRequirement;
 
 /**
  * BE-1.1 — the hard identity gate. A resource pair needs **exactly one** confirmed
@@ -254,10 +344,11 @@ export interface IdentityLookupPathRequirement {
 }
 
 /**
- * SS-5.4 / SS-9.1 — a required scope path-parameter binding is **unconfirmed** on the
+ * SS-5.4 / SS-9.1 / SS-12 — a required scope path-parameter binding is **unconfirmed** on the
  * named side, so a scoped `SyncRule` cannot go live (it would fail at runtime on a
  * literal `{owner}`). The `stillNeeds` member emitted for the *binding-on-`side`* half of
- * either a `constant` (SS-5) or a `record-derived` (SS-9) {@link ScopeBindingRequirement}:
+ * a `constant` (SS-5), a `record-derived` (SS-9), **or** a `scope-link` (SS-12)
+ * {@link ScopeBindingRequirement}:
  * it names the `parameterName`, the `side` whose `ResourceBinding.scopePathBindings` must
  * carry the confirmed entry, and that binding's `resourceRef` — so SU-1/SU-5 (SS-6/SS-9
  * UI) can route the operator to the exact scope parameter to supply/confirm (RB-3).
@@ -287,6 +378,49 @@ export interface SourceScopeRefUnconfirmedRequirement {
   readonly side: EnablementSide;
   readonly resourceRef: string;
   readonly sourceScopeKey: string;
+}
+
+/**
+ * SS-15.1 / SS-15.3 — the pair's `ScopeCorrespondence.scopeIdentityKey` is **unconfirmed**
+ * (or the pair has no `ScopeCorrespondence` at all), so a `scope-link` `SyncRule` cannot
+ * resolve any record's container. Emitted for **every** effective poll-scope mode (the
+ * scope identity key is the value-preserving pairing all container matching keys on). One
+ * of the three **distinct** SS-15.3 scope-link blockers so SU-5 (SS-15 UI) routes the
+ * operator to the scope-identity-key confirmation panel (SS-15.4) rather than to a
+ * `ScopeLink` link screen or a container-binding confirm.
+ */
+export interface ScopeIdentityKeyRequirement {
+  readonly kind: "scope-identity-key";
+}
+
+/**
+ * SS-15.1 / SS-15.3 — a **`per-scope-pinned`** rule's scopes are **not covered**: no
+ * **active** `establishedBy` `constant`/`manual` `ScopeLink` is pinned under the
+ * correspondence, and — the source container being non-enumerable — nothing lists them
+ * live (SS-13.4). Distinct from {@link ScopeIdentityKeyRequirement} and
+ * {@link ContainerListOpRequirement} so SU-5 routes the operator to the container-linking
+ * screen (SS-15.5) to pin a `ScopeLink`. **Never** emitted for `cross-scope` /
+ * `per-scope-enumerated`, whose links the harvest (SS-11.3/11.4) / SS-17 establish live —
+ * blocking those on "no links yet" would make a growing landscape permanently un-enableable.
+ */
+export interface ScopeLinkRequirement {
+  readonly kind: "scope-link";
+}
+
+/**
+ * SS-15.1 / SS-15.2 / SS-15.3 — a **container list op** the mode consumes is unconfirmed:
+ * the container resource's `ResourceBinding.collectionReadRef` (and, on the source,
+ * `paginationRef` where it pages) is not confirmed, so discovery / SS-17 enumeration cannot
+ * list that side's containers. `side = "target"` — the `targetContainerRef` list op the
+ * SS-11.3 harvest / discovery matches against (required for both `cross-scope` and
+ * `per-scope-enumerated`); `side = "source"` — the `sourceContainerRef` list op SS-17's
+ * poll-time enumeration + backfill fan-out consume (required for `per-scope-enumerated`
+ * only). Distinct from {@link ScopeIdentityKeyRequirement} / {@link ScopeLinkRequirement}
+ * so SU-5 routes the operator to confirm the container resource's collection read (RB-2).
+ */
+export interface ContainerListOpRequirement {
+  readonly kind: "container-list-op";
+  readonly side: EnablementSide;
 }
 
 // ── Degradations (non-blocking notes SU-1 states before the rule turns on) ────

@@ -142,6 +142,57 @@ describe("enablement-model — blocking vs. degradation (SU-1.1/1.3)", () => {
     expect(keys).toContain("source-scope-ref:source:comments:name");
   });
 
+  it("renders the three DISTINCT SS-15.3 scope-link blockers with distinct keys (identity key / ScopeLink / container list op)", () => {
+    const items = enablementChecklist(
+      [
+        { kind: "scope-identity-key" },
+        { kind: "scope-link" },
+        { kind: "container-list-op", side: "source" },
+        { kind: "container-list-op", side: "target" },
+      ],
+      PAIR,
+    );
+    const keys = items.map((item) => item.key);
+    expect(new Set(keys).size).toBe(4); // all distinct rows (no Vue :key clash)
+    expect(keys).toEqual([
+      "scope-identity-key",
+      "scope-link",
+      "container-list-op:source",
+      "container-list-op:target",
+    ]);
+  });
+
+  it("labels the scope-identity-key blocker and gives it no deep link (SS-15.4 panel is Slice C)", () => {
+    const item = describeRequirement({ kind: "scope-identity-key" }, PAIR);
+    expect(item.label).toContain("scope identity key");
+    expect(item.bindingLink).toBeNull();
+  });
+
+  it("labels the pinned scope-link blocker and gives it no deep link (SS-15.5 screen is Slice C)", () => {
+    const item = describeRequirement({ kind: "scope-link" }, PAIR);
+    expect(item.label).toContain("ScopeLink");
+    expect(item.bindingLink).toBeNull();
+  });
+
+  it("deep-links a container-list-op blocker to its side's app (SS-15.2)", () => {
+    expect(
+      describeRequirement({ kind: "container-list-op", side: "target" }, PAIR).bindingLink,
+    ).toBe("/apps/app-vikunja");
+    expect(
+      describeRequirement({ kind: "container-list-op", side: "source" }, PAIR).bindingLink,
+    ).toBe("/apps/app-gitea");
+  });
+
+  it("keeps the SS-15 scope-link blockers among the hard blockers so enable stays gated", () => {
+    const stillNeeds: EnablementRequirementDto[] = [
+      { kind: "scope-identity-key" },
+      { kind: "scope-link" },
+      { kind: "container-list-op", side: "target" },
+    ];
+    expect(blockingRequirements(stillNeeds)).toHaveLength(3);
+    expect(canEnable({ stillNeeds, choice: "link-only", pushBlocked: false })).toBe(false);
+  });
+
   it("describes changeTimestampRef is NOT among the binding-ref blocker kinds (SU-5.2 structural)", () => {
     // The gate's binding-ref requirement enum never includes changeTimestampRef, so it can
     // never appear as a checklist blocker — it is a degradation, not a blocker (BE-2.4).

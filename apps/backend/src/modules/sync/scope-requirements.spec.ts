@@ -11,6 +11,8 @@ import type {
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
+  ScopeCorrespondence,
+  ScopeLink,
   ScopePathBinding,
   SourceScopeRef,
   SyncRule,
@@ -25,7 +27,11 @@ import { evaluateEnablement, type EnablementInput } from "@mediator/sync-engine"
 import { describe, expect, it } from "vitest";
 
 import type { RuleArtifacts } from "./resolution.js";
-import { computeRequiredScopeBindings } from "./scope-requirements.js";
+import {
+  computeRequiredScopeBindings,
+  computeScopeLinkGate,
+  type ScopeLinkGateDeps,
+} from "./scope-requirements.js";
 
 /**
  * Unit tests for the **SS-5 scope-requirement classification** — which scope
@@ -941,6 +947,302 @@ describe("computeRequiredScopeBindings — record-derived (SS-9)", () => {
       side: "source",
       resourceRef: "src",
       sourceScopeKey: "name",
+    });
+  });
+});
+
+// ── SS-12 / SS-15 — scope-link classification + the mode-aware scope-link gate ────
+
+const T1 = new Date("2026-07-19T00:00:00.000Z");
+
+function confirmedScopeLink(parameterName: string, scopeKeyRef: string): ScopePathBinding {
+  return { kind: "scope-link", parameterName, scopeKeyRef, confirmedBy: "op", confirmedAt: T0 };
+}
+function unconfirmedScopeLink(parameterName: string, scopeKeyRef: string): ScopePathBinding {
+  return { kind: "scope-link", parameterName, scopeKeyRef, confirmedBy: null, confirmedAt: null };
+}
+
+describe("computeRequiredScopeBindings — scope-link classification (SS-12)", () => {
+  it("classifies a scope-link TARGET param as `scope-link`, never as a `constant`", () => {
+    const required = computeRequiredScopeBindings(
+      makeArtifacts({
+        rule: makeRule({ pollOperationRef: "src/listRepoIssues" }),
+        operationMappings: [createTaskMapping, updateTaskMapping],
+        sourceGroup: giteaIssues,
+        targetGroup: vikunjaTasks,
+        sourceBinding: sourceIssuesBinding([]),
+        // The Vikunja create's project `{id}` is bound via a ScopeLink (arbitrary value-space).
+        targetBinding: targetTasksBinding([confirmedScopeLink("id", "id")]),
+      }),
+      { backfillSkipped: false },
+    );
+    expect(required).toContainEqual({
+      kind: "scope-link",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tgt",
+    });
+    // It is NOT misclassified as a constant (which the gate would report as an unmet scope-binding).
+    expect(required).not.toContainEqual({
+      kind: "constant",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tgt",
+    });
+  });
+
+  it("classifies scope-link SOURCE params (a per-container poll) as `scope-link`", () => {
+    const required = computeRequiredScopeBindings(
+      makeArtifacts({
+        rule: makeRule({ pollOperationRef: "src/listRepoIssues" }),
+        operationMappings: [updateTaskMapping],
+        sourceGroup: giteaIssues,
+        targetGroup: vikunjaTasks,
+        sourceBinding: sourceIssuesBinding([
+          confirmedScopeLink("owner", "owner"),
+          confirmedScopeLink("repo", "repo"),
+        ]),
+        targetBinding: targetTasksBinding([]),
+      }),
+      { backfillSkipped: false },
+    );
+    expect(required).toContainEqual({
+      kind: "scope-link",
+      parameterName: "owner",
+      side: "source",
+      resourceRef: "src",
+    });
+    expect(required).toContainEqual({
+      kind: "scope-link",
+      parameterName: "repo",
+      side: "source",
+      resourceRef: "src",
+    });
+  });
+});
+
+describe("computeScopeLinkGate (SS-15.1/15.2)", () => {
+  // Container resources (distinct from the record resources): the target's Vikunja `projects`
+  // and the source's Gitea `repos`, each an enumerable container with a confirmed collection read.
+  const projectsContainerSpec = spec("spec-projects", "app-tgt", [
+    group("projects", [
+      operation({ operationId: "listProjects", method: "get", path: "/projects" }),
+    ]),
+  ]);
+  const projectsContainerBinding = binding({
+    resourceRef: "projects",
+    nativeId: true,
+    collectionRead: "listProjects",
+  });
+  const reposContainerSpec = spec("spec-repos", "app-src", [
+    group("repos", [operation({ operationId: "listRepos", method: "get", path: "/repos" })]),
+  ]);
+  const reposContainerBinding = binding({
+    resourceRef: "repos",
+    nativeId: true,
+    collectionRead: "listRepos",
+  });
+
+  function correspondence(overrides: Partial<ScopeCorrespondence> = {}): ScopeCorrespondence {
+    return {
+      id: "corr-1",
+      resourcePairRef: "app-src:src|app-tgt:tgt",
+      scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      targetContainerRef: { appId: "app-tgt", resourceRef: "projects" },
+      confirmedBy: "op",
+      confirmedAt: T1,
+      ...overrides,
+    };
+  }
+  function scopeLink(overrides: Partial<ScopeLink> = {}): ScopeLink {
+    return {
+      id: "sl-1",
+      scopeCorrespondenceId: "corr-1",
+      appAId: "app-src",
+      appAScopeKey: { name: "phoenix" },
+      appBId: "app-tgt",
+      appBScopeKey: { id: "42" },
+      resourcePairRef: "app-src:src|app-tgt:tgt",
+      establishedBy: "manual",
+      status: "active",
+      createdAt: T1,
+      ...overrides,
+    };
+  }
+
+  /** Fake deps resolving container bindings by app + the correspondence/links from the args. */
+  function gateDeps(o: {
+    correspondence?: ScopeCorrespondence | undefined;
+    scopeLinks?: readonly ScopeLink[];
+  }): ScopeLinkGateDeps {
+    const specs = [projectsContainerSpec, reposContainerSpec];
+    const bindings = [projectsContainerBinding, reposContainerBinding];
+    return {
+      correspondences: {
+        getByResourcePair: (): Promise<ScopeCorrespondence | undefined> =>
+          Promise.resolve("correspondence" in o ? o.correspondence : correspondence()),
+      },
+      scopeLinks: {
+        listByCorrespondence: (): Promise<ScopeLink[]> =>
+          Promise.resolve([...(o.scopeLinks ?? [])]),
+      },
+      repos: {
+        apiSpecs: {
+          listByAppId: (appId: string): Promise<ApiSpec[]> =>
+            Promise.resolve(specs.filter((s) => s.appId === appId)),
+        },
+        resourceBindings: {
+          listByApiSpecId: (specId: string): Promise<ResourceBinding[]> =>
+            Promise.resolve(bindings.filter((b) => b.apiSpecId === specId)),
+        },
+      },
+    };
+  }
+
+  function scopeLinkArtifacts(o: {
+    sourceScope: readonly ScopePathBinding[];
+    targetScope: readonly ScopePathBinding[];
+  }): RuleArtifacts {
+    return makeArtifacts({
+      rule: makeRule({ pollOperationRef: "src/listRepoIssues" }),
+      operationMappings: [createTaskMapping, updateTaskMapping],
+      sourceGroup: giteaIssues,
+      targetGroup: vikunjaTasks,
+      sourceBinding: sourceIssuesBinding(o.sourceScope),
+      targetBinding: targetTasksBinding(o.targetScope),
+    });
+  }
+
+  it("returns undefined for a non-scoped rule (no scope-link binding on either side)", async () => {
+    const artifacts = scopeLinkArtifacts({ sourceScope: [], targetScope: [] });
+    expect(await computeScopeLinkGate(artifacts, gateDeps({}))).toBeUndefined();
+  });
+
+  it("cross-scope: a target-only scope-link binding → cross-scope mode + resolved target container binding, no source", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [],
+      targetScope: [confirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({ correspondence: correspondence() }),
+    );
+    expect(gate?.effectiveMode).toBe("cross-scope");
+    expect(gate?.targetContainerBinding?.resourceRef).toBe("projects");
+    expect(gate?.sourceContainerBinding).toBeUndefined();
+    expect(gate?.correspondence?.id).toBe("corr-1");
+  });
+
+  it("per-scope-enumerated: a confirmed source scope-link binding + a sourceContainerRef → enumerated + BOTH container bindings", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [confirmedScopeLink("owner", "owner"), confirmedScopeLink("repo", "repo")],
+      targetScope: [confirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({
+        correspondence: correspondence({
+          sourceContainerRef: { appId: "app-src", resourceRef: "repos" },
+        }),
+      }),
+    );
+    expect(gate?.effectiveMode).toBe("per-scope-enumerated");
+    expect(gate?.sourceContainerBinding?.resourceRef).toBe("repos");
+    expect(gate?.targetContainerBinding?.resourceRef).toBe("projects");
+  });
+
+  it("per-scope-pinned: a confirmed source scope-link binding with NO sourceContainerRef → pinned + lists the scope links", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [confirmedScopeLink("owner", "owner"), confirmedScopeLink("repo", "repo")],
+      targetScope: [],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({ correspondence: correspondence(), scopeLinks: [scopeLink()] }),
+    );
+    expect(gate?.effectiveMode).toBe("per-scope-pinned");
+    expect(gate?.scopeLinks).toHaveLength(1);
+  });
+
+  it("no correspondence: still returns a gate (so the pure gate emits the identity-key blocker), links empty", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [],
+      targetScope: [confirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(artifacts, gateDeps({ correspondence: undefined }));
+    expect(gate).not.toBeUndefined();
+    expect(gate?.correspondence).toBeUndefined();
+    expect(gate?.targetContainerBinding).toBeUndefined();
+    expect(gate?.scopeLinks).toEqual([]);
+  });
+
+  // ── end-to-end through evaluateEnablement (the SA enable flow) ────────────────
+
+  function enablementInputWithGate(
+    artifacts: RuleArtifacts,
+    scopeLinkGate: EnablementInput["scopeLinkGate"],
+  ): EnablementInput {
+    return {
+      rule: artifacts.rule,
+      fieldMappings: artifacts.fieldMappings,
+      operationMappings: artifacts.operationMappings,
+      sourceBinding: artifacts.sourceBinding,
+      targetBinding: artifacts.targetBinding,
+      sourceCapabilities: artifacts.sourceApp.capabilities,
+      targetCapabilities: artifacts.targetApp.capabilities,
+      backfillSkipped: false,
+      requiredScopeBindings: computeRequiredScopeBindings(artifacts, { backfillSkipped: false }),
+      scopeLinkGate,
+    };
+  }
+
+  it("gate flow: a fully-confirmed cross-scope scope-link rule ENABLES (SS-15.1)", async () => {
+    const artifacts = scopeLinkArtifacts({
+      // Source owner/repo constant-confirmed (the poll's scope); target project {id} via ScopeLink.
+      sourceScope: [confirmedConstant("owner", "alice"), confirmedConstant("repo", "phoenix")],
+      targetScope: [confirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({ correspondence: correspondence() }),
+    );
+    const decision = evaluateEnablement(enablementInputWithGate(artifacts, gate));
+    expect(decision.kind).toBe("enable");
+  });
+
+  it("gate flow: an unconfirmed scope identity key BLOCKS a scope-link rule with `scope-identity-key`", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [confirmedConstant("owner", "alice"), confirmedConstant("repo", "phoenix")],
+      targetScope: [confirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({ correspondence: correspondence({ confirmedBy: null, confirmedAt: null }) }),
+    );
+    const decision = evaluateEnablement(enablementInputWithGate(artifacts, gate));
+    expect(decision.kind).toBe("blocked");
+    if (decision.kind !== "blocked") throw new Error("expected blocked");
+    expect(decision.stillNeeds).toContainEqual({ kind: "scope-identity-key" });
+  });
+
+  it("gate flow: an unconfirmed scope-link target binding BLOCKS with the `scope-binding` requirement (SS-12)", async () => {
+    const artifacts = scopeLinkArtifacts({
+      sourceScope: [confirmedConstant("owner", "alice"), confirmedConstant("repo", "phoenix")],
+      // The create's project {id} scope-link binding is present but UNCONFIRMED.
+      targetScope: [unconfirmedScopeLink("id", "id")],
+    });
+    const gate = await computeScopeLinkGate(
+      artifacts,
+      gateDeps({ correspondence: correspondence() }),
+    );
+    const decision = evaluateEnablement(enablementInputWithGate(artifacts, gate));
+    expect(decision.kind).toBe("blocked");
+    if (decision.kind !== "blocked") throw new Error("expected blocked");
+    expect(decision.stillNeeds).toContainEqual({
+      kind: "scope-binding",
+      parameterName: "id",
+      side: "target",
+      resourceRef: "tgt",
     });
   });
 });

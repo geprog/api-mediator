@@ -188,6 +188,16 @@ export class QueueKeyResolver {
     const identityValue = readIdentityValue(change, context);
     if (identityValue !== undefined) {
       const identityKey = stringifyIdentityValue(identityValue);
+      // SS-15.7 (carried-over SS-14 hardening) — a scoped context with NO `PreLinkScopeResolver`
+      // wired must NOT silently fall through to the plain non-scoped identity-value key: that
+      // would key a scoped rule as if non-scoped, a latent cross-match / cross-direction-duplicate
+      // footgun. Fail loud instead (mirrors the Poller's "scoped park but no sink wired" throw) —
+      // a scoped rule is always constructed with its resolver.
+      if (context.scope !== undefined && this.#scopeResolver === undefined) {
+        throw new Error(
+          "scoped context supplied without a PreLinkScopeResolver — a scoped rule must never be keyed as if non-scoped (SS-15.7)",
+        );
+      }
       // SS-14.2/14.3 — scope-qualify the pre-link key on a scoped rule.
       if (context.scope !== undefined && this.#scopeResolver !== undefined) {
         const scoped = await this.#scopeResolver.resolve({

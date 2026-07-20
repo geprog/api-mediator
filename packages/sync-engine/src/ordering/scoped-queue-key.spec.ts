@@ -236,4 +236,51 @@ describe("QueueKeyResolver — SS-14.2 scope-qualified pre-link key", () => {
       basis: "identity-value",
     });
   });
+
+  it("SS-15.7 — a scoped context with NO PreLinkScopeResolver wired THROWS (never keyed as non-scoped)", async () => {
+    const links = new FakeRecordLinkStore();
+    // NO scope resolver — the fail-loud footgun guard: a scoped rule must never fall through
+    // to the plain non-scoped identity-value key.
+    const resolver = new QueueKeyResolver(links);
+
+    await expect(
+      resolver.resolve(
+        change({ observedRecord: { title: "Bug" }, capturedScope: { project: "42" } }),
+        { identitySourcePath: "title", scope: SCOPED_CONTEXT },
+      ),
+    ).rejects.toThrow(/PreLinkScopeResolver/);
+  });
+
+  it("SS-15.7 — no throw when the scoped change is short-circuited by OQ-2 (an active link) before keying", async () => {
+    const links = new FakeRecordLinkStore();
+    await links.insert({
+      id: "link-1",
+      appAId: APP_A,
+      appANativeId: "g1",
+      appBId: APP_B,
+      appBNativeId: "v1",
+      resourcePairRef: PAIR,
+      establishedBy: "identity-match",
+      status: "active",
+      establishingQueueKey: { kind: "identity-value", value: "sl:sl-1::x" },
+      createdAt: new Date("2026-07-19T00:00:00.000Z"),
+      tombstonedAt: null,
+    });
+    // Scoped context, NO resolver — but the record is linked, so keying resolves via the link
+    // id before the identity-value branch is ever reached (no throw).
+    const resolver = new QueueKeyResolver(links);
+
+    const resolved = queued(
+      await resolver.resolve(
+        change({
+          sourceAppId: APP_A,
+          sourceNativeId: "g1",
+          observedRecord: { title: "Bug" },
+          capturedScope: { project: "42" },
+        }),
+        { identitySourcePath: "title", scope: SCOPED_CONTEXT },
+      ),
+    );
+    expect(resolved).toStrictEqual({ queueKey: "link-1", basis: "record-link" });
+  });
 });

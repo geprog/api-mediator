@@ -1,10 +1,15 @@
 import type {
+  ApiSpec,
   ConfirmableRef,
   IrOperation,
   IrResourceGroup,
   ResourceBinding,
+  ScopeContainerRef,
+  ScopeCorrespondence,
   ScopeRecordDerivedBinding,
+  ScopeScopeLinkBinding,
 } from "@mediator/domain";
+import type { ScopeLinkStore } from "@mediator/db";
 import {
   findMappedTargetOperation,
   resolveSingleRecordReadBinding,
@@ -12,8 +17,13 @@ import {
   scopeParamNamesOf,
   writeRecordIdPathParam,
 } from "@mediator/outbound";
-import type { EnablementSide, ScopeBindingRequirement } from "@mediator/sync-engine";
+import type {
+  EnablementSide,
+  ScopeBindingRequirement,
+  ScopeLinkGateInput,
+} from "@mediator/sync-engine";
 
+import { pollScopeModeView } from "./poll-scope-mode.js";
 import { buildTargetLookup } from "./context-builders.js";
 import { confirmedValue, findIdentityField, type RuleArtifacts } from "./resolution.js";
 
@@ -184,6 +194,124 @@ export function computeRequiredScopeBindings(
   return collector.list();
 }
 
+/**
+ * The narrow container-binding reads {@link loadContainerBinding} needs — a structural
+ * subset of `RuleArtifactRepos` (the real `@mediator/db` repos satisfy it). Only
+ * `apiSpecs.listByAppId` + `resourceBindings.listByApiSpecId` are used (never `getById`).
+ */
+export interface ContainerBindingRepos {
+  readonly apiSpecs: { listByAppId(appId: string): Promise<ApiSpec[]> };
+  readonly resourceBindings: { listByApiSpecId(apiSpecId: string): Promise<ResourceBinding[]> };
+}
+
+/** The reader ports {@link computeScopeLinkGate} needs (the real `@mediator/db` repos satisfy them). */
+export interface ScopeLinkGateDeps {
+  readonly correspondences: {
+    getByResourcePair(resourcePairRef: string): Promise<ScopeCorrespondence | undefined>;
+  };
+  readonly scopeLinks: Pick<ScopeLinkStore, "listByCorrespondence">;
+  readonly repos: ContainerBindingRepos;
+}
+
+/**
+ * **SS-15.1/15.2 — the mode-aware `scope-link` gate input** (`docs/requirements/
+ * scoped-resource-sync.md` SS-15.1/15.2/15.3). The **async**, repo-backed half of the SS-15
+ * gate, kept **out** of the pure {@link evaluateEnablement} so it stays pure over already-
+ * loaded domain objects — the analog of {@link computeRequiredScopeBindings} for the rule-level
+ * `scope-link` preconditions.
+ *
+ * Returns `undefined` when the rule carries **no** `kind: scope-link` scope binding on either
+ * side (a non-scoped / L1-`constant` / L2-`record-derived` rule → the gate adds no SS-15
+ * blocker, backward-compatible). Otherwise it resolves everything the gate branches on:
+ *
+ *  - the pair's `ScopeCorrespondence` (home of the scope identity key — SS-10);
+ *  - the SS-13.5 **effective** poll-scope mode (`pollScopeModeView` honoring the operator
+ *    override), which selects which `ScopeLink`-resolvability preconditions apply;
+ *  - the **container resources' `ResourceBinding`s** (resolved by app + resourceRef,
+ *    **regardless of confirmation** so the gate itself reports an unconfirmed list op —
+ *    the confirmation gate is the pure gate's, not this loader's), whose `collectionReadRef`
+ *    is the container list op SS-11 discovery / SS-17 enumeration consume; and
+ *  - every `ScopeLink` established under the correspondence (for the `per-scope-pinned`
+ *    coverage check).
+ */
+export async function computeScopeLinkGate(
+  artifacts: RuleArtifacts,
+  deps: ScopeLinkGateDeps,
+): Promise<ScopeLinkGateInput | undefined> {
+  if (!hasAnyScopeLinkBinding(artifacts.sourceBinding, artifacts.targetBinding)) {
+    return undefined;
+  }
+  const correspondence = await deps.correspondences.getByResourcePair(
+    artifacts.rule.resourcePairRef,
+  );
+  const effectiveMode = pollScopeModeView(
+    artifacts.rule,
+    artifacts.sourceBinding,
+    correspondence,
+  ).effective;
+  const targetContainerBinding =
+    correspondence !== undefined
+      ? await loadContainerBinding(deps.repos, correspondence.targetContainerRef)
+      : undefined;
+  const sourceContainerBinding =
+    correspondence?.sourceContainerRef !== undefined
+      ? await loadContainerBinding(deps.repos, correspondence.sourceContainerRef)
+      : undefined;
+  const scopeLinks =
+    correspondence !== undefined
+      ? await deps.scopeLinks.listByCorrespondence(correspondence.id)
+      : [];
+  return {
+    effectiveMode,
+    correspondence,
+    targetContainerBinding,
+    sourceContainerBinding,
+    scopeLinks,
+  };
+}
+
+/** True iff either side's `ResourceBinding` carries a `kind: scope-link` scope path binding. */
+function hasAnyScopeLinkBinding(
+  sourceBinding: ResourceBinding,
+  targetBinding: ResourceBinding,
+): boolean {
+  return hasScopeLinkEntry(sourceBinding) || hasScopeLinkEntry(targetBinding);
+}
+
+function hasScopeLinkEntry(binding: ResourceBinding): boolean {
+  return (binding.scopePathBindings ?? []).some((entry) => entry.kind === "scope-link");
+}
+
+/**
+ * Resolve a `ScopeContainerRef`'s `ResourceBinding` (the container resource named by
+ * `{ appId, resourceRef }`, in an **active PROVIDER** spec of that app), **regardless of ref
+ * confirmation** — so the SS-15 gate can report an unconfirmed `collectionReadRef`. Contrast
+ * `scope-discovery.ts`'s `loadContainerResource`, which gates on a *confirmed* collection read
+ * because it must *enumerate*; here the confirmation check is the gate's. The container app is
+ * always the pair's source or target app (already validated reachable by `resolveRuleArtifacts`),
+ * so no extra base-URL check. `undefined` when the resource has no binding.
+ */
+async function loadContainerBinding(
+  repos: ContainerBindingRepos,
+  ref: ScopeContainerRef,
+): Promise<ResourceBinding | undefined> {
+  const specs = await repos.apiSpecs.listByAppId(ref.appId);
+  for (const spec of specs) {
+    if (spec.role !== "PROVIDER" || spec.status !== "active") {
+      continue;
+    }
+    if (!spec.parsedIR.some((group) => group.resourceRef === ref.resourceRef)) {
+      continue;
+    }
+    const bindings = await repos.resourceBindings.listByApiSpecId(spec.id);
+    const binding = bindings.find((entry) => entry.resourceRef === ref.resourceRef);
+    if (binding !== undefined) {
+      return binding;
+    }
+  }
+  return undefined;
+}
+
 /** The IR operation a confirmed `operation`-kind ref names, or `undefined` (absent/unconfirmed). */
 function confirmedOperation(
   ref: ConfirmableRef | undefined,
@@ -220,14 +348,26 @@ function findRecordDerivedScopeEntry(
   );
 }
 
+/** The confirmed-or-not `scope-link` entry for `parameterName` on a binding, or `undefined`. */
+function findScopeLinkScopeEntry(
+  binding: ResourceBinding,
+  parameterName: string,
+): ScopeScopeLinkBinding | undefined {
+  return (binding.scopePathBindings ?? []).find(
+    (entry): entry is ScopeScopeLinkBinding =>
+      entry.kind === "scope-link" && entry.parameterName === parameterName,
+  );
+}
+
 /**
  * Deduplicates scope requirements by `(side, resourceRef, parameterName)`, preserving
  * order. For each collected parameter it resolves the requirement **kind** from the
- * attributed side's `ResourceBinding.scopePathBindings` (SS-9): a `record-derived` entry
+ * attributed side's `ResourceBinding.scopePathBindings`: a `record-derived` entry (SS-9)
  * yields a `record-derived` requirement carrying the entry's `sourceScopeKey` + the polled
- * source resource's ref (so the gate can check the source `sourceScopeRef`); anything else
- * — including a derived-unconfirmed default `constant` — yields the SS-5 `constant`
- * requirement unchanged.
+ * source resource's ref (so the gate can check the source `sourceScopeRef`); a `scope-link`
+ * entry (SS-12) yields a `scope-link` requirement (checked against a confirmed `scope-link`
+ * entry, never a `constant`); anything else — including a derived-unconfirmed default —
+ * yields the SS-5 `constant` requirement unchanged.
  */
 class ScopeRequirementCollector {
   readonly #byKey = new Map<string, ScopeBindingRequirement>();
@@ -252,21 +392,32 @@ class ScopeRequirementCollector {
       if (this.#byKey.has(key)) {
         continue;
       }
-      const recordDerived = findRecordDerivedScopeEntry(binding, parameterName);
-      this.#byKey.set(
-        key,
-        recordDerived !== undefined
-          ? {
-              kind: "record-derived",
-              parameterName,
-              side,
-              resourceRef,
-              sourceResourceRef: this.#sourceResourceRef,
-              sourceScopeKey: recordDerived.sourceScopeKey,
-            }
-          : { kind: "constant", parameterName, side, resourceRef },
-      );
+      this.#byKey.set(key, this.#classify(side, resourceRef, parameterName, binding));
     }
+  }
+
+  /** Resolve the requirement **kind** for a scope parameter from its `scopePathBindings` entry. */
+  #classify(
+    side: EnablementSide,
+    resourceRef: string,
+    parameterName: string,
+    binding: ResourceBinding,
+  ): ScopeBindingRequirement {
+    const recordDerived = findRecordDerivedScopeEntry(binding, parameterName);
+    if (recordDerived !== undefined) {
+      return {
+        kind: "record-derived",
+        parameterName,
+        side,
+        resourceRef,
+        sourceResourceRef: this.#sourceResourceRef,
+        sourceScopeKey: recordDerived.sourceScopeKey,
+      };
+    }
+    if (findScopeLinkScopeEntry(binding, parameterName) !== undefined) {
+      return { kind: "scope-link", parameterName, side, resourceRef };
+    }
+    return { kind: "constant", parameterName, side, resourceRef };
   }
 
   public list(): readonly ScopeBindingRequirement[] {

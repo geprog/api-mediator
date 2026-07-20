@@ -149,6 +149,35 @@ export function describeRequirement(
         label: `Confirm the ${requirement.side} record scope capture (sourceScopeRef) carrying the component '${requirement.sourceScopeKey}' on ${requirement.resourceRef}.`,
         bindingLink: bindingLinkFor(requirement.side, resourcePair),
       };
+    case "scope-identity-key":
+      // SS-15.1/15.3 — a hard blocker: the pair's ScopeCorrespondence scope identity key must
+      // be confirmed before any record's container can resolve. The confirmation panel (SS-15.4)
+      // is Slice C UI; surfaced here as a checklist row with no existing deep link.
+      return {
+        key: "scope-identity-key",
+        label:
+          "Confirm the scope identity key (ScopeCorrespondence) — the source↔target container pairing a scoped rule resolves each record's container through.",
+        bindingLink: null,
+      };
+    case "scope-link":
+      // SS-15.1/15.3 — a hard blocker for a per-scope-pinned rule: the source container is not
+      // enumerable, so at least one ScopeLink must be pinned to cover the scopes in play. The
+      // container-linking screen (SS-15.5) is Slice C UI; no existing deep link.
+      return {
+        key: "scope-link",
+        label:
+          "Link containers — no ScopeLink covers the scopes in play (this source is not enumerable, so scopes must be pinned).",
+        bindingLink: null,
+      };
+    case "container-list-op":
+      // SS-15.2/15.3 — a hard blocker: the source/target container resource's collection read
+      // (collectionReadRef) must be confirmed so scopes can be discovered/enumerated. Deep-links
+      // to that side's app where the Phase-1 binding panel (RB-3) confirms the collection read.
+      return {
+        key: `container-list-op:${requirement.side}`,
+        label: `Confirm the ${requirement.side} container list operation (collectionReadRef) so its containers can be enumerated.`,
+        bindingLink: bindingLinkFor(requirement.side, resourcePair),
+      };
   }
 }
 
