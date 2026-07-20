@@ -358,6 +358,103 @@ describe("Loop Prevention — EP-3 canonical-form capture + cache-disabled proof
   });
 });
 
+/**
+ * The EP-3 → EP-1 round trip over **resource-qualified** `FieldMapping` paths
+ * (`issues/title`, not `title`) — the path shape a real `ApprovedMapping` stores.
+ *
+ * `FieldMapping.sourcePath`/`targetPath` are stored resource-qualified, while a live
+ * record is record-relative (`{ title }`, never `{ "issues/title" }`), so every read
+ * against a live record must go through `recordRelativePath` while the
+ * `SyncFieldState.fieldPath` KEY stays qualified. The rest of this file exercises
+ * bare paths, where the two spaces coincide and the reduction is a no-op — so a
+ * missing reduction is invisible to it. These cases pin both halves at once.
+ *
+ * Without the reduction both halves silently degrade to `hashFieldValue(null)`:
+ * every baseline matches every observation, so a genuine human edit is dropped as an
+ * echo and that direction stops syncing after the mediator's first write.
+ */
+describe("Loop Prevention — resource-qualified FieldMapping paths (EP-3 → EP-1 round trip)", () => {
+  // issues/title → tasks/title, bidirectional.
+  const A_TO_B_QUALIFIED: MappingDirection = {
+    sourceSide: "A",
+    fieldMappings: [fm("issues/title", "tasks/title")],
+  };
+  const B_TO_A_QUALIFIED: MappingDirection = {
+    sourceSide: "B",
+    fieldMappings: [fm("tasks/title", "issues/title")],
+  };
+
+  /** EP-3: an A→B write of `title`, baselining both sides from live records. */
+  async function writeAToB(h: Harness, title: string): Promise<void> {
+    await h.stage.recordWrite({
+      recordLinkId: LINK_ID,
+      mappingId: MAPPING_ID,
+      writtenSide: "B",
+      sourceSide: "A",
+      fieldMappings: A_TO_B_QUALIFIED.fieldMappings,
+      // Live records: record-relative keys, exactly as a polled record / write
+      // response body arrives.
+      storedRepresentation: { title },
+      observedSource: { title },
+      writtenRecord: { appId: "appB", resource: "tasks", nativeId: "b1" },
+    });
+  }
+
+  it("EP-3 baselines the REAL value under the qualified key, not hash(null)", async () => {
+    const h = makeHarness();
+    await writeAToB(h, "Ship the release");
+
+    const rows = await h.fieldState.findByLink(LINK_ID);
+    const written = rows.find((r) => r.side === "B" && r.fieldPath === "tasks/title");
+    const source = rows.find((r) => r.side === "A" && r.fieldPath === "issues/title");
+
+    // The KEY stays resource-qualified (the seeder / `participatingFieldsForSide`
+    // key space) — reducing it would need a migration.
+    expect(written).toBeDefined();
+    expect(source).toBeDefined();
+    // The VALUE is read record-relative: the real title, never the absent-read null.
+    expect(written?.lastSyncedHash).toBe(hashFieldValue("Ship the release"));
+    expect(source?.lastSyncedHash).toBe(hashFieldValue("Ship the release"));
+    expect(written?.lastSyncedHash).not.toBe(hashFieldValue(null));
+  });
+
+  it("EP-1: a genuine edit on the last-written side is NOT an echo — reverse sync survives", async () => {
+    const h = makeHarness(); // cache disabled → only the durable baseline can decide
+    await writeAToB(h, "Ship the release");
+    const link = makeLink();
+
+    // A human then edits the title in app B. B is the side the mediator last wrote,
+    // so this is precisely the change an over-eager echo check would swallow.
+    const outcome = await h.stage.check({
+      change: makeChange({ observedRecord: { title: "Ship the release TODAY" } }),
+      context: makeContext([A_TO_B_QUALIFIED, B_TO_A_QUALIFIED]),
+      resolution: resolved(link),
+      resource: "tasks",
+    });
+
+    expect(outcome).toStrictEqual({ kind: "not-echo", recordLink: link });
+    expect(h.events.all()).toHaveLength(0);
+    expect(h.metrics.skippedLoop).toStrictEqual([]);
+  });
+
+  it("EP-1: the mediator's own write coming back on qualified paths IS still an echo", async () => {
+    // The other half of the contract: the reduction must not break real echo
+    // detection, or bidirectional sync ping-pongs.
+    const h = makeHarness();
+    await writeAToB(h, "Ship the release");
+
+    const outcome = await h.stage.check({
+      change: makeChange({ observedRecord: { title: "Ship the release" } }),
+      context: makeContext([A_TO_B_QUALIFIED, B_TO_A_QUALIFIED]),
+      resolution: resolved(makeLink()),
+      resource: "tasks",
+    });
+
+    expect(outcome).toMatchObject({ kind: "echo", via: "field-baseline" });
+    expect(h.metrics.skippedLoop).toStrictEqual([RULE_ID]);
+  });
+});
+
 describe("Loop Prevention — EP-2 recently-written cache fast path", () => {
   it("a live cache entry short-circuits ahead of the field compare (no baselines needed)", async () => {
     const now = 0;
