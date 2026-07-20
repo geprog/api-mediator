@@ -31,7 +31,7 @@ function binding(scopePathBindings: ResourceBinding["scopePathBindings"]): Resou
  */
 const NO_SCOPE_LINK_CONTEXT = {
   scopeLinkAvailable: false,
-  scopeKeyRefCandidate: undefined,
+  scopeKeyRefCandidates: {},
 } as const;
 
 describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", () => {

@@ -150,10 +150,11 @@ export function toResourceBindingDto(
     scopeBindings,
     sourceScopeRef,
     // SS-18.4 — the kind-selector context: whether this resource's pair has a proposed
-    // `ScopeCorrespondence` (so `scope-link` is selectable) and the derived `scopeKeyRef`
-    // a selection would be written with. Both are proposals; neither confirms anything.
+    // `ScopeCorrespondence` (so `scope-link` is selectable) and, per scope parameter, the
+    // derived `scopeKeyRef` a selection would be written with. Both are proposals; neither
+    // confirms anything.
     scopeLinkAvailable: scopeLink.scopeLinkAvailable,
-    scopeKeyRefCandidate: scopeLink.scopeKeyRefCandidate ?? null,
+    scopeKeyRefCandidates: { ...scopeLink.scopeKeyRefCandidates },
   };
 }
 

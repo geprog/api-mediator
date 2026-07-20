@@ -162,6 +162,32 @@ suite("ScopeCorrespondenceRepository.propose — SS-18.6 (requires Postgres)", (
     expect(await repo.getByResourcePair(PAIR_REF)).toStrictEqual(stored);
   });
 
+  it("CLEARS a stored sourceContainerRef when the newer derivation has none (SS-13.5 transition)", async () => {
+    // Re-ingest 1: the full source spec exposes a repo-list -> enumerable.
+    const enumerated = await repo.propose(candidateOf());
+    expect(enumerated.sourceContainerRef).toBeDefined();
+
+    // Re-ingest 2: the trimmed spec drops the repo-list -> not enumerable. The refresh must
+    // NULL the column, not leave the stale ref: `derivePollScopeMode` reads exactly this
+    // field, so a preserved ref would keep the rule deriving `per-scope-enumerated` and the
+    // Poller would try to enumerate a container list that no longer exists.
+    const candidate = candidateOf();
+    delete candidate.sourceContainerRef;
+    const pinned = await repo.propose(candidate);
+
+    expect(pinned.sourceContainerRef).toBeUndefined();
+    expect((await repo.getByResourcePair(PAIR_REF))?.sourceContainerRef).toBeUndefined();
+  });
+
+  it("SETS sourceContainerRef when a previously non-enumerable source becomes enumerable", async () => {
+    const candidate = candidateOf();
+    delete candidate.sourceContainerRef;
+    await repo.propose(candidate);
+
+    const upgraded = await repo.propose(candidateOf());
+    expect(upgraded.sourceContainerRef).toStrictEqual({ appId: APP_A, resourceRef: "repos" });
+  });
+
   it("listByResourceSide finds the pair from either side, and only that pair (SS-18.4)", async () => {
     await repo.propose(candidateOf());
     await repo.propose(candidateOf({ resourcePairRef: OTHER_PAIR_REF }));

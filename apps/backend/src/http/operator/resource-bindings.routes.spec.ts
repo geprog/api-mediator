@@ -919,7 +919,7 @@ describe("PATCH /api/resource-bindings/:id — scope-link (SS-18.4)", () => {
 
     const issues = bindings.find((binding) => binding.resourceRef === "issues");
     expect(issues?.scopeLinkAvailable).toBe(false);
-    expect(issues?.scopeKeyRefCandidate).toBeNull();
+    expect(issues?.scopeKeyRefCandidates).toStrictEqual({});
   });
 
   it("reports scope-link AVAILABLE, with the derived scopeKeyRef, once one is proposed (SS-18.4)", async () => {
@@ -951,7 +951,9 @@ describe("PATCH /api/resource-bindings/:id — scope-link (SS-18.4)", () => {
       .bindings.find((binding) => binding.resourceRef === "issues");
 
     expect(issues?.scopeLinkAvailable).toBe(true);
-    expect(issues?.scopeKeyRefCandidate).toBe("id");
+    // Per PARAMETER: this scoped spec reaches `issues` through `{owner}` and `{repo}`, and
+    // `issues` is the TARGET side here, whose scope key has exactly one component.
+    expect(issues?.scopeKeyRefCandidates).toStrictEqual({ owner: "id", repo: "id" });
     // A resource with NO scope path parameter is unaffected — no correspondence claims it.
     const others = bindings.filter((binding) => binding.scopeBindings.length === 0);
     expect(others.every((binding) => !binding.scopeLinkAvailable)).toBe(true);

@@ -118,7 +118,7 @@ function bindingsFixture(overrides: { collectionConfirmed?: boolean }): Resource
         // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
         // so `scope-link` stays the disabled option it was before Layer 3.
         scopeLinkAvailable: false,
-        scopeKeyRefCandidate: null,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -242,7 +242,7 @@ function scopeFixture(overrides: { confirmed?: boolean }): ResourceBindingsRespo
         // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
         // so `scope-link` stays the disabled option it was before Layer 3.
         scopeLinkAvailable: false,
-        scopeKeyRefCandidate: null,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -288,7 +288,7 @@ function recordDerivedScopeFixture(overrides: {
         // SS-18.4 — these fixtures cover pairs with no proposed `ScopeCorrespondence`,
         // so `scope-link` stays the disabled option it was before Layer 3.
         scopeLinkAvailable: false,
-        scopeKeyRefCandidate: null,
+        scopeKeyRefCandidates: {},
       },
     ],
   };
@@ -532,7 +532,7 @@ describe("BindingPanel — SS-18.4 scope-link authoring", () => {
           ],
           sourceScopeRef: null,
           scopeLinkAvailable: true,
-          scopeKeyRefCandidate: "id",
+          scopeKeyRefCandidates: { id: "id" },
         },
       ],
     };
@@ -600,7 +600,7 @@ describe("BindingPanel — SS-18.4 scope-link authoring", () => {
       bindings: [
         {
           ...firstBinding(scopeLinkFixture({})),
-          scopeKeyRefCandidate: null,
+          scopeKeyRefCandidates: {},
         },
       ],
     });
@@ -613,6 +613,91 @@ describe("BindingPanel — SS-18.4 scope-link authoring", () => {
       wrapper.get('[data-testid="scope-select-link-id"]').attributes("disabled"),
     ).toBeDefined();
     expect(wrapper.get('[data-testid="scope-confirm-id"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("pre-fills each scope row from ITS OWN parameter's candidate, never one key into both", async () => {
+    // The hazard: a two-part Gitea container whose `{owner}`/`{repo}` rows both pre-fill
+    // `owner` composes `alice/alice` — a VALID repository path, so an operator accepting
+    // both pre-fills addresses a real-but-wrong container instead of getting an error.
+    getBindingsMock.mockResolvedValue({
+      bindings: [
+        {
+          id: BINDING_ID,
+          apiSpecId: SPEC_ID,
+          resourceRef: "issues",
+          refs: [],
+          scopeBindings: [
+            {
+              parameterName: "owner",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+            {
+              parameterName: "repo",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+          ],
+          sourceScopeRef: null,
+          scopeLinkAvailable: true,
+          scopeKeyRefCandidates: { owner: "owner", repo: "repo" },
+        },
+      ],
+    });
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-owner"]').setValue("scope-link");
+    await wrapper.get('[data-testid="scope-kind-select-repo"]').setValue("scope-link");
+
+    expect(inputValue(wrapper, "scope-keyref-input-owner")).toBe("owner");
+    expect(inputValue(wrapper, "scope-keyref-input-repo")).toBe("repo");
+  });
+
+  it("pre-fills nothing for a parameter the mediator could not derive a key for", async () => {
+    getBindingsMock.mockResolvedValue({
+      bindings: [
+        {
+          id: BINDING_ID,
+          apiSpecId: SPEC_ID,
+          resourceRef: "issues",
+          refs: [],
+          scopeBindings: [
+            {
+              parameterName: "owner",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+            {
+              parameterName: "workspace",
+              kind: "constant",
+              value: "",
+              confirmedBy: null,
+              confirmedAt: null,
+            },
+          ],
+          sourceScopeRef: null,
+          scopeLinkAvailable: true,
+          // `workspace` matched no source scope component -> withheld, not defaulted.
+          scopeKeyRefCandidates: { owner: "owner" },
+        },
+      ],
+    });
+    const wrapper = mountPanel("operator");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="scope-kind-select-workspace"]').setValue("scope-link");
+    expect(inputValue(wrapper, "scope-keyref-input-workspace")).toBe("");
+    // …and the action stays disabled until the operator supplies one.
+    expect(
+      wrapper.get('[data-testid="scope-select-link-workspace"]').attributes("disabled"),
+    ).toBeDefined();
   });
 
   it("renders read-only for a viewer — no selector, input, or action (OA-2 / SS-18.8)", async () => {

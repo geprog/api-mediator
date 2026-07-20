@@ -26,8 +26,9 @@ import ScopeBindingRow from "./ScopeBindingRow.vue";
  * `record-derived` `sourceScopeKey` (SS-8a), or (SS-18.4) a `scope-link` `scopeKeyRef`,
  * which becomes selectable once the mediator has proposed a `ScopeCorrespondence` for the
  * resource's pair. Both SS-18.4 inputs come straight off the binding DTO
- * (`scopeLinkAvailable` / `scopeKeyRefCandidate`), so the panel needs no pair context of
- * its own. Confirming clears the SS-5/SS-9 enablement blocker via the same PATCH + query
+ * (`scopeLinkAvailable` / `scopeKeyRefCandidates`), so the panel needs no pair context of
+ * its own — and the `scopeKeyRef` candidate is looked up **per parameter**, so a two-part
+ * container never pre-fills one component into both rows. Confirming clears the SS-5/SS-9 enablement blocker via the same PATCH + query
  * invalidation, so the panel and the enablement checklist both reflect the satisfied item
  * (SS-6.3 / SU-5.3).
  */
@@ -145,7 +146,7 @@ function applyUpdate(payload: { bindingId: string; request: UpdateResourceBindin
               :readonly="scopeReadonly"
               :source-scope-key-options="props.sourceScopeKeyOptions"
               :scope-link-available="binding.scopeLinkAvailable"
-              :scope-key-ref-candidate="binding.scopeKeyRefCandidate"
+              :scope-key-ref-candidate="binding.scopeKeyRefCandidates[scope.parameterName] ?? null"
               @confirm="applyUpdate"
             />
           </section>

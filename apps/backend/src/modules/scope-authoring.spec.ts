@@ -16,8 +16,9 @@ import { derivePollScopeMode } from "./sync/poll-scope-mode.js";
 import {
   ScopeLinkAuthoringResolver,
   deriveScopeCorrespondenceProposal,
-  deriveScopeKeyRefCandidate,
+  deriveScopeKeyRefCandidates,
   isProposableScopeIdentityPairing,
+  namesMatch,
   proposeScopeCorrespondences,
   type ScopeCorrespondenceProposalOps,
   type ScopeCorrespondenceProposer,
@@ -384,21 +385,25 @@ describe("deriveScopeCorrespondenceProposal — a NON-scoped pair gets nothing (
 
 // ── SS-18.2 / SS-13.5 — enumerable vs non-enumerable source ───────────────────
 
-describe("sourceContainerRef presence drives the derived poll-scope mode (SS-18.2 / SS-13.5)", () => {
-  /** A source binding carrying a CONFIRMED `scope-link` entry — what makes a read per-container. */
-  const perContainerSourceBinding: ResourceBinding = {
-    ...giteaIssuesBinding,
-    scopePathBindings: [
-      {
-        kind: "scope-link",
-        parameterName: "owner",
-        scopeKeyRef: "owner",
-        confirmedBy: "operator",
-        confirmedAt: new Date("2026-07-20T00:00:00.000Z"),
-      },
-    ],
-  };
+/**
+ * A source binding carrying a CONFIRMED `scope-link` entry — what makes a source read
+ * per-container, and therefore what turns `sourceContainerRef`'s presence/absence into
+ * `per-scope-enumerated` vs `per-scope-pinned` (SS-13.5).
+ */
+const perContainerSourceBinding: ResourceBinding = {
+  ...giteaIssuesBinding,
+  scopePathBindings: [
+    {
+      kind: "scope-link",
+      parameterName: "owner",
+      scopeKeyRef: "owner",
+      confirmedBy: "operator",
+      confirmedAt: new Date("2026-07-20T00:00:00.000Z"),
+    },
+  ],
+};
 
+describe("sourceContainerRef presence drives the derived poll-scope mode (SS-18.2 / SS-13.5)", () => {
   it("an ENUMERABLE source container yields sourceContainerRef -> per-scope-enumerated", () => {
     const result = deriveScopeCorrespondenceProposal(proposalInput());
     expect(result.kind).toBe("proposed");
@@ -468,7 +473,7 @@ describe("isProposableScopeIdentityPairing — value-preserving only (SS-18.3)",
 
 // ── SS-18.4 — the derived `scopeKeyRef` ──────────────────────────────────────
 
-describe("deriveScopeKeyRefCandidate (SS-18.4)", () => {
+describe("deriveScopeKeyRefCandidates (SS-18.4)", () => {
   const correspondence: ScopeCorrespondence = {
     id: "corr-1",
     resourcePairRef: PAIR_REF,
@@ -479,51 +484,123 @@ describe("deriveScopeKeyRefCandidate (SS-18.4)", () => {
     confirmedAt: null,
   };
 
+  /** Gitea `issues` as a per-container SOURCE read: two scope params, two scope components. */
+  const giteaTwoParamBinding: ResourceBinding = {
+    ...giteaIssuesBinding,
+    sourceScopeRef: {
+      components: [
+        { key: "owner", fieldPath: "repository.owner" },
+        { key: "repo", fieldPath: "repository.name" },
+      ],
+      confirmedBy: null,
+      confirmedAt: null,
+    },
+    scopePathBindings: [
+      { kind: "constant", parameterName: "owner", value: "", confirmedBy: null, confirmedAt: null },
+      { kind: "constant", parameterName: "repo", value: "", confirmedBy: null, confirmedAt: null },
+    ],
+  };
+
   it("derives the TARGET side's key from the container's nativeIdRef leaf", () => {
     // SS-11 discovery builds the target scope key as `{ [nativeIdRef leaf]: nativeId }`,
     // so this is the component a `scope-link` binding must name.
     expect(
-      deriveScopeKeyRefCandidate({
+      deriveScopeKeyRefCandidates({
         correspondence,
         appId: VIKUNJA,
         binding: vikunjaTasksBinding,
         targetContainerBinding: vikunjaProjectsBinding,
       }),
-    ).toBe("id");
+    ).toStrictEqual({ id: "id" });
   });
 
-  it("derives the SOURCE side's key from the resource's own sourceScopeRef components", () => {
-    // The source scope key is the record's captured scope, keyed by `sourceScopeRef` keys.
+  it("pairs each SOURCE scope parameter to the component that NAMES it — never one key into both rows", () => {
+    // The hazard this guards: a multi-part Gitea container whose `{owner}`/`{repo}` params
+    // both pre-fill `owner` composes `alice/alice` — a VALID repository path, so the write
+    // lands in a real-but-wrong container instead of failing loudly.
+    const candidates = deriveScopeKeyRefCandidates({
+      correspondence,
+      appId: GITEA,
+      binding: giteaTwoParamBinding,
+      targetContainerBinding: vikunjaProjectsBinding,
+    });
+
+    expect(candidates).toStrictEqual({ owner: "owner", repo: "repo" });
+    expect(candidates["owner"]).not.toBe(candidates["repo"]);
+  });
+
+  it("withholds a SOURCE parameter's candidate when no component names it (multi-part container)", () => {
+    const unmatched: ResourceBinding = {
+      ...giteaTwoParamBinding,
+      scopePathBindings: [
+        {
+          kind: "constant",
+          parameterName: "workspace",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+      ],
+    };
+    // Two components, neither named `workspace` -> no guess at all for that parameter.
     expect(
-      deriveScopeKeyRefCandidate({
+      deriveScopeKeyRefCandidates({
         correspondence,
         appId: GITEA,
-        binding: giteaIssuesBinding,
+        binding: unmatched,
         targetContainerBinding: vikunjaProjectsBinding,
       }),
-    ).toBe("owner");
+    ).toStrictEqual({});
+  });
+
+  it("pairs a SINGLE-component source container whatever the parameter is called — unambiguous", () => {
+    const single: ResourceBinding = {
+      ...giteaIssuesBinding,
+      sourceScopeRef: {
+        components: [{ key: "project", fieldPath: "project_id" }],
+        confirmedBy: null,
+        confirmedAt: null,
+      },
+      scopePathBindings: [
+        {
+          kind: "constant",
+          parameterName: "workspace",
+          value: "",
+          confirmedBy: null,
+          confirmedAt: null,
+        },
+      ],
+    };
+    expect(
+      deriveScopeKeyRefCandidates({
+        correspondence,
+        appId: GITEA,
+        binding: single,
+        targetContainerBinding: vikunjaProjectsBinding,
+      }),
+    ).toStrictEqual({ workspace: "project" });
   });
 
   it("offers nothing when the container binding has no nativeIdRef — never a guess", () => {
     expect(
-      deriveScopeKeyRefCandidate({
+      deriveScopeKeyRefCandidates({
         correspondence,
         appId: VIKUNJA,
         binding: vikunjaTasksBinding,
         targetContainerBinding: binding({ resourceRef: "projects" }),
       }),
-    ).toBeUndefined();
+    ).toStrictEqual({});
   });
 
   it("offers nothing for an app on neither side of the correspondence", () => {
     expect(
-      deriveScopeKeyRefCandidate({
+      deriveScopeKeyRefCandidates({
         correspondence,
         appId: "app-unrelated",
         binding: vikunjaTasksBinding,
         targetContainerBinding: vikunjaProjectsBinding,
       }),
-    ).toBeUndefined();
+    ).toStrictEqual({});
   });
 });
 
@@ -554,6 +631,10 @@ class FakeScopeCorrespondenceProposer implements ScopeCorrespondenceProposer {
     if (existing.confirmedBy !== null) {
       return Promise.resolve(existing); // confirmed -> untouched
     }
+    // The real repo writes `source_container_ref` unconditionally (the `set` clause names
+    // it), so an absent candidate CLEARS a previously-stored ref — it does not preserve it.
+    // Mirroring that is load-bearing: a source that stops being enumerable on re-ingest
+    // must actually drop the ref, or the rule keeps deriving `per-scope-enumerated`.
     const refreshed: ScopeCorrespondence = {
       ...existing,
       scopeIdentityKey: candidate.scopeIdentityKey,
@@ -562,6 +643,9 @@ class FakeScopeCorrespondenceProposer implements ScopeCorrespondenceProposer {
         ? { sourceContainerRef: candidate.sourceContainerRef }
         : {}),
     };
+    if (candidate.sourceContainerRef === undefined) {
+      delete refreshed.sourceContainerRef;
+    }
     this.rows.set(candidate.resourcePairRef, refreshed);
     return Promise.resolve(refreshed);
   }
@@ -582,13 +666,16 @@ function specOf(id: string, appId: string, parsedIR: Ir): ApiSpec {
   };
 }
 
-function buildOps(proposer: FakeScopeCorrespondenceProposer): ScopeCorrespondenceProposalOps {
+function buildOps(
+  proposer: FakeScopeCorrespondenceProposer,
+  sourceBindings: readonly ResourceBinding[] = [giteaIssuesBinding, giteaReposBinding],
+): ScopeCorrespondenceProposalOps {
   const specs = new Map<string, ApiSpec>([
     [GITEA_SPEC, specOf(GITEA_SPEC, GITEA, GITEA_IR)],
     [VIKUNJA_SPEC, specOf(VIKUNJA_SPEC, VIKUNJA, VIKUNJA_IR)],
   ]);
   const bindings = new Map<string, ResourceBinding[]>([
-    [GITEA_SPEC, [giteaIssuesBinding, giteaReposBinding]],
+    [GITEA_SPEC, [...sourceBindings]],
     [VIKUNJA_SPEC, [vikunjaTasksBinding, vikunjaProjectsBinding]],
   ]);
   return {
@@ -621,7 +708,7 @@ const titleField: FieldMapping = {
 describe("proposeScopeCorrespondences (SS-18.1 / SS-18.6)", () => {
   it("proposes one unconfirmed correspondence for the mapping's scoped pair", async () => {
     const proposer = new FakeScopeCorrespondenceProposer();
-    const stored = await proposeScopeCorrespondences({
+    const outcome = await proposeScopeCorrespondences({
       mapping: peerMapping,
       fields: [titleField],
       operations: [createOperationMapping],
@@ -629,15 +716,16 @@ describe("proposeScopeCorrespondences (SS-18.1 / SS-18.6)", () => {
       newId: () => "corr-1",
     });
 
-    expect(stored).toHaveLength(1);
-    expect(stored[0]?.resourcePairRef).toBe(PAIR_REF);
-    expect(stored[0]?.confirmedBy).toBeNull();
+    expect(outcome.proposed).toHaveLength(1);
+    expect(outcome.proposed[0]?.resourcePairRef).toBe(PAIR_REF);
+    expect(outcome.proposed[0]?.confirmedBy).toBeNull();
+    expect(outcome.skipped).toStrictEqual([]);
     expect(proposer.rows.size).toBe(1);
   });
 
   it("is idempotent: re-running never duplicates the pair's correspondence (SS-18.6)", async () => {
     const proposer = new FakeScopeCorrespondenceProposer();
-    const run = (): Promise<readonly ScopeCorrespondence[]> =>
+    const run = (): Promise<unknown> =>
       proposeScopeCorrespondences({
         mapping: peerMapping,
         fields: [titleField],
@@ -711,22 +799,73 @@ describe("proposeScopeCorrespondences (SS-18.1 / SS-18.6)", () => {
     expect(stored?.confirmedBy).toBeNull();
   });
 
+  it("a source that STOPS being enumerable on re-ingest clears sourceContainerRef -> per-scope-pinned (SS-13.5)", async () => {
+    const proposer = new FakeScopeCorrespondenceProposer();
+    const run = (sourceBindings: readonly ResourceBinding[]): Promise<unknown> =>
+      proposeScopeCorrespondences({
+        mapping: peerMapping,
+        fields: [titleField],
+        operations: [createOperationMapping],
+        ops: buildOps(proposer, sourceBindings),
+        newId: () => "corr-1",
+      });
+
+    // Re-ingest 1: `repos` offers a collection read -> enumerable.
+    await run([giteaIssuesBinding, giteaReposBinding]);
+    expect(proposer.rows.get(PAIR_REF)?.sourceContainerRef).toBeDefined();
+
+    // Re-ingest 2: the trimmed spec drops the repo-list -> NOT enumerable. The refresh must
+    // CLEAR the stored ref, not preserve it — otherwise the rule keeps deriving
+    // `per-scope-enumerated` and the Poller tries to enumerate a list that is gone.
+    await run([
+      giteaIssuesBinding,
+      binding({ resourceRef: "repos", nativeIdRef: unconfirmedRef("id") }),
+    ]);
+    const pinned = proposer.rows.get(PAIR_REF);
+    expect(pinned?.sourceContainerRef).toBeUndefined();
+    expect(derivePollScopeMode(perContainerSourceBinding, pinned)).toBe("per-scope-pinned");
+  });
+
+  it("a source that BECOMES enumerable on re-ingest sets sourceContainerRef -> per-scope-enumerated (SS-13.5)", async () => {
+    const proposer = new FakeScopeCorrespondenceProposer();
+    const run = (sourceBindings: readonly ResourceBinding[]): Promise<unknown> =>
+      proposeScopeCorrespondences({
+        mapping: peerMapping,
+        fields: [titleField],
+        operations: [createOperationMapping],
+        ops: buildOps(proposer, sourceBindings),
+        newId: () => "corr-1",
+      });
+
+    await run([
+      giteaIssuesBinding,
+      binding({ resourceRef: "repos", nativeIdRef: unconfirmedRef("id") }),
+    ]);
+    expect(proposer.rows.get(PAIR_REF)?.sourceContainerRef).toBeUndefined();
+
+    // The full spec is ingested: a repo-list appears -> the unconfirmed candidate upgrades.
+    await run([giteaIssuesBinding, giteaReposBinding]);
+    const enumerated = proposer.rows.get(PAIR_REF);
+    expect(enumerated?.sourceContainerRef).toStrictEqual({ appId: GITEA, resourceRef: "repos" });
+    expect(derivePollScopeMode(perContainerSourceBinding, enumerated)).toBe("per-scope-enumerated");
+  });
+
   it("proposes nothing for a consumer-provider mapping (the Phase-5 adapter path)", async () => {
     const proposer = new FakeScopeCorrespondenceProposer();
-    const stored = await proposeScopeCorrespondences({
+    const outcome = await proposeScopeCorrespondences({
       mapping: { ...peerMapping, variant: "consumer-provider" },
       fields: [titleField],
       operations: [createOperationMapping],
       ops: buildOps(proposer),
       newId: () => "corr-1",
     });
-    expect(stored).toStrictEqual([]);
+    expect(outcome).toStrictEqual({ proposed: [], skipped: [] });
     expect(proposer.rows.size).toBe(0);
   });
 
   it("proposes nothing for a mapping whose pairs are all non-scoped (no regression to L1/L2)", async () => {
     const proposer = new FakeScopeCorrespondenceProposer();
-    const stored = await proposeScopeCorrespondences({
+    const outcome = await proposeScopeCorrespondences({
       mapping: peerMapping,
       // A field-only mapping covering `issues -> tasks` with NO approved write operation:
       // nothing establishes a container path parameter, so nothing is proposed.
@@ -735,8 +874,10 @@ describe("proposeScopeCorrespondences (SS-18.1 / SS-18.6)", () => {
       ops: buildOps(proposer),
       newId: () => "corr-1",
     });
-    expect(stored).toStrictEqual([]);
+    expect(outcome.proposed).toStrictEqual([]);
     expect(proposer.rows.size).toBe(0);
+    // The skip is REPORTED, not silently discarded — `not-scoped` is the benign reason.
+    expect(outcome.skipped).toStrictEqual([{ resourcePairRef: PAIR_REF, reason: "not-scoped" }]);
   });
 });
 
@@ -778,14 +919,17 @@ describe("ScopeLinkAuthoringResolver (SS-18.4)", () => {
 
   it("makes scope-link available with the derived scopeKeyRef once a correspondence exists", async () => {
     const context = await buildResolver([correspondence]).resolve(vikunjaTasksBinding, VIKUNJA);
-    expect(context).toStrictEqual({ scopeLinkAvailable: true, scopeKeyRefCandidate: "id" });
+    expect(context).toStrictEqual({
+      scopeLinkAvailable: true,
+      scopeKeyRefCandidates: { id: "id" },
+    });
   });
 
   it("keeps scope-link UNAVAILABLE for a pair with no proposed correspondence", async () => {
     const context = await buildResolver([]).resolve(vikunjaTasksBinding, VIKUNJA);
     expect(context).toStrictEqual({
       scopeLinkAvailable: false,
-      scopeKeyRefCandidate: undefined,
+      scopeKeyRefCandidates: {},
     });
   });
 
@@ -793,7 +937,7 @@ describe("ScopeLinkAuthoringResolver (SS-18.4)", () => {
     const context = await buildResolver([correspondence]).resolve(vikunjaProjectsBinding, VIKUNJA);
     expect(context).toStrictEqual({
       scopeLinkAvailable: false,
-      scopeKeyRefCandidate: undefined,
+      scopeKeyRefCandidates: {},
     });
   });
 
@@ -810,6 +954,65 @@ describe("ScopeLinkAuthoringResolver (SS-18.4)", () => {
       vikunjaTasksBinding,
       VIKUNJA,
     );
-    expect(context).toStrictEqual({ scopeLinkAvailable: true, scopeKeyRefCandidate: undefined });
+    expect(context).toStrictEqual({ scopeLinkAvailable: true, scopeKeyRefCandidates: {} });
+  });
+});
+
+// ── namesMatch — the shared "same resource" matcher (regression: S2) ──────────
+
+describe("namesMatch — singular/plural variation", () => {
+  /**
+   * Regression guard. An earlier `singularize` committed to stripping `-es` before `-s`,
+   * so every noun ending in `e` pluralized with a bare `-s` failed to match its singular
+   * (`issues -> issu`). Because `deriveTargetContainer` and `deriveSourceContainerRef` both
+   * resolve their container through this matcher, that turned into "no proposal at all" for
+   * the most common resource names in the Gitea/Vikunja landscape — i.e. exactly the L3
+   * unreachability SS-18 exists to remove.
+   */
+  it.each([
+    ["issues", "issue"],
+    ["spaces", "space"],
+    ["pages", "page"],
+    ["milestones", "milestone"],
+    ["files", "file"],
+    ["releases", "release"],
+    ["repositories", "repository"],
+  ])("matches %s <-> %s", (plural, singular) => {
+    expect(namesMatch(plural, singular)).toBe(true);
+    expect(namesMatch(singular, plural)).toBe(true);
+  });
+
+  it.each([
+    ["projects", "project"],
+    ["tasks", "task"],
+    ["boxes", "box"],
+    ["labels", "label"],
+  ])("still matches the regular %s <-> %s", (plural, singular) => {
+    expect(namesMatch(plural, singular)).toBe(true);
+  });
+
+  it("matches a known container-noun abbreviation across the plural boundary", () => {
+    // Gitea: the record field is `repository`, the resource that lists them is `repos`.
+    expect(namesMatch("repos", "repository")).toBe(true);
+    expect(namesMatch("repositories", "repo")).toBe(true);
+    expect(namesMatch("orgs", "organization")).toBe(true);
+  });
+
+  it("does not match unrelated nouns", () => {
+    expect(namesMatch("issues", "projects")).toBe(false);
+    expect(namesMatch("name", "namespace")).toBe(false);
+    expect(namesMatch("tasks", "teams")).toBe(false);
+  });
+
+  it("treats a boundary-delimited id suffix as noise, but not a bare trailing 'id'", () => {
+    // `project_id` / `projectId` name the `projects` container …
+    expect(namesMatch("project_id", "projects")).toBe(true);
+    expect(namesMatch("projectId", "project")).toBe(true);
+    // … while ordinary words merely ENDING in "id" keep their last two letters.
+    expect(namesMatch("grid", "gr")).toBe(false);
+    expect(namesMatch("uuid", "uu")).toBe(false);
+    expect(namesMatch("valid", "val")).toBe(false);
+    // A field literally named `id` still means `id`.
+    expect(namesMatch("id", "id")).toBe(true);
   });
 });

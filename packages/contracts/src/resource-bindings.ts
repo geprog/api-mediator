@@ -127,10 +127,14 @@ export type ResourceBindingSourceScopeRefDto = z.infer<
  *   `ScopeCorrespondence` (SS-18.1). `scope-link` is a **selectable** kind exactly when
  *   this is `true`; for a non-scoped pair it stays `false` and the option stays
  *   disabled, so L1 `constant` / L2 `record-derived` authoring is unchanged.
- * - `scopeKeyRefCandidate` — the mediator's **derived** `scopeKeyRef` for this
- *   resource's scope parameters (which component of that side's
- *   `ScopeLink.appXScopeKey` addresses them), or `null` when it cannot be derived. A
- *   proposal the operator may correct, never a confirmation.
+ * - `scopeKeyRefCandidates` — the mediator's **derived** `scopeKeyRef` **per scope path
+ *   parameter** (which component of that side's `ScopeLink.appXScopeKey` addresses that
+ *   parameter), keyed by `parameterName`. A parameter with no confident derivation is
+ *   **absent** from the map rather than defaulted to a sibling's component: a multi-part
+ *   container (Gitea `{owner}`/`{repo}`) would otherwise pre-fill one component into both
+ *   rows, and `alice/alice` is a valid repository path — so the wrong key addresses a
+ *   real-but-wrong container instead of failing loudly. Proposals the operator may
+ *   correct, never confirmations.
  */
 export const resourceBindingDtoSchema = z.object({
   id: z.string(),
@@ -140,7 +144,7 @@ export const resourceBindingDtoSchema = z.object({
   scopeBindings: z.array(resourceBindingScopeDtoSchema),
   sourceScopeRef: resourceBindingSourceScopeRefDtoSchema.nullable(),
   scopeLinkAvailable: z.boolean(),
-  scopeKeyRefCandidate: z.string().nullable(),
+  scopeKeyRefCandidates: z.record(z.string(), z.string()),
 });
 export type ResourceBindingDto = z.infer<typeof resourceBindingDtoSchema>;
 

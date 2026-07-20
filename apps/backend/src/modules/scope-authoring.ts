@@ -87,10 +87,23 @@ const NAME_SYNONYM_GROUPS: readonly (readonly string[])[] = [
   ["namespace", "org", "organization", "group", "team", "workspace"],
 ];
 
-/** Lowercased, separator-free, id-suffix-free form of a field/component name. */
+/**
+ * Lowercased, separator-free, id-suffix-free form of a field/component name.
+ *
+ * The id suffix is only stripped at a **word boundary** — a `_id`/`-id` separator or a
+ * camelCase `…Id` — never from the raw lowercased string. Stripping unconditionally would
+ * maul ordinary words that merely end in those two letters (`grid -> gr`, `uuid -> uu`,
+ * `valid -> val`, `hybrid -> hybr`), which then match nothing (or, worse, something else)
+ * in {@link namesMatch} and {@link scoreFieldSimilarity}. So the boundary is detected on
+ * the ORIGINAL name, before separators are compacted away.
+ */
 function normalizeName(name: string): string {
-  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return compact.length > 2 && compact.endsWith("id") ? compact.slice(0, -2) : compact;
+  // A separator-delimited `…_id` / `…-id` (any case), or a camelCase `…Id`. A bare
+  // trailing "id" with no boundary is part of the word (`grid`, `uuid`, `valid`) — and a
+  // field literally named `id` keeps its name, which is what it means.
+  const hasIdBoundary = /[_\-. ]id$/i.test(name) || /[a-z0-9]Id$/.test(name);
+  const trimmed = hasIdBoundary ? name.slice(0, -2).replace(/[_\-. ]$/, "") : name;
+  return trimmed.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 /** The leaf segment of a dotted IR field path (`repository.owner` -> `owner`). */
@@ -112,7 +125,7 @@ function headSegment(path: string): string {
  * repositories is `repos`. Deliberately an explicit, tiny list rather than generic prefix
  * matching: `name` is a prefix of `namespace` too, and pairing a scope component with the
  * wrong container resource would route writes to the wrong container — precisely what
- * Layer 3 exists to prevent. Compared after {@link normalizeName} + singularization.
+ * Layer 3 exists to prevent. Compared over {@link singularCandidates}.
  */
 const CONTAINER_NOUN_ABBREVIATIONS: readonly (readonly string[])[] = [
   ["repo", "repository"],
@@ -120,32 +133,60 @@ const CONTAINER_NOUN_ABBREVIATIONS: readonly (readonly string[])[] = [
   ["ns", "namespace"],
 ];
 
-/** English `-s`/`-es` singularization — IR resource refs are OpenAPI path nouns, overwhelmingly regular. */
-function singularize(value: string): string {
-  if (value.endsWith("es")) {
-    return value.slice(0, -2);
+/**
+ * The plausible singular forms of a (already {@link normalizeName}d) noun, as a **candidate
+ * set** rather than one committed answer. English pluralization is ambiguous read backwards
+ * — `-es` strips correctly for `boxes -> box` but wrongly for `issues -> issu` — so
+ * committing to the first applicable strip silently breaks the most common shape of all
+ * (`issues`, `pages`, `spaces`, `files`, `releases`, `milestones`: a noun ending in `e`,
+ * pluralized with a bare `-s`). Emitting every candidate and matching if **any** coincides
+ * costs nothing and cannot pick the wrong one.
+ *
+ * Candidates: the word itself (already singular), minus `-s`, minus `-es`, and the
+ * `-ies -> -y` form (`repositories -> repository`).
+ */
+function singularCandidates(value: string): readonly string[] {
+  const candidates = new Set<string>([value]);
+  if (value.endsWith("ies") && value.length > 3) {
+    candidates.add(`${value.slice(0, -3)}y`);
   }
-  return value.endsWith("s") ? value.slice(0, -1) : value;
+  if (value.endsWith("es") && value.length > 2) {
+    candidates.add(value.slice(0, -2));
+  }
+  if (value.endsWith("s") && value.length > 1) {
+    candidates.add(value.slice(0, -1));
+  }
+  return [...candidates];
 }
 
 /**
  * Whether two resource/field names denote the same thing up to trivial singular/plural
- * variation (`project` ~ `projects`) or a known container-noun abbreviation
- * (`repos` ~ `repository`, via {@link CONTAINER_NOUN_ABBREVIATIONS}).
+ * variation (`project` ~ `projects`, `issues` ~ `issue`, `repositories` ~ `repository`) or
+ * a known container-noun abbreviation (`repos` ~ `repository`, via
+ * {@link CONTAINER_NOUN_ABBREVIATIONS}). Both sides are reduced to their
+ * {@link singularCandidates} set and matched if the sets intersect — so neither side has to
+ * guess which strip its counterpart used.
+ *
+ * Exported because it is the single definition of "these two nouns name the same resource",
+ * relied on by both container derivations **and** the per-parameter `scopeKeyRef` pairing —
+ * a false negative here silently costs a whole proposal (and with it, L3 configurability),
+ * so it is worth pinning directly.
  */
-function namesMatch(a: string, b: string): boolean {
+export function namesMatch(a: string, b: string): boolean {
   const left = normalizeName(a);
   const right = normalizeName(b);
   if (left === right) {
     return true;
   }
-  const leftSingular = singularize(left);
-  const rightSingular = singularize(right);
-  if (leftSingular === rightSingular) {
+  const leftCandidates = singularCandidates(left);
+  const rightCandidates = singularCandidates(right);
+  if (leftCandidates.some((candidate) => rightCandidates.includes(candidate))) {
     return true;
   }
   return CONTAINER_NOUN_ABBREVIATIONS.some(
-    (group) => group.includes(leftSingular) && group.includes(rightSingular),
+    (group) =>
+      leftCandidates.some((candidate) => group.includes(candidate)) &&
+      rightCandidates.some((candidate) => group.includes(candidate)),
   );
 }
 
@@ -629,43 +670,72 @@ function findBinding(
 // ── The derived `scopeKeyRef` for a `scope-link` binding (SS-18.4) ────────────
 
 /**
- * **SS-18.4 — the derived `scopeKeyRef`**: which component of that side's
- * `ScopeLink.appXScopeKey` map addresses this resource's scope path parameters. Pure,
- * and deliberately mirrors how SS-11 discovery *builds* each side's scope key, so a
- * derived ref resolves against a real established link rather than a plausible-looking
- * name:
+ * **SS-18.4 — the derived `scopeKeyRef`, PER SCOPE PARAMETER**: which component of that
+ * side's `ScopeLink.appXScopeKey` map addresses each of this resource's scope path
+ * parameters. Returns a `{ parameterName -> component }` map; a parameter with no
+ * confident derivation is simply **absent** from it and the operator supplies the key by
+ * hand.
  *
- * - the **target** side's scope key is `{ [<container nativeIdRef leaf>]: <native id> }`
- *   (`scope-discovery.ts` builds it exactly so), hence the leaf of the target container
- *   resource's `nativeIdRef` field path — usually `id`;
+ * Pure, and deliberately mirrors how SS-11 discovery *builds* each side's scope key, so a
+ * derived ref resolves against a real established link rather than a plausible-looking name:
+ *
+ * - the **target** side's scope key is `{ [<container nativeIdRef leaf>]: <native id> }` —
+ *   `scope-discovery.ts` builds it with exactly **one** entry, so every target-side scope
+ *   parameter legitimately reads that same component;
  * - the **source** side's scope key is the record's *captured scope*
  *   (`scopeKeyFromCaptured`), whose keys are the source resource's own `sourceScopeRef`
- *   component keys — hence this binding's first component key.
+ *   component keys — so a parameter is matched to the component that **names** it
+ *   ({@link namesMatch}: `{owner}` -> `owner`, `{repo}` -> `repo`).
  *
- * `undefined` when the side cannot be told (the resource's app is on neither container
- * ref) or the underlying ref is absent; the operator then supplies `scopeKeyRef` by hand.
- * A **candidate**, never a confirmation — SS-18.4 leaves the written binding unconfirmed.
+ * ## Why the source side is matched per parameter, and never defaulted
+ *
+ * A multi-part source container (Gitea's `{owner}` + `{repo}`) has one component per
+ * parameter, and filling the wrong one is **not** a loud failure: `alice/alice` is a
+ * perfectly valid repository path, so a mis-derived key can address a real-but-wrong
+ * container instead of erroring. So when a parameter matches no component by name, nothing
+ * is offered for it — the same fail-safe discipline the multi-correspondence case uses.
+ * The single exception is a source whose captured scope has exactly **one** component:
+ * there is then only one possible container key, so the pairing is unambiguous whatever
+ * the parameter is called.
  */
-export function deriveScopeKeyRefCandidate(input: {
+export function deriveScopeKeyRefCandidates(input: {
   readonly correspondence: ScopeCorrespondence;
-  /** The app owning the `ResourceBinding` whose scope parameter is being authored. */
+  /** The app owning the `ResourceBinding` whose scope parameters are being authored. */
   readonly appId: string;
   /** That binding itself — its `sourceScopeRef` keys the source-side scope key. */
   readonly binding: ResourceBinding;
   /** The `ResourceBinding` of `correspondence.targetContainerRef`'s resource, if resolved. */
   readonly targetContainerBinding: ResourceBinding | undefined;
-}): string | undefined {
+}): Readonly<Record<string, string>> {
   const { correspondence, appId, binding, targetContainerBinding } = input;
+  const parameterNames = (binding.scopePathBindings ?? []).map((entry) => entry.parameterName);
+  const candidates: Record<string, string> = {};
+
   // The target side is checked first: SS-18.4 is written about the target `appXScopeKey`,
   // and a self-pair (same app both sides) is refused by rule resolution anyway.
   if (correspondence.targetContainerRef.appId === appId) {
     const path = fieldPathOf(targetContainerBinding?.nativeIdRef?.value);
-    return path === undefined ? undefined : leafSegment(path);
+    const component = path === undefined ? undefined : leafSegment(path);
+    if (component !== undefined) {
+      for (const parameterName of parameterNames) {
+        candidates[parameterName] = component;
+      }
+    }
+    return candidates;
   }
+
   if (correspondence.sourceContainerRef?.appId === appId) {
-    return binding.sourceScopeRef?.components[0]?.key;
+    const components = binding.sourceScopeRef?.components ?? [];
+    const only = components.length === 1 ? components[0] : undefined;
+    for (const parameterName of parameterNames) {
+      const matched = components.find((component) => namesMatch(component.key, parameterName));
+      const component = matched ?? only;
+      if (component !== undefined) {
+        candidates[parameterName] = component.key;
+      }
+    }
   }
-  return undefined;
+  return candidates;
 }
 
 /** The field path an `IrRefTarget` names, when it is a `field` target. */
@@ -700,6 +770,18 @@ export interface ScopeCorrespondenceProposalOps {
   readonly correspondences: ScopeCorrespondenceProposer;
 }
 
+/** One pair that yielded no proposal, and why (SS-18.1's negative cases). */
+export interface SkippedScopePair {
+  readonly resourcePairRef: string;
+  readonly reason: ScopeProposalSkipReason;
+}
+
+/** The outcome of a proposal run: what was stored, and what was skipped and why. */
+export interface ScopeProposalOutcome {
+  readonly proposed: readonly ScopeCorrespondence[];
+  readonly skipped: readonly SkippedScopePair[];
+}
+
 export interface ProposeScopeCorrespondencesInput {
   readonly mapping: ApprovedMapping;
   readonly fields: readonly FieldMapping[];
@@ -729,15 +811,22 @@ export interface ProposeScopeCorrespondencesInput {
  * A **consumer-provider** mapping proposes nothing: `ScopeCorrespondence` correlates a
  * *sync* resource pair, and the Adapter Engine's `ParameterMapping` path is Phase 5.
  *
- * Returns the stored correspondences (proposed or pre-existing), so the caller can log
- * or assert on them; the proposal is otherwise a pure side effect on the database.
+ * Returns both halves of the outcome — the stored correspondences (proposed or
+ * pre-existing) **and** the pairs that yielded nothing, each with its typed
+ * {@link ScopeProposalSkipReason}. The skips matter operationally: `not-scoped` is the
+ * expected, uninteresting case, but `target-container-unresolved` /
+ * `no-source-scope-capture` / `no-value-preserving-pairing` mean "this pair looks scoped
+ * but could not be derived", which is precisely the state an operator would want to see
+ * (and which SS-16's lifecycle pass should surface). Nothing consumes them yet — this
+ * module has no log sink of its own and adding one is out of SS-18's scope — but they are
+ * returned rather than discarded so a caller can.
  */
 export async function proposeScopeCorrespondences(
   input: ProposeScopeCorrespondencesInput,
-): Promise<readonly ScopeCorrespondence[]> {
+): Promise<ScopeProposalOutcome> {
   const { mapping, fields, operations, ops, newId } = input;
   if (mapping.variant !== "peer-peer") {
-    return [];
+    return { proposed: [], skipped: [] };
   }
 
   const [sourceSpec, targetSpec] = await Promise.all([
@@ -747,20 +836,22 @@ export async function proposeScopeCorrespondences(
   if (sourceSpec === undefined || targetSpec === undefined) {
     // A mapping whose spec is gone cannot be derived from; the instantiation itself is
     // unaffected, so this is a no-op rather than a failure of the whole reaction.
-    return [];
+    return { proposed: [], skipped: [] };
   }
   const [sourceBindings, targetBindings] = await Promise.all([
     ops.bindings.listByApiSpecId(sourceSpec.id),
     ops.bindings.listByApiSpecId(targetSpec.id),
   ]);
 
-  const stored: ScopeCorrespondence[] = [];
+  const proposed: ScopeCorrespondence[] = [];
+  const skipped: SkippedScopePair[] = [];
   for (const pair of deriveDirectionalResourcePairs(fields, operations)) {
+    const resourcePairRef = canonicalResourcePairRef(
+      { appId: mapping.sourceAppId, resourceRef: pair.sourceResourceRef },
+      { appId: mapping.targetAppId, resourceRef: pair.targetResourceRef },
+    );
     const proposal = deriveScopeCorrespondenceProposal({
-      resourcePairRef: canonicalResourcePairRef(
-        { appId: mapping.sourceAppId, resourceRef: pair.sourceResourceRef },
-        { appId: mapping.targetAppId, resourceRef: pair.targetResourceRef },
-      ),
+      resourcePairRef,
       source: {
         appId: mapping.sourceAppId,
         ir: sourceSpec.parsedIR,
@@ -781,10 +872,12 @@ export async function proposeScopeCorrespondences(
       newId,
     });
     if (proposal.kind === "proposed") {
-      stored.push(await ops.correspondences.propose(proposal.correspondence));
+      proposed.push(await ops.correspondences.propose(proposal.correspondence));
+    } else {
+      skipped.push({ resourcePairRef, reason: proposal.reason });
     }
   }
-  return stored;
+  return { proposed, skipped };
 }
 
 /** The `OperationMapping`s whose two sides are exactly this directional resource pair. */
@@ -818,8 +911,13 @@ export interface ScopeLinkAuthoringDeps {
 export interface ScopeLinkAuthoringContext {
   /** Whether this resource's pair has a proposed `ScopeCorrespondence` (SS-18.1). */
   readonly scopeLinkAvailable: boolean;
-  /** The derived `scopeKeyRef` an operator selecting `scope-link` gets pre-filled, if derivable. */
-  readonly scopeKeyRefCandidate: string | undefined;
+  /**
+   * The derived `scopeKeyRef` an operator selecting `scope-link` gets pre-filled, **per
+   * scope path parameter**. A parameter with no confident derivation is absent from the
+   * map rather than defaulted — a wrong container key can address a real-but-wrong
+   * container silently.
+   */
+  readonly scopeKeyRefCandidates: Readonly<Record<string, string>>;
 }
 
 /**
@@ -836,10 +934,10 @@ export interface ScopeLinkAuthoringContext {
  * the SS-15 gate — not the selector — is what refuses to enable a rule whose scope identity
  * key is still unconfirmed.
  *
- * `scopeKeyRefCandidate` is {@link deriveScopeKeyRefCandidate} over the first matching
- * correspondence. When a resource sits in several scoped pairs the candidate is ambiguous,
- * so none is offered and the operator supplies it — a wrong container key would route
- * writes to the wrong container, which is precisely what L3 exists to prevent.
+ * `scopeKeyRefCandidates` is {@link deriveScopeKeyRefCandidates} over the first matching
+ * correspondence. When a resource sits in several scoped pairs the candidates are
+ * ambiguous, so none are offered and the operator supplies them — a wrong container key
+ * would route writes to the wrong container, which is precisely what L3 exists to prevent.
  */
 export class ScopeLinkAuthoringResolver {
   readonly #correspondences: ScopeCorrespondenceSideReader;
@@ -857,7 +955,7 @@ export class ScopeLinkAuthoringResolver {
     // A resource with no scope path parameter can never carry a `scope-link` binding, so
     // skip the lookup entirely (the overwhelmingly common case on a bindings GET).
     if ((binding.scopePathBindings ?? []).length === 0) {
-      return { scopeLinkAvailable: false, scopeKeyRefCandidate: undefined };
+      return { scopeLinkAvailable: false, scopeKeyRefCandidates: {} };
     }
     const correspondences = await this.#correspondences.listByResourceSide(
       appId,
@@ -865,12 +963,12 @@ export class ScopeLinkAuthoringResolver {
     );
     const correspondence = correspondences[0];
     if (correspondence === undefined) {
-      return { scopeLinkAvailable: false, scopeKeyRefCandidate: undefined };
+      return { scopeLinkAvailable: false, scopeKeyRefCandidates: {} };
     }
     if (correspondences.length > 1) {
       // Ambiguous: several scoped pairs claim this resource, so no single container key
       // addresses its parameters. Offer the kind, withhold the guess.
-      return { scopeLinkAvailable: true, scopeKeyRefCandidate: undefined };
+      return { scopeLinkAvailable: true, scopeKeyRefCandidates: {} };
     }
     const targetContainerBinding = await loadContainerBinding(
       this.#repos,
@@ -878,7 +976,7 @@ export class ScopeLinkAuthoringResolver {
     );
     return {
       scopeLinkAvailable: true,
-      scopeKeyRefCandidate: deriveScopeKeyRefCandidate({
+      scopeKeyRefCandidates: deriveScopeKeyRefCandidates({
         correspondence,
         appId,
         binding,
