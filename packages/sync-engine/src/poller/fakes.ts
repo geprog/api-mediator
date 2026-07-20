@@ -176,6 +176,9 @@ export class FakePollStateStore implements PollStateStore {
   // `scopeLinkId` = that scope's bucket, so a per-scope advance/abort never touches
   // another scope's — nor the cross-scope — state (the isolation invariant to test).
   readonly #state = new Map<string, FakePollState>();
+  // The rule-level `SyncRule.lastRunAt` (SP-1 due-ness), separate from every `(rule, scope)`
+  // bucket — the real store writes it to `sync_rule`, not to any scope's row.
+  readonly #ruleLastRunAt = new Map<string, Date>();
   #snapshotIds = 0;
   readonly #throwOn = new Set<string>();
 
@@ -245,6 +248,22 @@ export class FakePollStateStore implements PollStateStore {
     state.lastRunAt = advance.lastRunAt;
     state.advanceCount += 1;
     return Promise.resolve();
+  }
+
+  /**
+   * SS-13.3 — the rule-level `lastRunAt` stamp a per-scope fan-out makes. Mirrors the real
+   * store, which updates only `sync_rule.last_run_at`: it is tracked in its OWN map, not in
+   * any `(rule, scope)` bucket, so a per-scope run still leaves the cross-scope bucket
+   * absent (`stateOf(ruleId)` stays `undefined`) — the per-scope isolation invariant.
+   */
+  public advanceRuleRun(ruleId: string, lastRunAt: Date): Promise<void> {
+    this.#ruleLastRunAt.set(ruleId, lastRunAt);
+    return Promise.resolve();
+  }
+
+  /** The rule-level `SyncRule.lastRunAt` the Scheduler's due-ness gate reads (SP-1; tests). */
+  public ruleLastRunAt(ruleId: string): Date | undefined {
+    return this.#ruleLastRunAt.get(ruleId);
   }
 
   /** The current state for a rule/scope (tests). `scopeKey` omitted = cross-scope. */
