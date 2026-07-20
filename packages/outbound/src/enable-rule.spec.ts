@@ -591,6 +591,92 @@ describe("SS-17.5 per-scope fan-out seeding", () => {
     expect(h.pollState.stateOf(RULE, "__unresolved__")).toBeUndefined();
   });
 
+  it("ALL scopes aborted → backfill-aborted, NOT completed (nothing was seeded)", async () => {
+    // The regression: the fan-out flipped `completed` unconditionally, so a run where every
+    // scope failed looked exactly like success and the rule went live over an entirely
+    // unseeded poll state. Per-scope isolation is about ONE bad scope, not a total failure.
+    const result = perScopeResult([
+      {
+        scopeLinkId: "sl-a",
+        outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 3 },
+      },
+      {
+        scopeLinkId: "sl-b",
+        outcome: { outcome: "aborted", reason: "HTTP 500", enumeratedCount: 2 },
+      },
+    ]);
+    const h = setup({ result });
+
+    const outcome = await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(outcome.kind).toBe("backfill-aborted");
+    if (outcome.kind === "backfill-aborted") {
+      // Every cause is named, so the operator sees WHY the whole backfill failed.
+      expect(outcome.reason).toContain("all 2 scopes failed");
+      expect(outcome.reason).toContain("sl-a: page timed out");
+      expect(outcome.reason).toContain("sl-b: HTTP 500");
+      expect(outcome.enumeratedCount).toBe(5);
+    }
+    // Left enabled+running exactly like a single-scope abort: SP-1 holds polling and a
+    // re-enable retries. NOTHING was seeded.
+    expect(h.rules.backfillStatus).toBe("running");
+    expect(h.rules.status).toBe("enabled");
+    expect(h.pollState.stateOf(RULE, "sl-a")).toBeUndefined();
+    expect(h.pollState.stateOf(RULE, "sl-b")).toBeUndefined();
+    expect(h.pollState.stateOf(RULE)).toBeUndefined();
+  });
+
+  it("ALL scopes parked (no container resolved) is a failed backfill too", async () => {
+    const result = perScopeResult([
+      {
+        scopeLinkId: "__unresolved__",
+        outcome: { outcome: "parked", reason: "no active ScopeLink" },
+      },
+    ]);
+    const h = setup({ result });
+
+    const outcome = await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(outcome.kind).toBe("backfill-aborted");
+    // A parked scope never enumerates, so nothing was read before the failure.
+    if (outcome.kind === "backfill-aborted") {
+      expect(outcome.enumeratedCount).toBe(0);
+    }
+    expect(h.rules.backfillStatus).toBe("running");
+  });
+
+  it("ONE completed scope among failures still goes live — SS-17.5 isolation preserved", async () => {
+    const result = perScopeResult([
+      completedScope("sl-a", new Map([["a1", "h-a1"]])),
+      {
+        scopeLinkId: "sl-b",
+        outcome: { outcome: "aborted", reason: "page timed out", enumeratedCount: 0 },
+      },
+      {
+        scopeLinkId: "__unresolved__",
+        outcome: { outcome: "parked", reason: "no active ScopeLink" },
+      },
+    ]);
+    const h = setup({ result });
+
+    const outcome = await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    expect(outcome.kind).toBe("enabled");
+    expect(h.rules.backfillStatus).toBe("completed");
+    expect(h.pollState.stateOf(RULE, "sl-a")?.entries.size).toBe(1);
+  });
+
+  it("an EMPTY scope set still completes — nothing failed, there is just nothing linked yet", async () => {
+    const h = setup({ result: perScopeResult([]) });
+
+    const outcome = await h.enabler.enable(input({ pollSeed: { kind: "full-fetch" } }));
+
+    // Distinct from total failure: the SS-17.1 re-list establishes containers on the next
+    // poll. Unchanged from SS-17.5.
+    expect(outcome.kind).toBe("enabled");
+    expect(h.rules.backfillStatus).toBe("completed");
+  });
+
   it("a delta per-scope rule seeds each completed scope's OWN cursor (changed-since), no snapshot", async () => {
     const result = perScopeResult([
       completedScope("sl-a", new Map([["a1", "h-a1"]])),

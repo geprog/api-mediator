@@ -17,7 +17,11 @@ import type {
 import { stripUndefined } from "@mediator/domain";
 import type { CapturedScope, JsonValue } from "@mediator/transform";
 
-import { fillScopePathParameters } from "./path-template.js";
+import {
+  fillScopePathParameters,
+  hasConfirmedScopeLinkBinding,
+  perScopeDeferredParamNames,
+} from "./path-template.js";
 import { resolveRecordDerivedScopeValues } from "./record-derived-scope.js";
 import type { HttpMethod, ParameterLocation, RestOperationBinding } from "./protocol-client.js";
 import type {
@@ -376,6 +380,38 @@ export interface SourceReadBindingInput {
    * per-scope read fills its container path in the reader instead).
    */
   readonly scopeValues?: ReadonlyMap<string, string>;
+  /**
+   * SS-13.2/SS-17 — the rule polls **per scope**: the source read is issued once per
+   * container, so its confirmed `scope-link` scope parameters are **deferred**
+   * ({@link perScopeDeferredParamNames}) and the composed `path` stays **templated** for
+   * `RestSourceReader`'s per-scope `withScopeFill`. Absent/`false` (every cross-scope
+   * rule, and the SS-14.1 scoped identity lookup, which passes its already-resolved
+   * container through `scopeValues` instead) resolves exactly as before: an unfilled
+   * scope parameter unresolves the whole binding (SS-4.4).
+   *
+   * The **repo-backed** {@link RepoRestSourceBindingResolver} sets this from the rule's
+   * effective poll-scope mode, so the resolver defers exactly when the Poller enumerates
+   * scopes — the two halves cannot disagree.
+   */
+  readonly perScopePoll?: boolean;
+}
+
+/**
+ * SS-13.5 — whether this rule's Poller enumerates **scopes** (per-scope-enumerated /
+ * per-scope-pinned) rather than issuing one cross-scope read. Mirrors
+ * `derivePollScopeMode` + the SS-13.5 operator override, routed through the **shared**
+ * {@link hasConfirmedScopeLinkBinding} predicate that derivation uses, so the source-read
+ * fill and the poll plan can never disagree about the mode.
+ *
+ * Enumerated-vs-pinned is irrelevant here (both poll per scope), which is why this needs
+ * no `ScopeCorrespondence` — only the rule and its source binding.
+ */
+function pollsPerScope(rule: SyncRule, sourceBinding: ResourceBinding): boolean {
+  const override = rule.pollScopeMode;
+  if (override !== undefined) {
+    return override !== "cross-scope";
+  }
+  return hasConfirmedScopeLinkBinding(sourceBinding.scopePathBindings ?? []);
 }
 
 /**
@@ -481,11 +517,24 @@ export function resolveSourceReadBinding(
   // `scopeValues` **container** fill (the scoped identity lookup's target container key).
   // An unfilled scope param → the whole binding unresolves (SS-4.4), never a fabricated
   // URL; the composed path then carries no `{…}`.
+  //
+  // SS-13.2/SS-17 — EXCEPT on a per-scope poll, where the read is issued once per
+  // container: its confirmed `scope-link` parameters are deferred so the path comes back
+  // still-templated and `RestSourceReader.withScopeFill` substitutes THIS scope's
+  // container moments later. Without the deferral the resolver would unresolve every
+  // per-scope rule (no constant, no `scopeValues` on the poll path) and the rule could
+  // never poll at all. Constants still fill here (L1 unchanged) and anything unbound
+  // still unresolves; a deferred `{…}` that survives the fill is refused by the reader's
+  // `findUnfilledPathParam` backstop before the wire.
+  const scopePathBindings = input.sourceBinding.scopePathBindings ?? [];
   const path = fillScopePathParameters(
     operation.path,
-    input.sourceBinding.scopePathBindings ?? [],
+    scopePathBindings,
     undefined,
     input.scopeValues,
+    input.perScopePoll === true
+      ? perScopeDeferredParamNames(operation, scopePathBindings, undefined)
+      : undefined,
   );
   if (path === undefined) {
     return undefined;
@@ -1013,6 +1062,12 @@ export interface BindingResolverRepositories {
  * side of the pair, and composes the {@link RestSourceReadBinding} via
  * {@link resolveSourceReadBinding}. Returns `undefined` for any missing/unconfirmed
  * required input — never a fabricated binding.
+ *
+ * SS-13.2/SS-17 — it also decides whether the rule polls **per scope** ({@link pollsPerScope})
+ * and, when it does, composes a **still-templated** path whose container `{…}` the
+ * `RestSourceReader` fills per polled scope. `resolve` takes only a rule id (the port the
+ * reader depends on), so this is the seam where per-scope-ness is decided — the reader
+ * then supplies the values.
  */
 export class RepoRestSourceBindingResolver implements RestSourceBindingResolver {
   readonly #repos: BindingResolverRepositories;
@@ -1063,6 +1118,9 @@ export class RepoRestSourceBindingResolver implements RestSourceBindingResolver 
         sourceCapabilities: sourceApp.capabilities,
         sourceGroup,
         sourceBinding,
+        // SS-13.2/SS-17 — a per-scope rule's container params stay templated for the
+        // reader's per-scope fill; a cross-scope rule resolves byte-for-byte as before.
+        perScopePoll: pollsPerScope(rule, sourceBinding),
       }),
       this.#options,
     );
