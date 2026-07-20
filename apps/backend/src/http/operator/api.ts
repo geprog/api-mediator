@@ -9,6 +9,7 @@ import { registerParkedConflictRoutes } from "./parked-conflicts.routes.js";
 import { registerPollTriggerRoutes } from "./poll-trigger.routes.js";
 import { registerRecordLinkRoutes } from "./record-links.routes.js";
 import { registerResourceBindingRoutes } from "./resource-bindings.routes.js";
+import { registerScopeIdentityKeyRoutes } from "./scope-identity-key.routes.js";
 import { registerScopeLinkRoutes } from "./scope-links.routes.js";
 import { registerSessionRoute } from "./session.routes.js";
 import { registerSpecRoutes } from "./specs.routes.js";
@@ -41,6 +42,7 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
     registerSyncEventRoutes(app, deps.sync);
     registerRecordLinkRoutes(app, deps.sync);
     registerScopeLinkRoutes(app, deps.sync);
+    registerScopeIdentityKeyRoutes(app, deps.sync);
     registerParkedConflictRoutes(app, deps.sync);
     registerDeadLetterRoutes(app, deps.sync);
     // The deterministic poll-trigger endpoint (SP-5 hook for the SU-6 e2e) is a

@@ -31,4 +31,11 @@ export const queryKeys = {
   parkedConflicts: ["parked-conflicts"] as const,
   /** The dead-letter (parked-write) queue (SA-5.1). */
   deadLetterWrites: ["dead-letter-writes"] as const,
+  /** The parked container-link queue (SS-11.5 / SS-15.5). */
+  parkedContainerLinks: ["scope-links", "parked"] as const,
+  /** The per-pair scope identity key derivation (SS-15.4), keyed by resource pair. */
+  scopeIdentityKey: (resourcePairRef: string): readonly string[] => [
+    "scope-identity-key",
+    resourcePairRef,
+  ],
 } as const;

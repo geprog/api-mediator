@@ -45,6 +45,9 @@ function blockerCount(rule: SyncRuleStatusDto): number {
         <RouterLink to="/sync/manual-links" data-testid="nav-manual-links">
           Manual linking
         </RouterLink>
+        <RouterLink to="/sync/container-links" data-testid="nav-container-links">
+          Container linking
+        </RouterLink>
         <RouterLink to="/sync/conflicts" data-testid="nav-conflicts">Conflicts</RouterLink>
         <RouterLink to="/sync/dead-letter" data-testid="nav-dead-letter">Parked writes</RouterLink>
       </nav>

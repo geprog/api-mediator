@@ -1,33 +1,47 @@
 import {
   ambiguousMatchListResponseSchema,
   configureSyncRuleResponseSchema,
+  confirmScopeIdentityKeyResponseSchema,
   createRecordLinkResponseSchema,
+  createScopeLinkResponseSchema,
   deadLetterQueueResponseSchema,
   disableSyncRuleResponseSchema,
   enableSyncRuleResponseSchema,
   parkedConflictListResponseSchema,
+  parkedContainerLinkListResponseSchema,
   replayParkedWriteResponseSchema,
   resolveParkedConflictResponseSchema,
+  scopeIdentityKeyDerivationResponseSchema,
+  scopeLinkCandidateContextResponseSchema,
   syncEventListResponseSchema,
   syncRuleListResponseSchema,
   unlinkRecordResponseSchema,
+  unlinkScopeLinkResponseSchema,
   type AmbiguousMatchListResponse,
   type ConfigureSyncRuleRequest,
   type ConfigureSyncRuleResponse,
+  type ConfirmScopeIdentityKeyRequest,
+  type ConfirmScopeIdentityKeyResponse,
   type CreateRecordLinkRequest,
   type CreateRecordLinkResponse,
+  type CreateScopeLinkRequest,
+  type CreateScopeLinkResponse,
   type DeadLetterQueueResponse,
   type DisableSyncRuleResponse,
   type EnableSyncRuleRequest,
   type EnableSyncRuleResponse,
   type ParkedConflictListResponse,
+  type ParkedContainerLinkListResponse,
   type ReplayParkedWriteResponse,
   type ResolveParkedConflictRequest,
   type ResolveParkedConflictResponse,
+  type ScopeIdentityKeyDerivationResponse,
+  type ScopeLinkCandidateContextResponse,
   type SyncEventListResponse,
   type SyncEventQuery,
   type SyncRuleListResponse,
   type UnlinkRecordResponse,
+  type UnlinkScopeLinkResponse,
 } from "@mediator/contracts";
 
 import { apiRequest } from "./client.js";
@@ -179,5 +193,68 @@ export function replayParkedWrite(id: string): Promise<ReplayParkedWriteResponse
     `/api/dead-letter-writes/${encodeURIComponent(id)}/replay`,
     { method: "POST" },
     replayParkedWriteResponseSchema,
+  );
+}
+
+// ── SS-15: scope identity key (SS-15.4) + container linking (SS-11.5/11.6, SS-15.5) ──
+
+/** `GET /api/scope-identity-key?resourcePairRef=…` (SS-15.4) — the derive-then-correct candidate. */
+export function deriveScopeIdentityKey(
+  resourcePairRef: string,
+): Promise<ScopeIdentityKeyDerivationResponse> {
+  return apiRequest(
+    `/api/scope-identity-key?resourcePairRef=${encodeURIComponent(resourcePairRef)}`,
+    { method: "GET" },
+    scopeIdentityKeyDerivationResponseSchema,
+  );
+}
+
+/** `POST /api/scope-identity-key` (SS-15.4) — confirm/correct the value-preserving pairing. */
+export function confirmScopeIdentityKey(
+  request: ConfirmScopeIdentityKeyRequest,
+): Promise<ConfirmScopeIdentityKeyResponse> {
+  return apiRequest(
+    "/api/scope-identity-key",
+    { method: "POST", body: request },
+    confirmScopeIdentityKeyResponseSchema,
+  );
+}
+
+/** `GET /api/scope-links/parked` (SS-11.5) — the parked container-linking queue. */
+export function listParkedContainerLinks(limit?: number): Promise<ParkedContainerLinkListResponse> {
+  const qs = limit !== undefined ? `?limit=${String(limit)}` : "";
+  return apiRequest(
+    `/api/scope-links/parked${qs}`,
+    { method: "GET" },
+    parkedContainerLinkListResponseSchema,
+  );
+}
+
+/** `GET /api/scope-links/candidates?resourcePairRef=…` (SS-15.5) — per-pair target linking context. */
+export function getScopeLinkCandidateContext(
+  resourcePairRef: string,
+): Promise<ScopeLinkCandidateContextResponse> {
+  return apiRequest(
+    `/api/scope-links/candidates?resourcePairRef=${encodeURIComponent(resourcePairRef)}`,
+    { method: "GET" },
+    scopeLinkCandidateContextResponseSchema,
+  );
+}
+
+/** `POST /api/scope-links` (SS-11.6) — manually link two containers. */
+export function createScopeLink(request: CreateScopeLinkRequest): Promise<CreateScopeLinkResponse> {
+  return apiRequest(
+    "/api/scope-links",
+    { method: "POST", body: request },
+    createScopeLinkResponseSchema,
+  );
+}
+
+/** `DELETE /api/scope-links/:id` (SS-11.6) — sever a `ScopeLink`. */
+export function unlinkScopeLink(id: string): Promise<UnlinkScopeLinkResponse> {
+  return apiRequest(
+    `/api/scope-links/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+    unlinkScopeLinkResponseSchema,
   );
 }

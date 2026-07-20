@@ -8,12 +8,19 @@ import type {
   ParkedContainerLinkDto,
   PollRunOutcomeDto,
   RecordLinkDto,
+  ScopeCorrespondenceDto,
   ScopeLinkDto,
   SyncEventDto,
   SyncRuleStatusDto,
 } from "@mediator/contracts";
 import type { ParkedWriteEntry } from "@mediator/db";
-import type { AuditLogEntry, ParkedConflict, RecordLink, ScopeLink } from "@mediator/domain";
+import type {
+  AuditLogEntry,
+  ParkedConflict,
+  RecordLink,
+  ScopeCorrespondence,
+  ScopeLink,
+} from "@mediator/domain";
 import type {
   EnablementDegradation,
   EnablementRequirement,
@@ -159,6 +166,28 @@ export function toScopeLinkDto(link: ScopeLink): ScopeLinkDto {
     establishedBy: link.establishedBy,
     status: link.status,
     createdAt: link.createdAt.toISOString(),
+  };
+}
+
+/**
+ * A `ScopeCorrespondence` → the SS-15.4 wire shape (SS-10). Ids / IR field paths /
+ * config only — no credential material, no live payload value. The `Date` confirmation
+ * stamp becomes an ISO string; an absent `sourceContainerRef` is omitted.
+ */
+export function toScopeCorrespondenceDto(
+  correspondence: ScopeCorrespondence,
+): ScopeCorrespondenceDto {
+  return {
+    id: correspondence.id,
+    resourcePairRef: correspondence.resourcePairRef,
+    scopeIdentityKey: correspondence.scopeIdentityKey,
+    targetContainerRef: correspondence.targetContainerRef,
+    ...(correspondence.sourceContainerRef !== undefined
+      ? { sourceContainerRef: correspondence.sourceContainerRef }
+      : {}),
+    confirmedBy: correspondence.confirmedBy,
+    confirmedAt:
+      correspondence.confirmedAt === null ? null : correspondence.confirmedAt.toISOString(),
   };
 }
 

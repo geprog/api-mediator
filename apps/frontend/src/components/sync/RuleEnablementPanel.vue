@@ -56,7 +56,7 @@ const neitherLookupPath = computed<boolean>(() => hasNeitherLookupPath(props.rul
 const pushBlocked = computed<boolean>(() => isPushBlockedByCounterpart(props.counterpart));
 
 const checklist = computed(() =>
-  enablementChecklist(props.rule.stillNeeds, props.rule.resourcePair),
+  enablementChecklist(props.rule.stillNeeds, props.rule.resourcePair, props.rule.resourcePairRef),
 );
 
 const pollingState = computed(() => derivePollingState(props.rule));
@@ -170,12 +170,12 @@ const enableDegradationMessages = computed<string[]>(() => {
           <span class="enablement__cross" aria-hidden="true">✗</span>
           <span>{{ item.label }}</span>
           <RouterLink
-            v-if="item.bindingLink !== null"
-            :to="item.bindingLink"
+            v-if="item.action !== null"
+            :to="item.action.to"
             class="enablement__link"
             :data-testid="`checklist-link-${item.key}`"
           >
-            Confirm binding →
+            {{ item.action.label }}
           </RouterLink>
         </li>
       </ul>

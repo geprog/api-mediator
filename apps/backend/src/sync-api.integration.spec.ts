@@ -11,6 +11,7 @@ import {
   RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
   SyncRuleRepository,
   apiSpec,
   approvedMapping,
@@ -48,8 +49,11 @@ import type {
 } from "@mediator/domain";
 import type {
   AmbiguousMatchListResponse,
+  ConfirmScopeIdentityKeyResponse,
   CreateRecordLinkResponse,
   EnableSyncRuleResponse,
+  ScopeIdentityKeyDerivationResponse,
+  ScopeLinkCandidateContextResponse,
   SyncEventListResponse,
   SyncRuleListResponse,
   SyncRuleStatusDto,
@@ -736,5 +740,115 @@ suite("Phase-4 Sync HTTP API (SA-1..SA-3) — live Postgres", () => {
     expect(entry?.candidateTargetNativeIds).toStrictEqual(["t1", "t2"]);
     expect(entry?.ruleId).toBe(RULE_AB);
     expect(entry?.sourceAppId).toBe(APP_A);
+  });
+
+  // ── SS-15.4 / SS-15.5: scope identity key confirmation + container-linking context ──
+
+  const scopeCorrespondences = (): ScopeCorrespondenceRepository =>
+    new ScopeCorrespondenceRepository(db);
+
+  async function seedCorrespondence(pair: string): Promise<void> {
+    await scopeCorrespondences().create({
+      id: randomUUID(),
+      resourcePairRef: pair,
+      scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      targetContainerRef: { appId: APP_B, resourceRef: "widgets" },
+      confirmedBy: null,
+      confirmedAt: null,
+    });
+  }
+
+  it("SS-15.4 derive returns the pair's candidate scope identity key (viewer-ok)", async () => {
+    const pair = `scope-pair-${randomUUID()}`;
+    await seedCorrespondence(pair);
+    const response = await injectAs(app, TEST_VIEWER, {
+      method: "GET",
+      url: `/api/scope-identity-key?resourcePairRef=${encodeURIComponent(pair)}`,
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<ScopeIdentityKeyDerivationResponse>();
+    expect(body.correspondence?.scopeIdentityKey).toStrictEqual([
+      { sourceScopeKey: "name", targetFieldPath: "title" },
+    ]);
+    expect(body.correspondence?.confirmedBy).toBeNull();
+  });
+
+  it("SS-15.4 operator confirms the value-preserving pairing → stamped + persisted (OA-3)", async () => {
+    const pair = `scope-pair-${randomUUID()}`;
+    await seedCorrespondence(pair);
+    const response = await injectAs(app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/scope-identity-key",
+      payload: {
+        resourcePairRef: pair,
+        scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<ConfirmScopeIdentityKeyResponse>();
+    expect(body.correspondence.confirmedBy).toBe(TEST_OPERATOR.username);
+    const stored = await scopeCorrespondences().getByResourcePair(pair);
+    expect(stored?.confirmedBy).toBe(TEST_OPERATOR.username);
+    expect(stored?.confirmedAt).not.toBeNull();
+  });
+
+  it("SS-15.4 / OA-2 viewer → 403 on confirm (nothing stamped)", async () => {
+    const pair = `scope-pair-${randomUUID()}`;
+    await seedCorrespondence(pair);
+    const response = await injectAs(app, TEST_VIEWER, {
+      method: "POST",
+      url: "/api/scope-identity-key",
+      payload: {
+        resourcePairRef: pair,
+        scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      },
+    });
+    expect(response.statusCode).toBe(403);
+    const stored = await scopeCorrespondences().getByResourcePair(pair);
+    expect(stored?.confirmedBy).toBeNull();
+  });
+
+  it("SS-15.4 rejects a value-altering pairing (transform ≠ rename) → 400, nothing stamped", async () => {
+    const pair = `scope-pair-${randomUUID()}`;
+    await seedCorrespondence(pair);
+    const response = await injectAs(app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/scope-identity-key",
+      payload: {
+        resourcePairRef: pair,
+        scopeIdentityKey: [
+          { sourceScopeKey: "name", targetFieldPath: "title", transform: { kind: "coerce" } },
+        ],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    const stored = await scopeCorrespondences().getByResourcePair(pair);
+    expect(stored?.confirmedBy).toBeNull();
+  });
+
+  it("SS-15.4 confirm on a pair with no correspondence → 404", async () => {
+    const response = await injectAs(app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/scope-identity-key",
+      payload: {
+        resourcePairRef: `missing-${randomUUID()}`,
+        scopeIdentityKey: [{ sourceScopeKey: "name", targetFieldPath: "title" }],
+      },
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("SS-15.5 candidates read returns the target app from the correspondence (viewer-ok)", async () => {
+    const pair = `scope-pair-${randomUUID()}`;
+    await seedCorrespondence(pair);
+    const response = await injectAs(app, TEST_VIEWER, {
+      method: "GET",
+      url: `/api/scope-links/candidates?resourcePairRef=${encodeURIComponent(pair)}`,
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<ScopeLinkCandidateContextResponse>();
+    expect(body.targetAppId).toBe(APP_B);
+    // No `scope-link` rule is seeded for this synthetic pair, so no addressing component resolves.
+    expect(body.targetScopeKeyComponent).toBeNull();
   });
 });
