@@ -306,6 +306,11 @@ suite("Phase-4 poll-state atomic advance + snapshot store integration (requires 
     expect(decidePoll(required(settled), new Date(lastRunAt.getTime() + 1_000))).toMatchObject({
       kind: "not-due",
     });
+    // …and it still becomes due once the interval really HAS elapsed (the stamp gates the
+    // rule on its interval, it does not silence it).
+    expect(decidePoll(required(settled), new Date(lastRunAt.getTime() + 60_001))).toMatchObject({
+      kind: "poll",
+    });
   });
 
   /**
@@ -360,6 +365,10 @@ suite("Phase-4 poll-state atomic advance + snapshot store integration (requires 
     );
     expect(decidePoll(required(candidate), new Date(now.getTime() + 1_000))).toMatchObject({
       kind: "not-due",
+    });
+    // …and due again once the interval has genuinely elapsed.
+    expect(decidePoll(required(candidate), new Date(now.getTime() + 60_001))).toMatchObject({
+      kind: "poll",
     });
   });
 

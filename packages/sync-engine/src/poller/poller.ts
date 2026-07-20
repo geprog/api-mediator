@@ -149,6 +149,17 @@ export class Poller {
     // Queueing behind the in-flight cycle rather than refusing keeps the caller's request
     // honoured: a `poll now` still runs a real cycle and reports its OWN true result. The
     // predecessor's failure never cancels the successor — each cycle stands alone.
+    //
+    // LIMITATION — this guard is **in-process only**, and is the first piece of per-process
+    // Poller state in a system whose components are otherwise stateless over the shared
+    // store (`docs/architecture/overview.md` *Availability*). It is sufficient for the
+    // single-instance and active-passive standby deployments named there (only one instance
+    // polls), but NOT for active-active: two instances would each hold their own map and
+    // reintroduce exactly the overlapping-cycle lost update above, invisibly to every test
+    // here. Making the Poller multi-instance-safe therefore requires moving this mutual
+    // exclusion into the shared store — a Postgres advisory lock taken on the rule id for
+    // the duration of the cycle, or a `poll_run` row keyed by `sync_rule_id` claimed and
+    // released around it — not a second in-memory guard.
     const previous = this.#inFlight.get(ruleId);
     const run = (async (): Promise<PollRunOutcome> => {
       if (previous !== undefined) {
