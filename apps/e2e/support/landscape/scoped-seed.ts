@@ -545,6 +545,18 @@ export async function listScopedRuleSyncEvents(
   });
 }
 
+/** An approved mapping's assembled field + operation mappings (what the sync pipeline reads). */
+export async function listMappingArtifacts(
+  mappingId: string,
+): Promise<{ fieldMappings: FieldMapping[]; operationMappings: OperationMapping[] }> {
+  const db = await getTestDb();
+  const repo = new MappingArtifactsRepository(db);
+  return {
+    fieldMappings: await repo.listFieldMappings(mappingId),
+    operationMappings: await repo.listOperationMappings(mappingId),
+  };
+}
+
 /** The `SyncRule`s instantiated for an approved mapping. */
 export async function listSyncRulesForMapping(mappingId: string): Promise<SyncRule[]> {
   const db = await getTestDb();

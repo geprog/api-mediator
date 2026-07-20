@@ -22,6 +22,7 @@ import {
   getScopedRule,
   listPollScopeStates,
   listScopeLinks,
+  listMappingArtifacts,
   listScopedRuleSyncEvents,
   listSyncRulesForMapping,
   seedScopedSyncScaffold,
@@ -71,25 +72,28 @@ import { SyncRulePage } from "../support/pages/sync-rule.page.js";
  *
  * ## CURRENT STATUS — this capstone is RED, for a real product reason
  *
- * Assertions 1, 2 and 3a pass: the pair is authored, proposed, configured through the real
- * Slice-C UI, gated with distinct reasons, enabled in `per-scope-enumerated` mode, and both
- * containers are linked by identity match. The run then stops at **assertion 3b**, because
- * a per-scope rule's source read never resolves:
+ * Assertions 1, 2 and 3 pass: the pair is authored, proposed, configured through the real
+ * Slice-C UI, gated with distinct reasons, enabled in `per-scope-enumerated` mode, both
+ * containers are linked by identity match, and the backfill fans out per container. The run
+ * then stops in **assertion 4a**: the poll DOES detect the new issue in repo A (the scoped
+ * per-container read works), but the outbound write never lands.
  *
- *   `resolveSourceReadBinding` (`packages/outbound/src/binding-resolvers.ts:485`) fills the
- *   poll operation's scope path parameters through `fillScopePathParameters`
- *   (`packages/outbound/src/path-template.ts:64`) passing neither `recordDerivedValues` nor
- *   `deferParamNames`. A `scope-link` entry is not a `constant`, so `confirmedConstantValue`
- *   yields nothing, the fill returns `undefined`, and the whole binding unresolves — even
- *   though `RestSourceReader.withScopeFill` (`rest-source-reader.ts:388`) exists precisely to
- *   substitute those `{…}` per scope a moment later. Every scope therefore aborts with
- *   `no source-read binding for <ruleId>`, the backfill fan-out seeds no `poll_scope_state`,
- *   and no record is ever read from any container.
+ * Root cause — an **approval/sync seam mismatch in `FieldMapping` path encoding**:
+ * the Approval Service serializes a field mapping's paths **resourceRef-prefixed**
+ * (`serializeRef`, `apps/backend/src/modules/approval/refs.ts:23` → `issues/title`,
+ * `tasks/description`), while the Sync Engine reads them as **bare record paths**
+ * (`applyRename` → `readPath`, `packages/transform/src/executor.ts:195`; `pathSegments`
+ * splits on `.` only, `packages/transform/src/json.ts:35`). Nothing between the two strips
+ * the prefix. One cause, three symptoms: the transform throws `missing-input` and every write
+ * dead-letters; the identity comparison on `identityTargetPath` never matches, so every
+ * record reads as new; and a target payload key would be the literal `tasks/description`.
+ *
+ * SU-6 never crossed this seam because it seeds its `FieldMapping`s directly with bare paths.
+ * This capstone is the first test to drive **approval → sync** end to end.
  *
  * The assertions below are written against the **intended** behavior and are deliberately
- * left failing rather than relaxed: they are the regression test for that fix, and they
- * should go green once the resolver defers `scope-link` scope parameters for a per-scope
- * source read. Nothing here is retried, slept on, or loosened to manufacture a pass.
+ * left failing rather than relaxed: they are the regression test for that fix. Nothing here
+ * is retried, slept on, or loosened to manufacture a pass.
  *
  * **Landscape-gated**: if Docker or the landscape is unavailable the whole describe skips
  * (never fails). Bring it up per `scenarios/README.md`:
@@ -270,6 +274,24 @@ test.describe("Slice D — multi-scope capstone (live scenario-1 landscape)", ()
     const ruleG2VId = required(
       (await listSyncRulesForMapping(mappingG2V.id))[0]?.id,
       "instantiated Gitea→Vikunja SyncRule",
+    );
+
+    // AS-4: the reviewer's `operationOverrides` beat the method heuristic — Vikunja's
+    // PUT-creates / POST-updates inversion is corrected, which is what lets the pair create
+    // records in a container at all.
+    const artifacts = await listMappingArtifacts(mappingG2V.id);
+    const actionByTarget = new Map(
+      artifacts.operationMappings.map((operation) => [
+        operation.targetOperationRef,
+        operation.action,
+      ]),
+    );
+    expect(
+      actionByTarget.get("tasks/vikunjaCreateTask"),
+      "PUT /projects/{id}/tasks is a CREATE",
+    ).toBe("create");
+    expect(actionByTarget.get("tasks/vikunjaUpdateTask"), "POST /tasks/{id} is an UPDATE").toBe(
+      "update",
     );
 
     // ── ASSERTION 1a: SS-18 proposed an UNCONFIRMED ScopeCorrespondence ──────────
