@@ -1,9 +1,12 @@
 import {
   AdapterCompositionRepository,
+  ApprovedMappingRepository,
   AuditLogRepository,
+  DownstreamArtifactRepository,
   tx,
   type ApplyCompositionInput,
   type Database,
+  type DbHandle,
 } from "@mediator/db";
 import {
   stripUndefined,
@@ -15,6 +18,7 @@ import {
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
 import { BadRequestError, ConflictError, NotFoundError } from "../../app-errors.js";
+import { adoptionFlagsCompositionRequired, reconstructSubmissionFromContext } from "./adopt.js";
 import {
   analyzeSupplementLoadBearing,
   deriveConsumerInputCoverage,
@@ -62,10 +66,28 @@ import {
  * endpoint's cached entries through the SAME {@link EndpointCacheInvalidator} the adapter
  * runtime serves from, so a change never takes up to `cacheTtl` to become visible (CH-5) —
  * and a rejected recompose (thrown before any transaction) drops nothing.
+ *
+ * **CO-7 (successor adoption):** {@link adoptSuccessor} re-points a `stale` mapping's
+ * bindings to its successor **in place** (keeping every composed field, `chainInputs`
+ * included), re-runs the SAME {@link validateComposition} against the successor's content,
+ * flags any endpoint whose assumptions the successor no longer satisfies
+ * `composition-required` (never a broken `active`), and drops the affected endpoints'
+ * caches through the same seam — all in one transaction with an operator-attributed audit
+ * row. It is the adapter half of the Phase-6 spec-update lifecycle; producing/marking the
+ * successor is out of scope here.
  */
 export interface AdapterCompositionServiceDeps {
   readonly db: Database;
   readonly loader?: CompositionContextLoader;
+  /**
+   * CO-7 — a factory that binds a {@link CompositionContextLoader} to a given
+   * {@link DbHandle}. Successor adoption loads an endpoint's context **inside** the
+   * re-point transaction (via `this.#loaderFactory(txn)`) so it re-validates against the
+   * just-re-pointed successor content. Optional; defaults to constructing a
+   * {@link DbCompositionContextLoader} over the handle. A unit test injects a fake factory
+   * that returns the post-re-point context it wants to exercise.
+   */
+  readonly loaderFactory?: (db: DbHandle) => CompositionContextLoader;
   readonly clock?: () => Date;
   readonly newId: () => string;
   readonly readTraceContext?: () => ActiveTraceContext | null;
@@ -94,6 +116,30 @@ export interface EndpointCacheInvalidator {
 export interface ComposeResult {
   readonly endpoint: AdapterEndpoint;
   readonly bindings: readonly AdapterBinding[];
+}
+
+/**
+ * CO-7 — the ids identifying a simulated (Phase-6 produces them for real) succession: the
+ * `stale` mapping whose bindings are re-pointed, and the successor that takes over their
+ * slot. Marking the stale row `superseded` and producing the successor are the Phase-6
+ * lifecycle's job (out of scope here); adoption **consumes** these ids.
+ */
+export interface AdoptSuccessorInput {
+  readonly supersededMappingId: string;
+  readonly successorMappingId: string;
+}
+
+/**
+ * The outcome of {@link AdapterCompositionService.adoptSuccessor}: which bindings were
+ * re-pointed, which endpoints were affected, and which of those were flagged
+ * `composition-required` because re-validation against the successor failed (CO-7.4). An
+ * adoption that re-pointed nothing (no binding on the superseded mapping, or already
+ * adopted) returns all-empty — a clean no-op (CO-7.5): no status flip, no cache drop.
+ */
+export interface AdoptSuccessorResult {
+  readonly repointedBindingIds: readonly string[];
+  readonly affectedEndpointIds: readonly string[];
+  readonly flaggedEndpointIds: readonly string[];
 }
 
 /**
@@ -126,6 +172,7 @@ export interface CompositionPreview {
 export class AdapterCompositionService {
   readonly #db: Database;
   readonly #loader: CompositionContextLoader;
+  readonly #loaderFactory: (db: DbHandle) => CompositionContextLoader;
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => ActiveTraceContext | null;
@@ -134,6 +181,9 @@ export class AdapterCompositionService {
   public constructor(deps: AdapterCompositionServiceDeps) {
     this.#db = deps.db;
     this.#loader = deps.loader ?? new DbCompositionContextLoader(deps.db);
+    this.#loaderFactory =
+      deps.loaderFactory ??
+      ((db: DbHandle): CompositionContextLoader => new DbCompositionContextLoader(db));
     this.#clock = deps.clock ?? ((): Date => new Date());
     this.#newId = deps.newId;
     this.#readTraceContext = deps.readTraceContext ?? getActiveTraceContext;
@@ -251,6 +301,128 @@ export class AdapterCompositionService {
     // CH-5.5 — drop on every commit (disable AND re-enable); always correctness-safe.
     this.#cacheInvalidator.invalidateEndpoint(endpointId);
     return endpoint;
+  }
+
+  /**
+   * **CO-7 — adopt a `stale` mapping's successor into its composed endpoints.** In **one
+   * transaction** with an operator-attributed audit row (OA-3):
+   *
+   * 1. **Re-point in place (CO-7.1/7.2).** Every `AdapterBinding` on `supersededMappingId`
+   *    is re-pointed (`approvedMappingId`) to `successorMappingId`, **keeping** its composed
+   *    configuration — `role`, `executionOrder`, `dependsOnBindingId`, and especially
+   *    `chainInputs`, which live on the binding precisely so they carry over. This is **not**
+   *    the "new binding attaches `proposed` → composition-required" path; the successor takes
+   *    over its predecessor's slot.
+   * 2. **Re-validate against the successor's content (CO-7.3).** For each affected endpoint
+   *    the context is loaded **inside** this transaction — so its binding facts are re-derived
+   *    from the just-re-pointed successor's `ParameterMapping`s / `phase = response`
+   *    `FieldMapping`s — and its current composed configuration is re-run through the **same**
+   *    {@link validateComposition} CO-2/CO-3 use — so a break lands exactly as it would at
+   *    first composition: a **blocking** flag where the concept blocks, a **loud per-request**
+   *    failure where the concept activates-then-checks-at-request-time (CO-7.4). Blocking:
+   *    a dependent binding's `chainInputs.upstreamFieldPath` no longer populated by the
+   *    successor's response phase, a chained binding's own `targetParamRef`s, and the
+   *    required-parameter composability a dropped `ParameterMapping` (revoked pushdown) would
+   *    break. **Not** re-flagged here (by design, matching CO-3/CO-4): the union dedup key's
+   *    *schema* precondition is re-checked, but a successor that drops the response-phase
+   *    `FieldMapping` populating the dedup value is not — it degrades fail-safe at runtime
+   *    (unknown value ⇒ singleton row, an honest superset, AG-3.5), and a dropped *required*
+   *    response field is caught loud by AG-7. An *optional* filter's revoked pushdown likewise
+   *    activates and is rejected per-request by RP-2 — never a silent plausible-but-wrong answer.
+   * 3. **Flag or keep (CO-7.4).** Validation passing leaves the endpoint `active` with its
+   *    re-pointed bindings; validation failing flags an `active` endpoint
+   *    `composition-required` (never a broken `active`) — it keeps serving its previous
+   *    configuration where still valid and fails the broken requests loudly at request time
+   *    (RP-2/RP-3). Adoption never *promotes*: a `composition-required` or `disabled` endpoint
+   *    keeps its status.
+   * 4. **Drop cache (CO-7.5 / CH-5.4).** Every affected endpoint's cached entries are dropped
+   *    through the same by-endpoint seam CO-6/CH-5 use, so the change is visible immediately.
+   *
+   * **Idempotent / safe:** re-pointing a binding already on the successor matches nothing, and
+   * an adoption with no bindings on the superseded mapping is a clean no-op — no status flip,
+   * no audit row, no cache drop. Marking the stale row `superseded` and producing the
+   * successor are the Phase-6 lifecycle's job and are deliberately untouched here. Throws
+   * `NotFoundError` if `successorMappingId` names no `ApprovedMapping`.
+   */
+  public async adoptSuccessor(
+    input: AdoptSuccessorInput,
+    actor: string,
+  ): Promise<AdoptSuccessorResult> {
+    const { supersededMappingId, successorMappingId } = input;
+
+    // We consume the successor id we are given (Phase 6 owns producing it); a light existence
+    // check turns a bogus id into a clean NotFound rather than a raw foreign-key failure.
+    const successor = await new ApprovedMappingRepository(this.#db).getById(successorMappingId);
+    if (successor === undefined) {
+      throw new NotFoundError(`Successor ApprovedMapping ${successorMappingId} not found.`);
+    }
+
+    const result = await tx(this.#db, async (txn): Promise<AdoptSuccessorResult> => {
+      const artifacts = new DownstreamArtifactRepository(txn);
+      // CO-7.1/7.2 — re-point in place; only `approvedMappingId` changes, the composed
+      // config (role/order/dependsOn/chainInputs/status) is retained.
+      const repointed = await artifacts.repointAdapterBindingsToSuccessor(
+        supersededMappingId,
+        successorMappingId,
+      );
+      if (repointed.length === 0) {
+        // Nothing on the superseded mapping (or already adopted): a clean no-op — no status
+        // flip, no audit row, and (below) no cache drop.
+        return { repointedBindingIds: [], affectedEndpointIds: [], flaggedEndpointIds: [] };
+      }
+
+      const affectedEndpointIds = [
+        ...new Set(repointed.map((binding) => binding.adapterEndpointId)),
+      ];
+      const loader = this.#loaderFactory(txn);
+      const flaggedEndpointIds: string[] = [];
+      for (const endpointId of affectedEndpointIds) {
+        // Load the endpoint's context WITHIN the tx so its facts reflect the re-pointed
+        // successor's content (CO-7.3); the endpoint's status is still its pre-adoption one.
+        const context = await loader.load(endpointId);
+        if (context === undefined) {
+          continue; // the endpoint disappeared mid-transaction — nothing to re-validate
+        }
+        const validation = validateComposition({
+          submission: reconstructSubmissionFromContext(context),
+          bindingFacts: context.bindingFacts,
+          consumerInputs: context.consumerInputs,
+          unionBindingFacts: context.unionBindingFacts,
+          consumerParameters: context.consumerParameters,
+          consumerResponseFieldNames: context.consumerResponseFieldNames,
+        });
+        if (adoptionFlagsCompositionRequired(context.endpoint.status, validation)) {
+          // CO-7.4 — never leave a broken config `active`. The guarded transition only
+          // demotes an `active` endpoint (no-op on disabled/already-required), and leaves the
+          // serving config + bindings untouched so the still-valid parts keep serving.
+          await artifacts.markAdapterEndpointCompositionRequired(endpointId);
+          flaggedEndpointIds.push(endpointId);
+        }
+      }
+
+      const audit = new AuditLogRepository(txn);
+      await audit.insert(
+        this.#adoptionAttribution(actor, {
+          supersededMappingId,
+          successorMappingId,
+          affectedEndpointCount: affectedEndpointIds.length,
+          flaggedEndpointCount: flaggedEndpointIds.length,
+        }),
+      );
+      return {
+        repointedBindingIds: repointed.map((binding) => binding.id),
+        affectedEndpointIds,
+        flaggedEndpointIds,
+      };
+    });
+
+    // CO-7.5 / CH-5.4 — drop each affected endpoint's cached entries through the SAME
+    // by-endpoint seam CO-6/CH-5 use, outside the tx (correctness-safe: a spurious drop only
+    // costs a re-fetch). A no-op adoption dropped nothing above → invalidates nothing here.
+    for (const endpointId of result.affectedEndpointIds) {
+      this.#cacheInvalidator.invalidateEndpoint(endpointId);
+    }
+    return result;
   }
 
   /**
@@ -409,6 +581,36 @@ export class AdapterCompositionService {
       actor,
       details: `adapter endpoint ${verb} (strategy=${submission.aggregationStrategy}, ${String(activeCount)} active binding(s)${disabledNote}, ${submission.strictness})`,
       relatedEndpointId: endpointId,
+      traceId: trace?.traceId,
+      spanId: trace?.spanId,
+      timestamp: this.#clock(),
+    });
+  }
+
+  /**
+   * The OA-3 attribution row for a completed successor adoption (CO-7). Same
+   * `adapter-request` reuse and metadata-only discipline as {@link compositionAttribution}:
+   * actor + the superseded/successor mapping ids + the affected/flagged endpoint counts,
+   * never any secret or payload value. One row summarizes the whole adoption (all affected
+   * endpoints re-pointed in the one transaction); `relatedMappingId` carries the successor
+   * so the row is queryable by the mapping that took over.
+   */
+  #adoptionAttribution(
+    actor: string,
+    summary: {
+      readonly supersededMappingId: string;
+      readonly successorMappingId: string;
+      readonly affectedEndpointCount: number;
+      readonly flaggedEndpointCount: number;
+    },
+  ): AuditLogEntry {
+    const trace = this.#readTraceContext();
+    return stripUndefined({
+      id: this.#newId(),
+      type: "adapter-request" as const,
+      actor,
+      details: `successor adopted (superseded=${summary.supersededMappingId} -> successor=${summary.successorMappingId}, ${String(summary.affectedEndpointCount)} endpoint(s) re-pointed, ${String(summary.flaggedEndpointCount)} flagged composition-required)`,
+      relatedMappingId: summary.successorMappingId,
       traceId: trace?.traceId,
       spanId: trace?.spanId,
       timestamp: this.#clock(),

@@ -3,7 +3,7 @@ import {
   ApiSpecRepository,
   MappingArtifactsRepository,
   ResourceBindingRepository,
-  type Database,
+  type DbHandle,
 } from "@mediator/db";
 import type {
   AdapterBinding,
@@ -180,9 +180,14 @@ function mappedConsumerBodyFieldNamesOf(
   return names;
 }
 
-/** The `@mediator/db`-backed {@link CompositionContextLoader}. */
+/**
+ * The `@mediator/db`-backed {@link CompositionContextLoader}. Bound to a {@link DbHandle}
+ * (the pooled db **or** a `tx()` transaction), so successor adoption (CO-7) can load an
+ * endpoint's context **inside** the same transaction that re-points its bindings — seeing
+ * the uncommitted re-point and re-validating against the successor's content.
+ */
 export class DbCompositionContextLoader implements CompositionContextLoader {
-  public constructor(private readonly db: Database) {}
+  public constructor(private readonly db: DbHandle) {}
 
   public async load(endpointId: string): Promise<CompositionContext | undefined> {
     const compositions = new AdapterCompositionRepository(this.db);
