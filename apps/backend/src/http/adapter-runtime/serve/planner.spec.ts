@@ -108,14 +108,16 @@ describe("planResolution — RP-3 re-validation + RP-4 plan", () => {
     expect(result.plan.groups[0]?.executionOrder).toBe(3);
   });
 
-  it("fails loudly for a non-single strategy (out of this slice's scope)", () => {
-    const result = planResolution({
-      endpoint: endpoint({ aggregationStrategy: "fanout-merge" }),
-      activeBindings: [health()],
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.detail).toContain("fanout-merge");
+  it("fails loudly for an unimplemented strategy (out of this slice's scope)", () => {
+    for (const strategy of ["collection-union", "fanout-first-success"] as const) {
+      const result = planResolution({
+        endpoint: endpoint({ aggregationStrategy: strategy }),
+        activeBindings: [health()],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.detail).toContain("not implemented");
+    }
   });
 
   it("fails loudly for a single endpoint carrying more than one active binding", () => {
@@ -132,5 +134,78 @@ describe("planResolution — RP-3 re-validation + RP-4 plan", () => {
       activeBindings: [health({ binding: binding({ dependsOnBindingId: "other" }) })],
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("planResolution — fanout-merge (AG-2) + TE-3 chaining", () => {
+  const fanout = endpoint({ aggregationStrategy: "fanout-merge", strictness: "degraded" });
+
+  function primary(overrides: Partial<AdapterBinding> = {}): BindingHealthInput {
+    return health({ binding: binding({ id: "p", role: "primary", ...overrides }) });
+  }
+  function supplement(id: string, overrides: Partial<AdapterBinding> = {}): BindingHealthInput {
+    return health({ binding: binding({ id, role: "supplement", ...overrides }) });
+  }
+
+  it("keeps every healthy binding, grouped by executionOrder ascending", () => {
+    const result = planResolution({
+      endpoint: fanout,
+      activeBindings: [
+        primary({ executionOrder: 0 }),
+        supplement("s1", { executionOrder: 1 }),
+        supplement("s2", { executionOrder: 1 }),
+      ],
+    });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.plan.aggregationStrategy).toBe("fanout-merge");
+    expect(result.plan.groups).toHaveLength(2);
+    expect(result.plan.groups[0]?.executionOrder).toBe(0);
+    expect(result.plan.groups[0]?.bindings.map((b) => b.bindingId)).toEqual(["p"]);
+    expect(result.plan.groups[1]?.bindings.map((b) => b.bindingId).sort()).toEqual(["s1", "s2"]);
+    expect(result.plan.eliminated).toEqual([]);
+  });
+
+  it("eliminates an unhealthy supplement (its cause) while keeping the healthy primary", () => {
+    const result = planResolution({
+      endpoint: fanout,
+      activeBindings: [
+        primary(),
+        // A stale supplement mapping eliminates just that binding.
+        health({ binding: binding({ id: "s1", role: "supplement" }), mappingStatus: "stale" }),
+      ],
+    });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.plan.groups.flatMap((g) => g.bindings).map((b) => b.bindingId)).toEqual(["p"]);
+    expect(result.plan.eliminated).toHaveLength(1);
+    expect(result.plan.eliminated[0]?.bindingId).toBe("s1");
+    expect(result.plan.eliminated[0]?.role).toBe("supplement");
+    expect(result.plan.eliminated[0]?.cause).toEqual({ cause: "mapping-stale" });
+  });
+
+  it("TE-3.1: carries a chained supplement's dependsOnBindingId + chainInputs onto the plan", () => {
+    const chainInputs = [
+      { upstreamFieldPath: "todos/id", targetParamRef: "workspaces/getWorkspace#workspaceId" },
+    ];
+    const result = planResolution({
+      endpoint: fanout,
+      activeBindings: [primary(), supplement("s1", { dependsOnBindingId: "p", chainInputs })],
+    });
+    if (!result.ok) throw new Error("expected ok");
+    const chained = result.plan.groups.flatMap((g) => g.bindings).find((b) => b.bindingId === "s1");
+    expect(chained?.dependsOnBindingId).toBe("p");
+    expect(chained?.chainInputs).toEqual(chainInputs);
+  });
+
+  it("TE-3.6: dependsOnBindingId under a non-fanout-merge strategy fails loud (runtime backstop)", () => {
+    const result = planResolution({
+      endpoint: endpoint({ aggregationStrategy: "collection-union" }),
+      activeBindings: [
+        health({ binding: binding({ id: "a", role: "supplement" }) }),
+        health({ binding: binding({ id: "b", role: "supplement", dependsOnBindingId: "a" }) }),
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.detail).toContain("fanout-merge only");
   });
 });

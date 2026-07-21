@@ -55,6 +55,42 @@ export function plannerCauseToFailure(cause: PlannerBindingCause): BindingFailur
   return cause;
 }
 
+/** The failure a binding result carries — a live `failure`'s cause, or a `not-called`'s planner cause. */
+export function resultFailureCause(
+  result: Extract<BindingResult, { kind: "failure" | "not-called" }>,
+): BindingFailure {
+  return result.kind === "failure" ? result.failure : plannerCauseToFailure(result.cause);
+}
+
+/**
+ * **The deterministic field-conflict precedence key** — `docs/architecture/adapter-engine.md`
+ * *Aggregation strategies*: "field conflicts resolved by `executionOrder` precedence, an
+ * order tie broken deterministically by binding id". The **single** definition of that
+ * rule, so `fanout-merge` (AG-2.6) and `collection-union` (AG-3, when built) resolve
+ * conflicts identically rather than each inventing an order.
+ */
+export interface BindingPrecedenceKey {
+  readonly executionOrder: number;
+  readonly bindingId: string;
+}
+
+/**
+ * Compare two bindings by precedence: **lower `executionOrder` wins**, an order tie broken
+ * by **lower binding id** — the same "first in this order is preferred" reading as
+ * `fanout-first-success`'s ordered fallback. A negative result means `a` has the higher
+ * precedence (it wins a field conflict against `b`). Total and deterministic, so the same
+ * inputs always merge to the same object (the property AG-4.5/TE-5.5 depend on).
+ */
+export function compareBindingPrecedence(a: BindingPrecedenceKey, b: BindingPrecedenceKey): number {
+  if (a.executionOrder !== b.executionOrder) {
+    return a.executionOrder - b.executionOrder;
+  }
+  if (a.bindingId < b.bindingId) {
+    return -1;
+  }
+  return a.bindingId > b.bindingId ? 1 : 0;
+}
+
 /**
  * One binding the planner kept, in protocol-neutral terms: its id, `role`, resolved
  * `executionOrder`, and any chaining state (RP-4.1). The concrete {@link AdapterBinding}

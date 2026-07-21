@@ -39,7 +39,10 @@ export type ServeRejectionReason = "invalid-request" | "unmapped-consumer-input"
  * - `served` — a complete consumer-shape response `body`. `degraded` marks a
  *   result that omitted a failed `supplement`'s optional fields (AD-5.3); the
  *   contributing backends are named for the out-of-band provenance header the
- *   concept requires (never injected into the body).
+ *   concept requires (never injected into the body), and `degradedBackendAppIds`
+ *   names the **failed** backend(s) whose optional fields were dropped — the
+ *   out-of-band signal AG-2.3 requires, likewise never in the body. Absent on a
+ *   complete (non-degraded) response.
  * - `rejected` — the inbound request failed validation against the consumer's own
  *   contract (RP-2), a **client error** deliberately distinct from every serving
  *   cause: no backend ran and the request was never passed through. `detail` is a
@@ -58,6 +61,13 @@ export type ServeOutcome =
       readonly body: unknown;
       readonly degraded: boolean;
       readonly contributingBackendAppIds: readonly string[];
+      /**
+       * The failed backend app(s) whose optional fields a `fanout-merge` degraded
+       * response omitted (AG-2.3). Absent on a complete response; present and
+       * non-empty exactly when `degraded` is `true`, so the runtime can name the
+       * failed backend out of band without ever touching the body.
+       */
+      readonly degradedBackendAppIds?: readonly string[];
     }
   | {
       readonly kind: "rejected";

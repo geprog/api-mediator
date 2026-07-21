@@ -7,6 +7,7 @@ import {
   CAUSE_HEADER,
   DEGRADED_HEADER,
   CONTRIBUTING_BACKENDS_HEADER,
+  DEGRADED_BACKENDS_HEADER,
   type AdapterResult,
 } from "./outcome-http.js";
 
@@ -93,6 +94,24 @@ describe("renderHttpResponse — status + machine-readable cause token (RT-3.5)"
     expect(response.headers[CONTRIBUTING_BACKENDS_HEADER]).toBe("backend-a,backend-b");
     // No cause header on a clean/degraded serve; degradation is out-of-band only.
     expect(response.headers[CAUSE_HEADER]).toBeUndefined();
+  });
+
+  it("AG-2.3: a degraded serve names the FAILED backend(s) out of band, never in the body", () => {
+    const response = renderHttpResponse({
+      kind: "served",
+      endpointId: "e1",
+      bindingId: "b1",
+      body: { id: "1", name: "Ada" },
+      degraded: true,
+      contributingBackendAppIds: ["crm"],
+      degradedBackendAppIds: ["billing"],
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ id: "1", name: "Ada" });
+    expect(response.headers[DEGRADED_HEADER]).toBe("true");
+    expect(response.headers[DEGRADED_BACKENDS_HEADER]).toBe("billing");
+    // The failed backend name never leaks into the (consumer-schema-valid) body.
+    expect(JSON.stringify(response.body)).not.toContain("billing");
   });
 });
 

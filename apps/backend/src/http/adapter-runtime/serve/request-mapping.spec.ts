@@ -1,5 +1,11 @@
 import type { AdapterRequest } from "@mediator/adapter-engine";
-import type { FieldMapping, IrOperation, IrParameter, ParameterMapping } from "@mediator/domain";
+import type {
+  ChainInput,
+  FieldMapping,
+  IrOperation,
+  IrParameter,
+  ParameterMapping,
+} from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +13,7 @@ import {
   mapRequestToBackend,
   mappedConsumerParamNames,
   paramRefBareName,
+  resolveChainInputs,
 } from "./request-mapping.js";
 
 function param(
@@ -200,5 +207,82 @@ describe("mapRequestToBackend — TE-1", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.request.body).toEqual({ task_title: "Buy milk" });
+  });
+
+  it("TE-3: a chained parameter fills a required backend parameter no ParameterMapping covers", () => {
+    const backendGetWorkspace: IrOperation = {
+      operationId: "getWorkspace",
+      method: "get",
+      path: "/workspaces/{workspaceId}",
+      parameters: [param({ name: "workspaceId", location: "path", required: true })],
+    };
+    const result = mapRequestToBackend({
+      mappingId: "mapping-2",
+      consumerOperation: consumerGetTodo,
+      backendOperation: backendGetWorkspace,
+      parameterMappings: [],
+      requestPhaseFieldMappings: [],
+      request: request({ pathParameters: { todoId: "42" } }),
+      chainedParams: new Map([["workspaceId", "ws-7"]]),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.pathParams).toEqual({ workspaceId: "ws-7" });
+  });
+});
+
+describe("resolveChainInputs — TE-3", () => {
+  function chainInput(overrides: Partial<ChainInput> = {}): ChainInput {
+    return {
+      upstreamFieldPath: "todos/id",
+      targetParamRef: "workspaces/getWorkspace#workspaceId",
+      ...overrides,
+    };
+  }
+
+  it("TE-3.2/3.3: reads the upstream CONSUMER-shape field and fills the named target param", () => {
+    // The upstream is already consumer-shape (`id`), never the backend-native shape (`ws_id`).
+    const result = resolveChainInputs("mapping-2", [chainInput()], { id: "ws-7", ws_id: "native" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect([...result.params]).toEqual([["workspaceId", "ws-7"]]);
+  });
+
+  it("TE-3.4: an ABSENT upstream field refuses the call as a missing chain input, named", () => {
+    const result = resolveChainInputs("mapping-2", [chainInput()], { other: "x" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.kind).toBe("missing-chain-input");
+    expect(result.detail).toContain("todos/id");
+  });
+
+  it("TE-3.4: a NULL upstream field is treated as absent (refused, never a guessed value)", () => {
+    const result = resolveChainInputs("mapping-2", [chainInput()], { id: null });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.kind).toBe("missing-chain-input");
+  });
+
+  it("TE-3.3: applies the input's optional transform in the sandbox", () => {
+    const result = resolveChainInputs(
+      "mapping-2",
+      [
+        chainInput({
+          transform: "coerce",
+          transformConfig: { coerce: { to: "string", from: "number" } },
+        }),
+      ],
+      { id: 7 },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect([...result.params]).toEqual([["workspaceId", "7"]]);
+  });
+
+  it("a non-scalar chained value is a defect (never a fabricated parameter)", () => {
+    const result = resolveChainInputs("mapping-2", [chainInput()], { id: { nested: true } });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.kind).toBe("defect");
   });
 });

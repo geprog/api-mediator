@@ -24,14 +24,21 @@ import type {
  * mappings; the caller loads them (`docs/architecture/adapter-engine.md` *Binding:
  * decided at composition time*).
  *
- * This slice serves the `single` strategy only (exactly one active binding). A
- * non-`single` strategy or a multi-binding `single` endpoint is a state this slice
- * does not execute; the planner fails **loudly** rather than serving an approximation.
+ * This slice serves the `single` (AG-1) and `fanout-merge` (AG-2, with TE-3 chained
+ * bindings) strategies. `collection-union` / `fanout-first-success` are out of scope;
+ * the planner fails **loudly** on them rather than serving an approximation.
  */
 
 /** The safe defaults an auto-activated single-binding endpoint serves under (AG-1.4). */
 const DEFAULT_AGGREGATION_STRATEGY: AggregationStrategy = "single";
 const DEFAULT_STRICTNESS: EndpointStrictness = "degraded";
+
+/**
+ * The one strategy `dependsOnBindingId` (and therefore chaining) is valid under
+ * (`docs/architecture/adapter-engine.md` order/chaining validity rules;
+ * requirement TE-3.6). Named so the runtime backstop reads back against the doc.
+ */
+const CHAINING_STRATEGY: AggregationStrategy = "fanout-merge";
 
 /** One `active` binding plus the health states the planner re-validates (RP-3). */
 export interface BindingHealthInput {
@@ -132,21 +139,48 @@ function toPlannedBinding(binding: AdapterBinding): PlannedBinding {
 
 /**
  * Produce the resolution plan for a routed, validated request (RP-3 + RP-4). For a
- * `single` endpoint it re-validates the one active binding and either includes it or
- * records it as eliminated with its cause. Fails loudly on any state outside this
- * slice's `single`-only scope, or a chaining defect that composition should have
- * prevented (RP-4.4).
+ * `single` endpoint it re-validates the one active binding; for a `fanout-merge`
+ * endpoint it re-validates every active binding, keeping the healthy ones in
+ * execution groups and recording the rest as eliminated with their causes (carrying
+ * each binding's chaining state through for TE-3). Fails loudly on any state outside
+ * this slice's scope, or a chaining defect composition should have prevented — the
+ * **TE-3.6 runtime backstop**: `dependsOnBindingId` set under a non-`fanout-merge`
+ * strategy fails loud rather than executing an undefined ordering (RP-4.4).
  */
 export function planResolution(input: PlannerInput): PlanResult {
   const strategy = input.endpoint.aggregationStrategy ?? DEFAULT_AGGREGATION_STRATEGY;
   const strictness = input.endpoint.strictness ?? DEFAULT_STRICTNESS;
 
-  if (strategy !== "single") {
-    return {
-      ok: false,
-      detail: `aggregation strategy '${strategy}' is not implemented (single-binding serve only)`,
-    };
+  // TE-3.6 — `dependsOnBindingId` is valid **only** under `fanout-merge`. CO-2 rejects it
+  // elsewhere at composition; this is the loud runtime backstop for a plan that somehow
+  // still carries it under `single`/`collection-union`/`fanout-first-success`.
+  if (strategy !== CHAINING_STRATEGY) {
+    const chained = input.activeBindings.find(
+      (candidate) => candidate.binding.dependsOnBindingId !== undefined,
+    );
+    if (chained !== undefined) {
+      return {
+        ok: false,
+        detail: `dependsOnBindingId is set on binding ${chained.binding.id} under '${strategy}' (chaining is ${CHAINING_STRATEGY} only)`,
+      };
+    }
   }
+
+  switch (strategy) {
+    case "single":
+      return planSingle(input, strictness);
+    case "fanout-merge":
+      return planFanoutMerge(input, strictness);
+    default:
+      return {
+        ok: false,
+        detail: `aggregation strategy '${strategy}' is not implemented (single / fanout-merge serve only)`,
+      };
+  }
+}
+
+/** Re-validate the one binding of a `single` endpoint into its plan (AG-1 / RP-4). */
+function planSingle(input: PlannerInput, strictness: EndpointStrictness): PlanResult {
   if (input.activeBindings.length !== 1) {
     // resolveRequest only hands over `serve` with ≥1 active binding; a `single`
     // endpoint with more than one is a composition defect (CO-2 forbids it).
@@ -155,44 +189,60 @@ export function planResolution(input: PlannerInput): PlanResult {
       detail: `single endpoint has ${String(input.activeBindings.length)} active bindings (expected exactly one)`,
     };
   }
-
   const only = input.activeBindings[0];
   if (only === undefined) {
     return { ok: false, detail: "single endpoint has no active binding after filtering" };
-  }
-  if (only.binding.dependsOnBindingId !== undefined) {
-    // `dependsOnBindingId` is meaningful only under fanout-merge; on a single-strategy
-    // binding it is a composition defect (RP-4.4 / `docs/architecture/adapter-engine.md`).
-    return {
-      ok: false,
-      detail:
-        "dependsOnBindingId is set on a single-strategy binding (chaining is fanout-merge only)",
-    };
   }
 
   const cause = validateBindingHealth(only);
   const groups: readonly PlanExecutionGroup[] =
     cause === undefined ? groupByExecutionOrder([toPlannedBinding(only.binding)]) : [];
   const eliminated: readonly EliminatedBinding[] =
-    cause === undefined
-      ? []
-      : [
-          {
-            bindingId: only.binding.id,
-            role: only.binding.role,
-            executionOrder: orderOf(only.binding),
-            cause,
-          },
-        ];
+    cause === undefined ? [] : [toEliminatedBinding(only.binding, cause)];
 
+  return { ok: true, plan: plan(input, "single", strictness, groups, eliminated) };
+}
+
+/**
+ * Re-validate every binding of a `fanout-merge` endpoint (AG-2 / RP-4). Healthy bindings
+ * become execution groups by `executionOrder` (carrying their `dependsOnBindingId` /
+ * `chainInputs` for TE-3); unhealthy ones are eliminated with their planner cause. The
+ * planner does **not** enforce the exactly-one-primary rule — that is the aggregator's
+ * AG-2.1 defense-in-depth at execution, evaluated over the full result set (a `primary`
+ * eliminated at planning still surfaces its role to that check as a not-called envelope).
+ */
+function planFanoutMerge(input: PlannerInput, strictness: EndpointStrictness): PlanResult {
+  const planned: PlannedBinding[] = [];
+  const eliminated: EliminatedBinding[] = [];
+  for (const active of input.activeBindings) {
+    const cause = validateBindingHealth(active);
+    if (cause === undefined) {
+      planned.push(toPlannedBinding(active.binding));
+    } else {
+      eliminated.push(toEliminatedBinding(active.binding, cause));
+    }
+  }
   return {
     ok: true,
-    plan: {
-      endpointId: input.endpoint.id,
-      aggregationStrategy: strategy,
-      strictness,
-      groups,
-      eliminated,
-    },
+    plan: plan(input, "fanout-merge", strictness, groupByExecutionOrder(planned), eliminated),
   };
+}
+
+/** Assemble the {@link ResolutionPlan} value (a pure projection of the resolved parts). */
+function plan(
+  input: PlannerInput,
+  aggregationStrategy: AggregationStrategy,
+  strictness: EndpointStrictness,
+  groups: readonly PlanExecutionGroup[],
+  eliminated: readonly EliminatedBinding[],
+): ResolutionPlan {
+  return { endpointId: input.endpoint.id, aggregationStrategy, strictness, groups, eliminated };
+}
+
+/** The eliminated-binding envelope for a binding the planner dropped (RP-4.3). */
+function toEliminatedBinding(
+  binding: AdapterBinding,
+  cause: PlannerBindingCause,
+): EliminatedBinding {
+  return { bindingId: binding.id, role: binding.role, executionOrder: orderOf(binding), cause };
 }
