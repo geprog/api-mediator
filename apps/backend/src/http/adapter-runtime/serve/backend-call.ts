@@ -138,18 +138,27 @@ export class AdapterBackendCaller implements BackendCaller {
         readonly reachedBackend: boolean;
       }
   > {
+    // Tracks whether `protocol.send` was actually entered, so a throw is attributed
+    // correctly for WR-5.3: a transport failure *after* dispatch (the write's side
+    // effect may have applied) is recorded, but a throw from `withCredential`'s own
+    // pre-send work — a DB error loading the envelope, a decryption failure, an OAuth
+    // refresh throw, or a pre-send audit write failing — reached no backend, so a
+    // keyed retry must re-evaluate rather than replay a pinned transient failure.
+    let dispatched = false;
     try {
-      const credResult = await this.#credentials.withCredential(targetAppId, (credential) =>
-        this.#protocol.send({
+      const credResult = await this.#credentials.withCredential(targetAppId, (credential) => {
+        dispatched = true;
+        return this.#protocol.send({
           ...request,
           headers: this.#applyCredential(request.headers, credential.secret),
-        }),
-      );
+        });
+      });
       if (credResult.outcome === "invoked") {
         return { ok: true, value: credResult.value };
       }
       if (credResult.outcome === "no-credential") {
         // A valid public/no-auth backend: issue the call unauthenticated.
+        dispatched = true;
         return { ok: true, value: await this.#protocol.send(request) };
       }
       // No request was dispatched — a credential refresh failed before sending.
@@ -160,13 +169,14 @@ export class AdapterBackendCaller implements BackendCaller {
         reachedBackend: false,
       };
     } catch (error) {
-      // No HTTP response — a transport failure (timeout/network/connection refused).
-      // The request WAS dispatched, so the side effect of a write may have applied.
+      // A throw with no HTTP response. If `protocol.send` was entered it is a transport
+      // failure (timeout/network) and the write's side effect may have applied
+      // (`reachedBackend: true`); if it threw before dispatch, no backend was reached.
       return {
         ok: false,
         kind: "upstream-error",
-        detail: `backend app ${targetAppId} transport failure: ${describeError(error)}`,
-        reachedBackend: true,
+        detail: `backend app ${targetAppId} ${dispatched ? "transport failure" : "credential access failed before dispatch"}: ${describeError(error)}`,
+        reachedBackend: dispatched,
       };
     }
   }
