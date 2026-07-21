@@ -310,6 +310,33 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
   }
 
   /**
+   * **Successor adoption re-point (Phase-5 CO-7.1/7.2).** Point every `AdapterBinding`
+   * currently on the `superseded` mapping at its `successor`, changing **only**
+   * `approvedMappingId` — the binding's composed serving state (`role`,
+   * `executionOrder`, `dependsOnBindingId`, `chainInputs`, `status`) is left untouched,
+   * so the successor takes over its predecessor's slot rather than attaching afresh as a
+   * `proposed` binding (extensibility.md *Successor adoption*). Returns the re-pointed
+   * rows (now on the successor) so the caller can re-validate the affected endpoints.
+   *
+   * Idempotent by construction: a binding already on the successor no longer matches
+   * `superseded`, so re-adopting the same pair re-points nothing and returns `[]` — a
+   * clean no-op. Bound to a transaction handle by the service so the re-point, the
+   * endpoints' re-validation-driven status transitions, and the OA-3 audit row commit
+   * together or not at all.
+   */
+  public async repointAdapterBindingsToSuccessor(
+    supersededMappingId: string,
+    successorMappingId: string,
+  ): Promise<AdapterBinding[]> {
+    const rows = await this.db
+      .update(adapterBinding)
+      .set({ approvedMappingId: successorMappingId })
+      .where(eq(adapterBinding.approvedMappingId, supersededMappingId))
+      .returning();
+    return rows.map(mapAdapterBindingRow);
+  }
+
+  /**
    * The `AdapterBinding`s of one `AdapterEndpoint`, in any status. The Adapter
    * Server Runtime's Resolution Planner (Phase-5 RT-3) reads these to decide
    * whether an endpoint has an `active` serving configuration or still answers

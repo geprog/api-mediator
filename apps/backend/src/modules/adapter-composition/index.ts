@@ -5,6 +5,7 @@
  * undefined (naming what is wrong), and — only on a passing result, in one transaction —
  * activates it (`docs/flows/adapter-endpoint-composition.md` steps 4-6).
  */
+export { adoptionFlagsCompositionRequired, reconstructSubmissionFromContext } from "./adopt.js";
 export {
   DbCompositionContextLoader,
   type CompositionContext,
@@ -13,6 +14,8 @@ export {
 export {
   AdapterCompositionService,
   type AdapterCompositionServiceDeps,
+  type AdoptSuccessorInput,
+  type AdoptSuccessorResult,
   type ComposeResult,
   type CompositionPreview,
   type EndpointCacheInvalidator,
