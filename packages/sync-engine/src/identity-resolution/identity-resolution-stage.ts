@@ -116,7 +116,7 @@ export interface ManualLinkParams {
  * container. An absent result leaves the link's address unset, which the write path turns
  * into a loud park (on a scoped, address-ref-confirmed side) rather than a guess.
  */
-function readRecordAddress(
+export function readRecordAddress(
   record: JsonRecord | undefined,
   addressPath: string | undefined,
 ): string | undefined {

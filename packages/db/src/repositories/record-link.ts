@@ -1,5 +1,5 @@
 import type { RecordLink, RecordLinkScopeRef, TombstoneReason } from "@mediator/domain";
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapRecordLinkRow, toRecordLinkInsert } from "../mappers/record-link.js";
@@ -15,6 +15,14 @@ export interface RecordLinkSideRef {
   readonly appId: string;
   readonly nativeId: string;
 }
+
+/**
+ * Which side of the canonical `resourcePairRef` a per-side column belongs to — `"A"` is
+ * the first `appId:resourceRef` token, `"B"` the second (`derive.ts`
+ * `canonicalResourcePairRef`). Used to target the correct `app_{a,b}_record_address`
+ * column; addressing only, never identity.
+ */
+export type RecordLinkSide = "A" | "B";
 
 /**
  * The narrow persistence port the Identity Resolution stage (RL-1..RL-5) depends
@@ -73,6 +81,27 @@ export interface RecordLinkStore {
    * column to an absent `scopeRef`).
    */
   setScopeRef(id: string, scopeRef: RecordLinkScopeRef): Promise<void>;
+  /**
+   * SS-19 — persist one **side's** frozen container-relative address
+   * (`app_{a,b}_record_address`), targeted by {@link RecordLinkSide}. **Addressing
+   * only** — it never touches the native ids the link correlates by, so the
+   * unique-active identity indexes are untouched. Used by the `recordAddressRef`
+   * address-repair sweep to stamp a link established **before** the ref was confirmed
+   * (which therefore carries no address and would otherwise park on its next scoped
+   * write). A no-op on an unknown id; the whole-column overwrite is idempotent, so
+   * re-stamping the same value is harmless.
+   */
+  setRecordAddress(id: string, side: RecordLinkSide, address: string): Promise<void>;
+  /**
+   * SS-19 — the **active** links for which `appId` is a side that carries **no** stored
+   * container-relative address (a NULL `app_{a,b}_record_address` on the side whose
+   * `app_{a,b}_id` is `appId`) — the candidate set the address-repair sweep resolves and
+   * stamps. Returned across every resource pair the app participates in; the caller
+   * narrows to the confirmed binding's `resourceRef` (and picks the addressing side) by
+   * parsing each link's canonical `resourcePairRef`. An already-stamped side is excluded
+   * here, which is what makes a re-run idempotent (a fully-stamped app yields none).
+   */
+  listActiveMissingRecordAddress(appId: string): Promise<RecordLink[]>;
   /** One link by id (observability / tests / re-reading after a mutation). */
   getById(id: string): Promise<RecordLink | undefined>;
 }
@@ -145,6 +174,41 @@ export class RecordLinkRepository implements RecordLinkStore {
    */
   public async setScopeRef(id: string, scopeRef: RecordLinkScopeRef): Promise<void> {
     await this.db.update(recordLink).set({ scopeRef }).where(eq(recordLink.id, id));
+  }
+
+  /**
+   * SS-19 — targeted UPDATE of the one side's `app_{a,b}_record_address` column (the
+   * address-repair stamp). Addressing only: the identity columns / unique-active indexes
+   * are untouched. No-op on an unknown id; a whole-column overwrite, so re-stamping the
+   * same value is idempotent.
+   */
+  public async setRecordAddress(id: string, side: RecordLinkSide, address: string): Promise<void> {
+    await this.db
+      .update(recordLink)
+      .set(side === "A" ? { appARecordAddress: address } : { appBRecordAddress: address })
+      .where(eq(recordLink.id, id));
+  }
+
+  /**
+   * SS-19 — active links where `appId` is a side whose container-relative address is
+   * still NULL. Probed per side (an app can be side A of one pair and side B of another),
+   * so a link is returned when it is active **and** the `appId` side's address column is
+   * NULL. The caller narrows to a specific `resourceRef` by parsing `resourcePairRef`.
+   */
+  public async listActiveMissingRecordAddress(appId: string): Promise<RecordLink[]> {
+    const rows = await this.db
+      .select()
+      .from(recordLink)
+      .where(
+        and(
+          eq(recordLink.status, "active"),
+          or(
+            and(eq(recordLink.appAId, appId), isNull(recordLink.appARecordAddress)),
+            and(eq(recordLink.appBId, appId), isNull(recordLink.appBRecordAddress)),
+          ),
+        ),
+      );
+    return rows.map(mapRecordLinkRow);
   }
 
   public async getById(id: string): Promise<RecordLink | undefined> {

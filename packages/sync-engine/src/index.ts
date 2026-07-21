@@ -66,6 +66,7 @@ export {
 export {
   IdentityResolutionStage,
   IncompleteTargetFetchError,
+  readRecordAddress,
   type IdentityResolutionStageDeps,
   type IdentityResolutionStageOptions,
   type ManualLinkParams,

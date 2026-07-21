@@ -22,6 +22,7 @@ import {
 
 import { BadRequestError, NotFoundError } from "../app-errors.js";
 import type { TxStores, UnitOfWork } from "./persistence.js";
+import type { RecordAddressRepairTrigger } from "./sync/record-address-repair.js";
 
 /**
  * Whether a `ResourceBinding` ref is **meaningful** for its resource given the
@@ -57,6 +58,26 @@ export function refApplicable(
   }
 }
 
+/**
+ * Whether `request` is the **operational-ref** confirm of the `recordAddressRef` (SS-19) —
+ * the only confirm shape that can strand a pre-ref link's address. A scope-binding
+ * (`parameterName`) or `sourceScopeRef` (`components`) confirm is excluded, as is any other
+ * ref kind.
+ */
+function isRecordAddressRefConfirm(request: UpdateResourceBindingRequest): boolean {
+  return (
+    !("parameterName" in request) &&
+    !("components" in request) &&
+    request.refKind === "recordAddressRef"
+  );
+}
+
+/** Whether the binding's `recordAddressRef` is present with **both** confirmation stamps set. */
+function isRecordAddressRefConfirmed(binding: ResourceBinding): boolean {
+  const ref = binding.recordAddressRef;
+  return ref !== undefined && ref.confirmedBy !== null && ref.confirmedAt !== null;
+}
+
 /** The outcome of a confirm/correct, carrying what the DTO needs beyond the binding. */
 export interface ConfirmResult {
   readonly binding: ResourceBinding;
@@ -76,6 +97,15 @@ export interface BindingConfirmer {
 
 export interface ResourceBindingServiceDeps {
   readonly unitOfWork: UnitOfWork;
+  /**
+   * SS-19 — the `recordAddressRef` address-repair sweep, fired **after** a
+   * `recordAddressRef` confirm commits. Optional: absent (every non-sync composition)
+   * leaves confirm behaving exactly as before; when present, confirming the address ref
+   * on an already-running rule repairs the pre-ref links that would otherwise park on
+   * their next scoped write. The sweep does network I/O, so it runs **outside** the
+   * confirm transaction and is total — a repair failure never fails the confirm.
+   */
+  readonly recordAddressRepair?: RecordAddressRepairTrigger;
 }
 
 /**
@@ -96,17 +126,19 @@ export interface ResourceBindingServiceDeps {
  */
 export class ResourceBindingService implements BindingConfirmer {
   readonly #unitOfWork: UnitOfWork;
+  readonly #recordAddressRepair: RecordAddressRepairTrigger | undefined;
 
   public constructor(deps: ResourceBindingServiceDeps) {
     this.#unitOfWork = deps.unitOfWork;
+    this.#recordAddressRepair = deps.recordAddressRepair;
   }
 
-  public confirmOrCorrect(
+  public async confirmOrCorrect(
     bindingId: string,
     request: UpdateResourceBindingRequest,
     operatorIdentity: string,
   ): Promise<ConfirmResult> {
-    return this.#unitOfWork.run(async (stores) => {
+    const result = await this.#unitOfWork.run(async (stores) => {
       const binding = await stores.resourceBindings.getById(bindingId);
       if (binding === undefined) {
         throw new NotFoundError(`ResourceBinding ${bindingId} not found.`);
@@ -140,6 +172,19 @@ export class ResourceBindingService implements BindingConfirmer {
 
       return { binding: updated, capabilities: app.capabilities, appId: app.id };
     });
+
+    // SS-19 — after the confirm COMMITS, repair the links that predate a just-confirmed
+    // `recordAddressRef`. Deliberately out of the transaction (the sweep does network I/O)
+    // and only for the recordAddressRef ref path — a scope-binding or sourceScopeRef confirm
+    // strands no addresses. The trigger is total, so a repair failure never fails the confirm.
+    if (
+      this.#recordAddressRepair !== undefined &&
+      isRecordAddressRefConfirm(request) &&
+      isRecordAddressRefConfirmed(result.binding)
+    ) {
+      await this.#recordAddressRepair.onRecordAddressRefConfirmed(result.binding, result.appId);
+    }
+    return result;
   }
 
   /** Confirm/correct one operational ref (RB-2). */
