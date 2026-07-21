@@ -711,3 +711,121 @@ describe("validateComposition — consumer-input coverage (CO-5)", () => {
     expect(result).toStrictEqual({ ok: true });
   });
 });
+
+describe("validateComposition — disabled bindings at (re)composition (CO-6.2)", () => {
+  it("still requires a disabled binding to be ADDRESSED (it is not forgotten, just out of service)", () => {
+    // Two endpoint bindings, but only `b1` submitted — `b2` is neither active nor marked
+    // disabled → an unaddressed binding, exactly as for CO-2.
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [submitted("b1")],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(codesOf(result)).toContain("submission-binding-mismatch");
+  });
+
+  it("evaluates role validity over the ACTIVE set only — a disabled binding's role is never checked", () => {
+    // Under `single`, only `primary` is valid; `b2` carries an invalid `supplement` role but is
+    // DISABLED, so it is not served and its role is irrelevant.
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1"), submitted("b2", { role: "supplement", disabled: true })],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+
+  it("CO-6.5: a WRITE endpoint with a second binding DISABLED is single-active and accepted", () => {
+    // The write binding `b1` is the single active binding; `b2` is retained but disabled, so the
+    // active count is 1 — the recompose that takes the extra binding out of service is valid.
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1"), submitted("b2", { disabled: true })],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1", isWriteOperation: true }),
+        facts({ bindingId: "b2" }),
+      ],
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+
+  it("CO-6.5: two ACTIVE bindings on a write endpoint are still rejected (disabling neither)", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1"), submitted("b2")],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1", isWriteOperation: true }),
+        facts({ bindingId: "b2" }),
+      ],
+    });
+    expect(codesOf(result)).toContain("write-endpoint-not-single-active-binding");
+  });
+
+  it("counts only ACTIVE primaries for the fanout-merge structural minimum", () => {
+    // Two `primary` bindings would normally be rejected (two base objects); disabling one
+    // leaves exactly one active primary, so the composition is valid.
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { role: "primary" }),
+          submitted("b2", { role: "primary", disabled: true }),
+          submitted("b3", { role: "supplement" }),
+        ],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1" }),
+        facts({ bindingId: "b2" }),
+        facts({ bindingId: "b3" }),
+      ],
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+
+  it("rejects an active binding that depends on a DISABLED upstream (a chain that could never fill)", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { role: "primary" }),
+          submitted("up", { role: "supplement", disabled: true }),
+          submitted("dep", { role: "supplement", dependsOnBindingId: "up", executionOrder: 1 }),
+        ],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1" }),
+        facts({ bindingId: "up" }),
+        facts({ bindingId: "dep" }),
+      ],
+    });
+    expect(codesOf(result)).toContain("depends-on-unknown-binding");
+  });
+
+  it("CO-5: a required consumer input covered ONLY by a now-disabled binding becomes a blocking finding", () => {
+    // `todoId` is mapped only by `b2`; disabling `b2` means no ACTIVE backend receives it, so the
+    // required input reaches nowhere — a blocking coverage finding rather than silent ignoral.
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "collection-union",
+        bindings: [
+          submitted("b1", { role: "supplement" }),
+          submitted("b2", { role: "supplement", disabled: true }),
+        ],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1" }),
+        facts({ bindingId: "b2", mappedConsumerParamNames: new Set(["todoId"]) }),
+      ],
+      consumerInputs: { parameters: [{ name: "todoId", required: true }], bodyFields: [] },
+    });
+    expect(codesOf(result)).toContain("required-consumer-input-unmapped");
+  });
+});

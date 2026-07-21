@@ -15,6 +15,7 @@ export {
   type AdapterCompositionServiceDeps,
   type ComposeResult,
   type CompositionPreview,
+  type EndpointCacheInvalidator,
 } from "./service.js";
 export {
   ROLE_VALIDITY_BY_STRATEGY,

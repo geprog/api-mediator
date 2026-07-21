@@ -87,6 +87,16 @@ export interface SubmittedBindingComposition {
   readonly executionOrder?: number;
   readonly dependsOnBindingId?: string;
   readonly chainInputs?: readonly ChainInput[];
+  /**
+   * CO-6.2 — mark this binding **disabled** in a (re)composition. A disabled binding is
+   * still **addressed** (so the coverage check treats it as configured, not forgotten) but
+   * is **not** part of the served configuration: its row is retained `disabled` so a later
+   * recomposition can reactivate it, and every serving-semantics rule below is evaluated
+   * over the ACTIVE submitted bindings only. Absent/`false` = active. `compose` (first
+   * composition) never sets it, so for CO-2/CO-3 the active set equals the full submission
+   * and this flag is a pure no-op.
+   */
+  readonly disabled?: boolean;
 }
 
 /** The whole composition submission for one `composition-required` endpoint (CO-2.1). */
@@ -316,7 +326,8 @@ export function validateComposition(input: CompositionValidationInput): Composit
 
   // Coverage: the submission must configure exactly the endpoint's composable bindings —
   // no proposed binding left unaddressed (it would go live unconfigured), no id that is
-  // not a binding of this endpoint.
+  // not a binding of this endpoint. A binding marked `disabled` still counts as addressed
+  // (it is configured, just out of service), so it is part of `submittedById` above.
   const missingBindingIds = [...endpointBindingIds].filter((id) => !submittedById.has(id));
   const unknownBindingIds = [...submittedById.keys()].filter((id) => !endpointBindingIds.has(id));
   if (
@@ -332,10 +343,22 @@ export function validateComposition(input: CompositionValidationInput): Composit
     });
   }
 
+  // CO-6.2 — the ACTIVE served set. A `disabled` binding is addressed (checked above) but
+  // never served, so every serving-semantics rule below (role validity, chaining, order,
+  // required-parameter composability, write single-active, CO-5 coverage) is evaluated over
+  // these only. `compose` sets no `disabled` flag → the active set equals the full
+  // submission and all of the following is byte-for-byte the pre-CO-6 CO-2/CO-3 behavior.
+  const activeSubmitted = submission.bindings.filter((binding) => binding.disabled !== true);
+  const activeBindingIds = new Set(activeSubmitted.map((binding) => binding.bindingId));
+  const activeSubmittedById = new Map(
+    activeSubmitted.map((binding) => [binding.bindingId, binding] as const),
+  );
+  const activeBindingFacts = bindingFacts.filter((facts) => activeBindingIds.has(facts.bindingId));
+
   const validRoles = ROLE_VALIDITY_BY_STRATEGY[strategy];
   const validRoleSet = new Set(validRoles);
 
-  for (const submitted of submission.bindings) {
+  for (const submitted of activeSubmitted) {
     // CO-2.2 — the role-validity table: reject a role outside this strategy's set.
     if (!validRoleSet.has(submitted.role)) {
       reasons.push({
@@ -347,8 +370,11 @@ export function validateComposition(input: CompositionValidationInput): Composit
       });
     }
 
-    // CO-2.3 — dependsOnBindingId: only under fanout-merge, only another binding of the
-    // same endpoint. (The acyclic check runs once over the whole graph below.)
+    // CO-2.3 — dependsOnBindingId: only under fanout-merge, only another ACTIVE binding of
+    // the same endpoint. (The acyclic check runs once over the active graph below.) A
+    // dependency on a `disabled` binding is treated as unknown: it would never run, so a
+    // chained active binding pointing at it could never be filled (CO-6.2 keeps a broken
+    // chain from activating).
     if (submitted.dependsOnBindingId !== undefined) {
       if (strategy !== CHAINING_STRATEGY) {
         reasons.push({
@@ -358,7 +384,7 @@ export function validateComposition(input: CompositionValidationInput): Composit
         });
       } else if (submitted.dependsOnBindingId === submitted.bindingId) {
         reasons.push({ code: "depends-on-self", bindingId: submitted.bindingId });
-      } else if (!endpointBindingIds.has(submitted.dependsOnBindingId)) {
+      } else if (!activeBindingIds.has(submitted.dependsOnBindingId)) {
         reasons.push({
           code: "depends-on-unknown-binding",
           bindingId: submitted.bindingId,
@@ -376,6 +402,7 @@ export function validateComposition(input: CompositionValidationInput): Composit
       reasons.push({ code: "chain-inputs-without-dependency", bindingId: submitted.bindingId });
     }
   }
+  // From here on `submitted` iterations are over the ACTIVE served set (CO-6.2).
 
   // CO-2.2 structural minimum — `fanout-merge` needs exactly ONE `primary`: the primary
   // supplies the base object the `supplement`s contribute fields to
@@ -387,16 +414,16 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // is all equivalent supplements, and an all-`fallback` first-success chain is still the
   // well-defined "try in strict order, take the first success".)
   if (strategy === CHAINING_STRATEGY) {
-    const primaryCount = submission.bindings.filter((binding) => binding.role === "primary").length;
+    const primaryCount = activeSubmitted.filter((binding) => binding.role === "primary").length;
     if (primaryCount !== 1) {
       reasons.push({ code: "fanout-merge-primary-count", primaryCount });
     }
   }
 
   // CO-2.3 — acyclic: chaining is only valid under fanout-merge, so a cycle is only
-  // possible (and only worth detecting) there. Detect over the well-formed edges.
+  // possible (and only worth detecting) there. Detect over the well-formed ACTIVE edges.
   if (strategy === CHAINING_STRATEGY) {
-    reasons.push(...detectDependencyCycles(submission.bindings, endpointBindingIds));
+    reasons.push(...detectDependencyCycles(activeSubmitted, activeBindingIds));
   }
 
   // CO-2.3 — relative order: a chained binding may never be ordered STRICTLY BEFORE the
@@ -408,12 +435,12 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // runtime awaits the upstream). Only well-formed edges are checked; a self/unknown edge is
   // reported by its own reason above, not compounded here.
   if (strategy === CHAINING_STRATEGY) {
-    for (const submitted of submission.bindings) {
+    for (const submitted of activeSubmitted) {
       const upstreamId = submitted.dependsOnBindingId;
       if (upstreamId === undefined || upstreamId === submitted.bindingId) {
         continue;
       }
-      const upstream = submittedById.get(upstreamId);
+      const upstream = activeSubmittedById.get(upstreamId);
       if (upstream === undefined) {
         continue;
       }
@@ -435,7 +462,7 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // rejected). Group by the effective order value; any value shared by ≥2 bindings ties.
   if (strategy === "fanout-first-success") {
     const bindingIdsByOrder = new Map<number, string[]>();
-    for (const submitted of submission.bindings) {
+    for (const submitted of activeSubmitted) {
       const order = resolveExecutionOrder(submitted);
       const group = bindingIdsByOrder.get(order) ?? [];
       group.push(submitted.bindingId);
@@ -455,14 +482,15 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // CO-2.5 — chainInputs validity: each upstreamFieldPath must be a field the upstream
   // binding's consumer-shape response provides; each targetParamRef a real parameter of
   // this binding's backend operation.
-  for (const submitted of submission.bindings) {
+  for (const submitted of activeSubmitted) {
     const chainInputs = submitted.chainInputs;
     if (chainInputs === undefined || chainInputs.length === 0) {
       continue;
     }
     const thisFacts = factsById.get(submitted.bindingId);
     const upstreamFacts =
-      submitted.dependsOnBindingId === undefined
+      submitted.dependsOnBindingId === undefined ||
+      !activeBindingIds.has(submitted.dependsOnBindingId)
         ? undefined
         : factsById.get(submitted.dependsOnBindingId);
     for (const chainInput of chainInputs) {
@@ -494,7 +522,7 @@ export function validateComposition(input: CompositionValidationInput): Composit
 
   // CO-2.6 — a required backend parameter with no ParameterMapping and no chainInput is
   // not composable: reject with the parameter named (the loud, composition-time TE-1.3).
-  for (const submitted of submission.bindings) {
+  for (const submitted of activeSubmitted) {
     const thisFacts = factsById.get(submitted.bindingId);
     if (thisFacts === undefined) {
       continue;
@@ -515,18 +543,19 @@ export function validateComposition(input: CompositionValidationInput): Composit
     }
   }
 
-  // CO-2.7 — a write endpoint is always `single` with exactly one active binding (WR-1).
-  // CO-2 activates every submitted (proposed/active) binding, so the active count is the
-  // number of submitted bindings.
-  const isWriteEndpoint = bindingFacts.some((facts) => facts.isWriteOperation);
+  // CO-2.7 / CO-6.5 — a write endpoint is always `single` with exactly one active binding
+  // (WR-1). The activation sets every ACTIVE submitted binding `active` and every disabled
+  // one `disabled`, so the active count is the number of active-submitted bindings — a
+  // recompose that would leave a write endpoint with >1 active binding is rejected here.
+  const isWriteEndpoint = activeBindingFacts.some((facts) => facts.isWriteOperation);
   if (isWriteEndpoint) {
     if (strategy !== "single") {
       reasons.push({ code: "write-endpoint-not-single", strategy });
     }
-    if (submission.bindings.length !== 1) {
+    if (activeSubmitted.length !== 1) {
       reasons.push({
         code: "write-endpoint-not-single-active-binding",
-        activeBindingCount: submission.bindings.length,
+        activeBindingCount: activeSubmitted.length,
       });
     }
   }
@@ -538,7 +567,10 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // so a composer cannot acknowledge a mapped or unknown input into silence.
   const coverage = deriveConsumerInputCoverage({
     consumerInputs: input.consumerInputs,
-    bindings: bindingFacts.map((facts) => ({
+    // CO-6.2 — coverage is over the ACTIVE served bindings: a consumer input only a
+    // disabled binding maps reaches no live backend, so disabling the last binding that
+    // covers a required input is a blocking finding rather than a silently-honored input.
+    bindings: activeBindingFacts.map((facts) => ({
       bindingId: facts.bindingId,
       mappedConsumerParamNames: facts.mappedConsumerParamNames,
       mappedConsumerBodyFieldNames: facts.mappedConsumerBodyFieldNames,
@@ -586,7 +618,12 @@ export function validateComposition(input: CompositionValidationInput): Composit
           ? { postMergePagination: submission.postMergePagination }
           : {}),
       },
-      unionBindingFacts: input.unionBindingFacts ?? [],
+      // CO-6.2 — only the ACTIVE contributing resources form the union; a `disabled`
+      // binding is not a contributor, so its resource's ref-confirmation and pushdown
+      // eligibility must not gate the union.
+      unionBindingFacts: (input.unionBindingFacts ?? []).filter((facts) =>
+        activeBindingIds.has(facts.bindingId),
+      ),
       consumerParameters: input.consumerParameters ?? [],
       consumerResponseFieldNames: input.consumerResponseFieldNames ?? new Set<string>(),
     }),

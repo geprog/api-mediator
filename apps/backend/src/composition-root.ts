@@ -18,7 +18,10 @@ import { getActiveTraceContext, shutdownTelemetry } from "@mediator/telemetry";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { pino } from "pino";
 
-import { AdapterCompositionService } from "./modules/adapter-composition/index.js";
+import {
+  AdapterCompositionService,
+  type EndpointCacheInvalidator,
+} from "./modules/adapter-composition/index.js";
 import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
 import {
@@ -68,6 +71,14 @@ export interface ServerDependencies {
    * root builds the sync background around `buildServer` and owns its start/stop loops.
    */
   readonly sync?: SyncOperatorEngine;
+  /**
+   * CH-5 — the shared by-endpoint cache-invalidation seam the Adapter Server Runtime serves
+   * from. Threaded in so {@link AdapterCompositionService} (CO-6) drops the very cache the
+   * runtime reads, over the SAME instance the write/sync invalidation uses (CH-5.6). Optional:
+   * a server built without the adapter runtime (a Phase-1..3 integration test) simply passes
+   * none, and composition operations then invalidate nothing.
+   */
+  readonly cacheInvalidator?: EndpointCacheInvalidator;
 }
 
 export interface RunningServer {
@@ -197,9 +208,15 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       db,
       rotationOverlapMs: config.adapterAuth.rotationOverlapMs,
     }),
-    // Phase-5 endpoint composition (CO-2): validate + atomically activate a
-    // composition-required endpoint, attributing each activation (OA-3).
-    adapterComposition: new AdapterCompositionService({ db, newId: randomUUID }),
+    // Phase-5 endpoint composition (CO-2/CO-6): validate + atomically activate a
+    // composition-required endpoint, recompose/enable/disable a live one, attributing each
+    // action (OA-3). The shared cache invalidator (present with the adapter runtime) is wired
+    // in so every committed CO-6 change drops the endpoint's cached entries (CH-5).
+    adapterComposition: new AdapterCompositionService({
+      db,
+      newId: randomUUID,
+      ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
+    }),
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.

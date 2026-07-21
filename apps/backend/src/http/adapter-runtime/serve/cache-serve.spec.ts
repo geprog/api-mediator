@@ -485,8 +485,12 @@ function buildHandler(opts: HandlerOpts): AdapterServeHandler {
 /** Records every `(backendAppId, resourceRef)` the write path invalidates through the seam. */
 class SpyCacheInvalidator implements CacheInvalidator {
   public readonly calls: { backendAppId: string; resourceRef: string }[] = [];
+  public readonly endpointCalls: string[] = [];
   public invalidateBackendResource(backendAppId: string, resourceRef: string): void {
     this.calls.push({ backendAppId, resourceRef });
+  }
+  public invalidateEndpoint(endpointId: string): void {
+    this.endpointCalls.push(endpointId);
   }
 }
 

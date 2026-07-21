@@ -54,7 +54,22 @@ const db = createDb(config.database.url, (error) => {
 // before the server closes its db pool.
 const sync = buildSyncBackground({ config, db, logger });
 
-const { app, shutdown: shutdownServer } = buildServer({ config, db, logger, sync });
+// CH-3/CH-4/CH-5 — the ONE shared in-process response cache and the single coarse-invalidation
+// seam over it. Built BEFORE `buildServer` so the operator API's composition service (CO-6) and
+// the Adapter Server Runtime below share the exact same instance: an operator's recompose/
+// disable drops the very cache the runtime serves from, over one mechanism (CH-5.6). The serve
+// handler serves reads from and (on a successful write) invalidates this cache; the `SyncEvent`
+// consumer and the composition service invalidate the same one.
+const adapterResponseCache = new InProcessResponseCache();
+const adapterCacheInvalidator = new ResponseCacheInvalidator(adapterResponseCache);
+
+const { app, shutdown: shutdownServer } = buildServer({
+  config,
+  db,
+  logger,
+  sync,
+  cacheInvalidator: adapterCacheInvalidator,
+});
 
 // The Phase-5 Adapter Server Runtime (RT-1..RT-5): a SECOND Fastify listener, on its
 // own config-defined port, in the same process over the same db. It hosts each active
@@ -81,11 +96,8 @@ const adapterTokenValidator = buildAdapterTokenValidator({
 // One shared AdapterTelemetry so the serve handler's response-cache hit/miss counters
 // (CH-1.5) and the runtime's request metrics land on the same meter.
 const adapterTelemetry = new AdapterTelemetry();
-// CH-3/CH-4 — the ONE shared in-process response cache and the single coarse-invalidation
-// seam over it: the serve handler serves reads from and (on a successful write) invalidates
-// this exact cache, and the `SyncEvent` consumer registered below invalidates the same one.
-const adapterResponseCache = new InProcessResponseCache();
-const adapterCacheInvalidator = new ResponseCacheInvalidator(adapterResponseCache);
+// The shared response cache + invalidation seam are constructed above (before `buildServer`)
+// so the operator-API composition service and this serve handler share one instance.
 const adapterServeHandler = buildAdapterServeHandler({
   db,
   logger,
