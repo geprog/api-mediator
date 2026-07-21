@@ -1,3 +1,4 @@
+import type { ServeRejectionReason } from "@mediator/adapter-engine";
 import type { AdapterRequestCause, AuditLogStatus } from "@mediator/domain";
 
 /**
@@ -11,11 +12,13 @@ import type { AdapterRequestCause, AuditLogStatus } from "@mediator/domain";
 /**
  * The machine-readable cause token carried in the response body **and** the
  * {@link CAUSE_HEADER} header (RT-3.5) — a stable identifier independent of the
- * chosen HTTP status. The seven taxonomy causes plus `serving-not-implemented`,
- * this RT slice's placeholder for a `serve` outcome whose Resolution Planner (RP)
- * is not built yet; that placeholder disappears when RP wires a `ServeHandler`.
+ * chosen HTTP status. The seven taxonomy causes, plus `serving-not-implemented`
+ * (the RT-slice placeholder for a `serve` outcome with no `ServeHandler` wired),
+ * plus the two RP-2 client-rejection reasons — every token distinct so a caller can
+ * tell "fix your request" / "finish composition" / a serving cause apart (RP-2.6,
+ * RP-5.1).
  */
-export type CauseToken = AdapterRequestCause | "serving-not-implemented";
+export type CauseToken = AdapterRequestCause | "serving-not-implemented" | ServeRejectionReason;
 
 /** Response header carrying the {@link CauseToken} (RT-3.5, machine-readable cause). */
 export const CAUSE_HEADER = "x-mediator-cause";
@@ -53,6 +56,16 @@ export type AdapterResult =
       readonly kind: "serving-not-implemented";
       readonly endpointId: string;
       readonly bindingId: string | undefined;
+    }
+  | {
+      /**
+       * RP-2: the inbound request failed the consumer's own contract — a client
+       * error, distinct from every serving cause, answered before any backend ran.
+       */
+      readonly kind: "request-rejected";
+      readonly endpointId: string;
+      readonly reason: ServeRejectionReason;
+      readonly detail: string;
     };
 
 /** The rendered HTTP response for an {@link AdapterResult}. */
@@ -81,6 +94,10 @@ function messageFor(cause: CauseToken): string {
       return "A backend app failed to serve this request.";
     case "serving-not-implemented":
       return "This operation is mapped, but the adapter serving pipeline is not implemented yet.";
+    case "invalid-request":
+      return "The request is invalid against the consumer operation's own contract.";
+    case "unmapped-consumer-input":
+      return "The request uses a consumer input that has no configured mapping here.";
   }
 }
 
@@ -115,6 +132,14 @@ export function renderHttpResponse(result: AdapterResult): HttpResponse {
       return causeResponse(503, "endpoint-disabled");
     case "serving-not-implemented":
       return causeResponse(501, "serving-not-implemented");
+    case "request-rejected":
+      // A client-contract violation (RP-2) → 400, its distinct reason token in both
+      // the header and body; the detail note is payload-free (names only).
+      return {
+        status: 400,
+        headers: { [CAUSE_HEADER]: result.reason },
+        body: { cause: result.reason, message: result.detail },
+      };
     case "serve-failed":
       return causeResponse(statusForCause(result.cause), result.cause);
     case "served": {
@@ -143,6 +168,8 @@ export function causeTokenOf(result: AdapterResult): CauseToken | undefined {
       return "endpoint-disabled";
     case "serving-not-implemented":
       return "serving-not-implemented";
+    case "request-rejected":
+      return result.reason;
     case "serve-failed":
       return result.cause;
     case "served":
@@ -205,6 +232,14 @@ export function auditFieldsFor(result: AdapterResult): AdapterAuditFields {
         endpointId: result.endpointId,
         ...(result.bindingId !== undefined ? { bindingId: result.bindingId } : {}),
         details: "serving-not-implemented (RT slice; Resolution Planner is RP)",
+      };
+    case "request-rejected":
+      // A client-contract rejection carries no taxonomy `cause` (none of the seven
+      // applies) — only a payload-free details note pairing the reason + detail.
+      return {
+        status: "failure",
+        endpointId: result.endpointId,
+        details: `request-rejected: ${result.reason} — ${result.detail}`,
       };
   }
 }

@@ -63,6 +63,21 @@ describe("renderHttpResponse — status + machine-readable cause token (RT-3.5)"
     }
   });
 
+  it("request-rejected → 400 with the RP-2 reason token in header + body (client error, distinct)", () => {
+    const response = renderHttpResponse({
+      kind: "request-rejected",
+      endpointId: "e1",
+      reason: "unmapped-consumer-input",
+      detail: "consumer parameter 'assignee' has no configured mapping to a backend",
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers[CAUSE_HEADER]).toBe("unmapped-consumer-input");
+    expect(response.body).toMatchObject({
+      cause: "unmapped-consumer-input",
+      message: "consumer parameter 'assignee' has no configured mapping to a backend",
+    });
+  });
+
   it("served → 200 with the body and degradation/provenance out-of-band in headers (never the body)", () => {
     const response = renderHttpResponse({
       kind: "served",
@@ -141,6 +156,19 @@ describe("auditFieldsFor — metadata only (RT-5)", () => {
         contributingBackendAppIds: [],
       }),
     ).toEqual({ status: "success", endpointId: "e1", bindingId: "b1", degraded: true });
+  });
+
+  it("request-rejected → failure with a details note and NO taxonomy cause (RP-2 client error)", () => {
+    const fields = auditFieldsFor({
+      kind: "request-rejected",
+      endpointId: "e1",
+      reason: "invalid-request",
+      detail: "missing required path parameter 'todoId'",
+    });
+    expect(fields.status).toBe("failure");
+    expect(fields.cause).toBeUndefined();
+    expect(fields.endpointId).toBe("e1");
+    expect(fields.details).toContain("invalid-request");
   });
 
   it("serving-not-implemented → failure with a details note and NO taxonomy cause", () => {

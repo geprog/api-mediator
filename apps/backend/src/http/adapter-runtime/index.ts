@@ -26,6 +26,10 @@ export {
   type AdapterTokenValidator,
 } from "./token-consumer-app-resolver.js";
 export { DbAdapterStore } from "./db-adapter-store.js";
+export {
+  buildAdapterServeHandler,
+  type BuildAdapterServeHandlerDeps,
+} from "./serve/build-serve-handler.js";
 export { RestProtocolServer } from "./rest-protocol-server.js";
 export { deriveRestRoutes, matchRoute, type RestRoute, type RouteMatch } from "./rest-routes.js";
 export {

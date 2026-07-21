@@ -24,6 +24,11 @@
 export { operationKey, deriveMountedOperations, type MountedOperation } from "./operation-key.js";
 export { type AdapterRequest } from "./request.js";
 export { resolveRequest, type EndpointState, type ResolutionOutcome } from "./resolution.js";
-export { type ServeHandler, type ServeInput, type ServeOutcome } from "./serve.js";
+export {
+  type ServeHandler,
+  type ServeInput,
+  type ServeOutcome,
+  type ServeRejectionReason,
+} from "./serve.js";
 export { type AdapterStore, type ProtocolServer, type MountedConsumerApp } from "./ports.js";
 export { MountManager, type MountManagerDeps } from "./mount-manager.js";
