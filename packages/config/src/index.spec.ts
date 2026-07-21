@@ -70,6 +70,7 @@ describe("loadConfig", () => {
 
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.http)).toBe(true);
+    expect(Object.isFrozen(config.adapterHttp)).toBe(true);
     expect(Object.isFrozen(config.database)).toBe(true);
     expect(Object.isFrozen(config.telemetry)).toBe(true);
     expect(Object.isFrozen(config.mappingLlm)).toBe(true);
@@ -174,6 +175,37 @@ describe("loadConfig", () => {
       expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "3333.5" })).toThrow(/HTTP_PORT/);
       expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "0" })).toThrow(/HTTP_PORT/);
       expect(() => loadConfig({ ...baseEnv(), HTTP_PORT: "70000" })).toThrow(/HTTP_PORT/);
+    });
+  });
+
+  describe("ADAPTER_HTTP_PORT (Phase-5 RT-1)", () => {
+    it("defaults to 3334 when ADAPTER_HTTP_PORT is absent", () => {
+      const env = baseEnv();
+      delete env.ADAPTER_HTTP_PORT;
+
+      expect(loadConfig(env).adapterHttp).toEqual({ port: 3334 });
+    });
+
+    it("is a separate listener from the operator port", () => {
+      const config = loadConfig({ ...baseEnv(), HTTP_PORT: "3333", ADAPTER_HTTP_PORT: "13900" });
+      expect(config.http.port).toBe(3333);
+      expect(config.adapterHttp.port).toBe(13900);
+    });
+
+    it("coerces a provided ADAPTER_HTTP_PORT from its string value", () => {
+      expect(loadConfig({ ...baseEnv(), ADAPTER_HTTP_PORT: "13900" }).adapterHttp.port).toBe(13900);
+    });
+
+    it("rejects a non-integer or out-of-range ADAPTER_HTTP_PORT", () => {
+      expect(() => loadConfig({ ...baseEnv(), ADAPTER_HTTP_PORT: "3334.5" })).toThrow(
+        /ADAPTER_HTTP_PORT/,
+      );
+      expect(() => loadConfig({ ...baseEnv(), ADAPTER_HTTP_PORT: "0" })).toThrow(
+        /ADAPTER_HTTP_PORT/,
+      );
+      expect(() => loadConfig({ ...baseEnv(), ADAPTER_HTTP_PORT: "70000" })).toThrow(
+        /ADAPTER_HTTP_PORT/,
+      );
     });
   });
 

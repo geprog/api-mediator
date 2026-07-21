@@ -56,6 +56,9 @@ importers:
 
   apps/backend:
     dependencies:
+      '@mediator/adapter-engine':
+        specifier: workspace:*
+        version: link:../../packages/adapter-engine
       '@mediator/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -224,6 +227,19 @@ importers:
       tsx:
         specifier: 4.23.0
         version: 4.23.0
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(happy-dom@20.10.6)(vite@8.1.4(@types/node@24.13.3)(esbuild@0.28.1)(tsx@4.23.0)(yaml@2.9.0))
+
+  packages/adapter-engine:
+    dependencies:
+      '@mediator/domain':
+        specifier: workspace:*
+        version: link:../domain
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
       vitest:
         specifier: 4.1.10
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.10)(happy-dom@20.10.6)(vite@8.1.4(@types/node@24.13.3)(esbuild@0.28.1)(tsx@4.23.0)(yaml@2.9.0))

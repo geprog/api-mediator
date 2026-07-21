@@ -227,6 +227,22 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
     return rows.map(mapAdapterBindingRow);
   }
 
+  /**
+   * The `AdapterBinding`s of one `AdapterEndpoint`, in any status. The Adapter
+   * Server Runtime's Resolution Planner (Phase-5 RT-3) reads these to decide
+   * whether an endpoint has an `active` serving configuration or still answers
+   * `not-yet-mapped` — an endpoint row existing is not, by itself, a served
+   * endpoint (`docs/architecture/adapter-engine.md` *Binding: decided at
+   * composition time*).
+   */
+  public async listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]> {
+    const rows = await this.db
+      .select()
+      .from(adapterBinding)
+      .where(eq(adapterBinding.adapterEndpointId, adapterEndpointId));
+    return rows.map(mapAdapterBindingRow);
+  }
+
   /** The `GraphEdge` for a node pair + type, if one exists. */
   public async getGraphEdge(
     sourceNodeId: string,

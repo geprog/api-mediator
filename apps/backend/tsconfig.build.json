@@ -8,6 +8,7 @@
   "include": ["src"],
   "exclude": ["**/*.spec.ts", "**/*.testkit.ts"],
   "references": [
+    { "path": "../../packages/adapter-engine/tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/credentials/tsconfig.build.json" },
