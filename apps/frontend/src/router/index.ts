@@ -1,6 +1,10 @@
 import { createRouter, createWebHistory, type Router, type RouteRecordRaw } from "vue-router";
 
 import { useAuthStore } from "../stores/auth.js";
+import AdapterEndpointsView from "../views/AdapterEndpointsView.vue";
+import AdapterEndpointView from "../views/AdapterEndpointView.vue";
+import AdapterHealthView from "../views/AdapterHealthView.vue";
+import AdapterTokenView from "../views/AdapterTokenView.vue";
 import AppDetailView from "../views/AppDetailView.vue";
 import AppListView from "../views/AppListView.vue";
 import ConflictResolutionView from "../views/ConflictResolutionView.vue";
@@ -47,6 +51,18 @@ const routes: readonly RouteRecordRaw[] = [
   },
   { path: "/sync/conflicts", name: "sync-conflicts", component: ConflictResolutionView },
   { path: "/sync/dead-letter", name: "sync-dead-letter", component: ParkedWritesView },
+  { path: "/adapter", name: "adapter-endpoints", component: AdapterEndpointsView },
+  {
+    path: "/adapter/endpoints/:id",
+    name: "adapter-endpoint",
+    component: AdapterEndpointView,
+  },
+  {
+    path: "/adapter/apps/:appId/token",
+    name: "adapter-token",
+    component: AdapterTokenView,
+  },
+  { path: "/adapter/health", name: "adapter-health", component: AdapterHealthView },
   { path: "/status", name: "status", component: HealthView },
 ];
 
