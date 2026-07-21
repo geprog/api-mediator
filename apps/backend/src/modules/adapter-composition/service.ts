@@ -18,6 +18,7 @@ import {
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
 import { BadRequestError, ConflictError, NotFoundError } from "../../app-errors.js";
+import { GraphProjection } from "../graph/index.js";
 import { adoptionFlagsCompositionRequired, reconstructSubmissionFromContext } from "./adopt.js";
 import {
   analyzeSupplementLoadBearing,
@@ -98,6 +99,16 @@ export interface AdapterCompositionServiceDeps {
    * built without it (a Phase-1..3 test, a pure unit test) simply invalidates nothing.
    */
   readonly cacheInvalidator?: EndpointCacheInvalidator;
+  /**
+   * GR-3.2/GR-3.4 — the incremental adapter-dependency graph projection. When present,
+   * a recompose, an endpoint enable/disable, or a successor adoption recomputes the
+   * affected `(consumer → backend)` `GraphEdge`(s) from the pair's current binding
+   * aggregate — the very recompute the two CO-6 `// TODO(Phase 6 graph)` markers said
+   * the ensure-exists upsert could not invoke. Recomputed **inside** the composition
+   * transaction so the projection commits atomically with the change it reflects.
+   * Optional: a service built without it (a Phase-1..5 test/harness) projects nothing.
+   */
+  readonly graphProjection?: GraphProjection;
 }
 
 /**
@@ -177,6 +188,7 @@ export class AdapterCompositionService {
   readonly #newId: () => string;
   readonly #readTraceContext: () => ActiveTraceContext | null;
   readonly #cacheInvalidator: EndpointCacheInvalidator;
+  readonly #graphProjection: GraphProjection | undefined;
 
   public constructor(deps: AdapterCompositionServiceDeps) {
     this.#db = deps.db;
@@ -190,6 +202,35 @@ export class AdapterCompositionService {
     // No injected invalidator → invalidate nothing (a service wired without the shared cache,
     // e.g. a pure unit test). The real composition root always injects the shared instance.
     this.#cacheInvalidator = deps.cacheInvalidator ?? { invalidateEndpoint: (): void => {} };
+    this.#graphProjection = deps.graphProjection;
+  }
+
+  /**
+   * **GR-3.2/GR-3.4 — recompute an endpoint's adapter-dependency edges inside the
+   * change's transaction.** One `AdapterEndpoint` can bind backends in several apps,
+   * and the `(consumer → backend)` edge aggregates a pair's bindings across **all** of
+   * the consumer's endpoints — so the recompute walks the endpoint's current backend
+   * apps (a `disabled` binding's row is retained, so its backend stays in the set) and
+   * recomputes one edge per `(consumerAppId → backendAppId)` from the pair's live
+   * binding aggregate. A no-op when the projection is not wired. Writes only
+   * `graph_edge` rows and no audit row (GR-3.6): the operator action is audited by its
+   * own story, not by this projection.
+   */
+  async #recomputeAdapterEdgesForEndpoint(
+    handle: DbHandle,
+    endpoint: AdapterEndpoint,
+  ): Promise<void> {
+    const projection = this.#graphProjection;
+    if (projection === undefined) {
+      return;
+    }
+    const bindings = await new DownstreamArtifactRepository(handle).listAdapterBindingsByEndpoint(
+      endpoint.id,
+    );
+    const backendAppIds = [...new Set(bindings.map((binding) => binding.backendAppId))];
+    for (const backendAppId of backendAppIds) {
+      await projection.recomputeAdapterEdgeWithin(handle, endpoint.consumerAppId, backendAppId);
+    }
   }
 
   /**
@@ -292,10 +333,12 @@ export class AdapterCompositionService {
       }
       const audit = new AuditLogRepository(txn);
       await audit.insert(this.#statusAttribution(actor, endpointId, targetStatus));
-      // TODO(Phase 6 graph): once the materialized adapter-dependency GraphEdge projection
-      // lands (docs place it in Phase 6), recompute this endpoint's edges here so a disabled
-      // endpoint no longer projects a live dependency. The ensure-exists upsert used at
-      // instantiation (CO-1) cannot remove an edge, so there is nothing to invoke cheaply now.
+      // GR-3.2 — recompute this endpoint's adapter-dependency edges in the same
+      // transaction. Disabling the endpoint disables every binding's effective serving
+      // state, so its `(consumer → backend)` edge no longer projects a live dependency;
+      // re-enabling restores it. (This resolves the CO-6 status-mutation TODO marker:
+      // GR-1's update/remove is exactly the recompute the ensure-exists upsert couldn't do.)
+      await this.#recomputeAdapterEdgesForEndpoint(txn, updated);
       return updated;
     });
     // CH-5.5 — drop on every commit (disable AND re-enable); always correctness-safe.
@@ -398,6 +441,11 @@ export class AdapterCompositionService {
           await artifacts.markAdapterEndpointCompositionRequired(endpointId);
           flaggedEndpointIds.push(endpointId);
         }
+        // GR-3.4 — adoption re-points a binding but preserves the dependency: recompute
+        // the endpoint's `(consumer → backend)` edge(s) so they stay present and reflect
+        // the successor (an `active` mapping now backs the bindings), rather than being
+        // torn down. Reads the endpoint's CURRENT (in-tx) binding + endpoint status.
+        await this.#recomputeAdapterEdgesForEndpoint(txn, context.endpoint);
       }
 
       const audit = new AuditLogRepository(txn);
@@ -542,10 +590,12 @@ export class AdapterCompositionService {
       }
       const audit = new AuditLogRepository(txn);
       await audit.insert(this.#compositionAttribution(actor, endpointId, submission, auditVerb));
-      // TODO(Phase 6 graph): recompute this endpoint's adapter-dependency GraphEdge(s) here
-      // once the materialized graph projection lands (docs place it in Phase 6). The CO-1
-      // ensure-exists upsert cannot remove/rewrite an edge, so a disabled-binding set has
-      // nothing to invoke cheaply now — the incremental projection is deferred, not built.
+      // GR-3.2 — recompute this endpoint's adapter-dependency GraphEdge(s) in the same
+      // transaction from the just-applied binding set. A recompose can activate a
+      // proposed binding or mark one `disabled` (CO-6.2); the edge's status is
+      // re-derived from that aggregate. This resolves the CO-6 recomposition TODO marker:
+      // GR-1's update/remove is exactly the recompute the ensure-exists upsert couldn't do.
+      await this.#recomputeAdapterEdgesForEndpoint(txn, applied.endpoint);
       return applied;
     });
 

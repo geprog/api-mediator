@@ -34,6 +34,7 @@ import {
 } from "./modules/approval/index.js";
 import { createDetectionMetricsSink } from "./modules/detection/telemetry.js";
 import { createMappingProvider } from "./modules/detection/provider.js";
+import { GraphProjection } from "./modules/graph/index.js";
 import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
@@ -143,6 +144,11 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
   const unitOfWork = new DbUnitOfWork(db, keyProvider, eventBus, credentialLogger);
   const specRegistry = new SpecRegistry();
   const specReader = new ApiSpecRepository(db);
+  // Phase-6 GR-2/GR-3 — the incremental materialized-graph reactor, shared by the sync
+  // operator (rule enable/disable → sync edge) and the adapter composition service
+  // (recompose/enable-disable/adopt → adapter-dependency edge), so both keep the
+  // landscape `GraphEdge` projection current from the same seam.
+  const graphProjection = new GraphProjection({ db, newId: randomUUID });
 
   // ── Phase-3 Review & Approval slice (RA-1..RA-5) ───────────────────────────
   // Kept in one clearly-scoped block to minimize conflict with the concurrent
@@ -216,6 +222,7 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     adapterComposition: new AdapterCompositionService({
       db,
       newId: randomUUID,
+      graphProjection,
       ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
     }),
     // Phase-5 adapter read surface (AP-1 state, AP-5 history + health): pooled, read-only,
@@ -227,7 +234,9 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.
-    ...(deps.sync !== undefined ? { sync: new SyncOperatorService({ db, sync: deps.sync }) } : {}),
+    ...(deps.sync !== undefined
+      ? { sync: new SyncOperatorService({ db, sync: deps.sync, graphProjection }) }
+      : {}),
     // TEST/DEV-ONLY: gate the deterministic poll-trigger route on the config flag
     // (default false — off in production/dev; only the SU-6 e2e sets it). `api.ts`
     // additionally requires the sync runtime, so the route is absent unless both hold.

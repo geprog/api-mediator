@@ -49,8 +49,10 @@ export {
 } from "./parked-conflict.js";
 export {
   DownstreamArtifactRepository,
+  type AdapterEdgeMemberFact,
   type DownstreamArtifactOps,
   type GraphEdgeStatusUpdate,
+  type SyncEdgeMemberFact,
 } from "./downstream-artifacts.js";
 export {
   AdapterCompositionRepository,

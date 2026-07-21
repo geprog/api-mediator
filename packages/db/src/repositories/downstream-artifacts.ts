@@ -1,6 +1,7 @@
 import type {
   AdapterBinding,
   AdapterEndpoint,
+  ApprovedMapping,
   GraphEdge,
   GraphEdgeMetadata,
   SyncRule,
@@ -41,6 +42,40 @@ export interface GraphEdgeStatusUpdate {
   readonly type: GraphEdge["type"];
   readonly status: string;
   readonly direction: GraphEdgeMetadata["direction"];
+}
+
+/**
+ * One member of a **sync** `GraphEdge`'s aggregate: a single `SyncRule` of the
+ * `(sourceApp → targetApp)` direction paired with its parent `ApprovedMapping`'s
+ * status and direction (`docs/requirements/phase-6-graph.md` GR-2.1/GR-2.2). The
+ * incremental sync-edge projection reduces the full set of these facts for a node
+ * pair to one edge `status` — a rule's *effective* health is a function of both its
+ * own `status` (enabled/disabled) and its mapping's `status` (a `stale`/`suspended`
+ * mapping pauses/stales its rules, SL-4/SL-10). `sourceSpecId`/`targetSpecId` are the
+ * aggregated mappings' shared direction, carried so the recompute can restate the
+ * edge's `metadata.direction` without a second query.
+ */
+export interface SyncEdgeMemberFact {
+  readonly ruleStatus: SyncRule["status"];
+  readonly mappingStatus: ApprovedMapping["status"];
+  readonly sourceSpecId: string;
+  readonly targetSpecId: string;
+}
+
+/**
+ * One member of an **adapter-dependency** `GraphEdge`'s aggregate: a single
+ * `AdapterBinding` of the `(consumerApp → backendApp)` pair paired with its parent
+ * `ApprovedMapping`'s status and direction (`docs/requirements/phase-6-graph.md`
+ * GR-3.1/GR-3.3). Same shape/role as {@link SyncEdgeMemberFact} for the adapter
+ * side: a binding's effective health is a function of its own `status`
+ * (active/proposed/disabled) and its mapping's `status`.
+ */
+export interface AdapterEdgeMemberFact {
+  readonly bindingStatus: AdapterBinding["status"];
+  readonly endpointStatus: AdapterEndpoint["status"];
+  readonly mappingStatus: ApprovedMapping["status"];
+  readonly sourceSpecId: string;
+  readonly targetSpecId: string;
 }
 
 /**
@@ -443,6 +478,86 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
       .from(adapterBinding)
       .where(eq(adapterBinding.adapterEndpointId, adapterEndpointId));
     return rows.map(mapAdapterBindingRow);
+  }
+
+  // ── Edge-aggregate readers (GR-2/GR-3 incremental projection) ──────────────
+
+  /**
+   * **GR-2.1/GR-2.2 — the sync edge's aggregate.** Every `SyncRule` whose parent
+   * peer-peer `ApprovedMapping` runs `sourceAppId → targetAppId`, joined to that
+   * mapping's `status` + direction. One row per rule of the direction — the exact
+   * set the sync-edge projection reduces to a single `status` (all mappings of the
+   * direction, in any lifecycle state, so a `stale`/`suspended` mapping's rules are
+   * seen and stale/pause the edge; the caller derives per-member effective health).
+   * An empty result means the `(pair, sync)` edge has no backing rules → the caller
+   * removes it (GR-2.5). Keyed by app ids, never by a rule/mapping id (GR-1.4).
+   */
+  public async readSyncEdgeMembers(
+    sourceAppId: string,
+    targetAppId: string,
+  ): Promise<SyncEdgeMemberFact[]> {
+    const rows = await this.db
+      .select({
+        ruleStatus: syncRule.status,
+        mappingStatus: approvedMapping.status,
+        sourceSpecId: approvedMapping.sourceSpecId,
+        targetSpecId: approvedMapping.targetSpecId,
+      })
+      .from(syncRule)
+      .innerJoin(approvedMapping, eq(syncRule.approvedMappingId, approvedMapping.id))
+      .where(
+        and(
+          eq(approvedMapping.sourceAppId, sourceAppId),
+          eq(approvedMapping.targetAppId, targetAppId),
+          eq(approvedMapping.variant, "peer-peer"),
+        ),
+      );
+    return rows.map((row) => ({
+      ruleStatus: row.ruleStatus,
+      mappingStatus: row.mappingStatus,
+      sourceSpecId: row.sourceSpecId,
+      targetSpecId: row.targetSpecId,
+    }));
+  }
+
+  /**
+   * **GR-3.1/GR-3.3 — the adapter-dependency edge's aggregate.** Every
+   * `AdapterBinding` whose endpoint's consumer is `consumerAppId` and whose
+   * `backendAppId` is `backendAppId`, joined to its `ApprovedMapping`'s `status` +
+   * direction — the full set of bindings the `(consumer → backend)` edge aggregates,
+   * across **all** of the consumer's adapter endpoints (a binding of any status is
+   * a member; a disabled binding still counts, it just contributes `paused`). An
+   * empty result means the edge has no backing bindings → the caller removes it
+   * (GR-3.5). Keyed by app ids, never by a binding/mapping id (GR-1.4).
+   */
+  public async readAdapterEdgeMembers(
+    consumerAppId: string,
+    backendAppId: string,
+  ): Promise<AdapterEdgeMemberFact[]> {
+    const rows = await this.db
+      .select({
+        bindingStatus: adapterBinding.status,
+        endpointStatus: adapterEndpoint.status,
+        mappingStatus: approvedMapping.status,
+        sourceSpecId: approvedMapping.sourceSpecId,
+        targetSpecId: approvedMapping.targetSpecId,
+      })
+      .from(adapterBinding)
+      .innerJoin(adapterEndpoint, eq(adapterBinding.adapterEndpointId, adapterEndpoint.id))
+      .innerJoin(approvedMapping, eq(adapterBinding.approvedMappingId, approvedMapping.id))
+      .where(
+        and(
+          eq(adapterEndpoint.consumerAppId, consumerAppId),
+          eq(adapterBinding.backendAppId, backendAppId),
+        ),
+      );
+    return rows.map((row) => ({
+      bindingStatus: row.bindingStatus,
+      endpointStatus: row.endpointStatus,
+      mappingStatus: row.mappingStatus,
+      sourceSpecId: row.sourceSpecId,
+      targetSpecId: row.targetSpecId,
+    }));
   }
 
   /** The `GraphEdge` for a node pair + type, if one exists. */
