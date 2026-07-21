@@ -30,16 +30,30 @@ export {
 } from "./credentials.js";
 
 export {
+  bindingInputCoverageDtoSchema,
+  composeAdapterEndpointPreviewResponseSchema,
   composeAdapterEndpointRequestSchema,
   composeAdapterEndpointResponseSchema,
   composeBindingRequestSchema,
   composedBindingDtoSchema,
   composedEndpointDtoSchema,
+  compositionValidationDtoSchema,
+  consumerInputCoverageDtoSchema,
+  supplementAnalysisEntryDtoSchema,
+  supplementLoadBearingAnalysisDtoSchema,
+  unmappedConsumerInputDtoSchema,
+  type BindingInputCoverageDto,
+  type ComposeAdapterEndpointPreviewResponse,
   type ComposeAdapterEndpointRequest,
   type ComposeAdapterEndpointResponse,
   type ComposeBindingRequest,
   type ComposedBindingDto,
   type ComposedEndpointDto,
+  type CompositionValidationDto,
+  type ConsumerInputCoverageDto,
+  type SupplementAnalysisEntryDto,
+  type SupplementLoadBearingAnalysisDto,
+  type UnmappedConsumerInputDto,
 } from "./adapter-endpoints.js";
 
 export {

@@ -4,7 +4,7 @@ import type {
   ServeInput,
   ServeOutcome,
 } from "@mediator/adapter-engine";
-import type { IrOperation } from "@mediator/domain";
+import type { AdapterEndpoint, IrOperation } from "@mediator/domain";
 
 import { aggregateSingle } from "./aggregator.js";
 import type { BackendCaller } from "./backend-call.js";
@@ -62,11 +62,15 @@ export class AdapterServeHandler implements ServeHandler {
     }
 
     // RP-2 — validate the inbound request against the consumer's own contract before
-    // any transform or backend call; a violation is a client rejection, never served.
+    // any transform or backend call; a violation is a client rejection, never served. A
+    // supplied-but-unmapped input the composer acknowledged-ignored (CO-5.4) is served
+    // with that input dropped, not rejected — the acknowledgement makes the drop
+    // non-silent; an unacknowledged unmapped input still rejects (RP-2.4).
     const inbound = validateInboundRequest(
       consumerOperation,
       input.request,
       collectMappedConsumerParams(context),
+      collectAcknowledgedIgnoredParams(input.endpoint),
     );
     if (!inbound.ok) {
       return { kind: "rejected", reason: inbound.reason, detail: inbound.detail };
@@ -233,6 +237,23 @@ function collectMappedConsumerParams(context: ServeContext): ReadonlySet<string>
   for (const loaded of context.bindings) {
     for (const name of mappedConsumerParamNames(loaded.parameterMappings)) {
       names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * The consumer **parameter** names the composer acknowledged as ignored on this endpoint
+ * (CO-5.4) — a supplied one is served with the value dropped rather than rejected.
+ * `body-field` acknowledgements are not consulted here: the request pipeline already
+ * drops an unmapped consumer body field via the request-phase transform, so a body-field
+ * acknowledgement is a composition-time record only, not an RP-2 parameter decision.
+ */
+function collectAcknowledgedIgnoredParams(endpoint: AdapterEndpoint): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const acknowledgement of endpoint.acknowledgedIgnoredInputs ?? []) {
+    if (acknowledgement.kind === "parameter") {
+      names.add(acknowledgement.consumerParamName);
     }
   }
   return names;

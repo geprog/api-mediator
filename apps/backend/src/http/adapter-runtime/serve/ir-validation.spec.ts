@@ -73,7 +73,7 @@ describe("validateInboundRequest — RP-2", () => {
   });
 
   it("rejects a missing required parameter as invalid-request", () => {
-    const result = validateInboundRequest(op, request(), new Set(["todoId"]));
+    const result = validateInboundRequest(op, request(), new Set(["todoId"]), new Set());
     expect(result).toEqual({
       ok: false,
       reason: "invalid-request",
@@ -86,6 +86,7 @@ describe("validateInboundRequest — RP-2", () => {
       op,
       request({ pathParameters: { todoId: "42" } }),
       new Set(["todoId"]),
+      new Set(),
     );
     expect(result).toEqual({ ok: true });
   });
@@ -101,6 +102,7 @@ describe("validateInboundRequest — RP-2", () => {
       filterOp,
       request({ pathParameters: { todoId: "42" }, query: { assignee: "sam" } }),
       new Set(["todoId"]),
+      new Set(),
     );
     expect(result).toEqual({
       ok: false,
@@ -109,11 +111,54 @@ describe("validateInboundRequest — RP-2", () => {
     });
   });
 
+  it("CO-5.4: an acknowledged-ignored unmapped parameter is served (dropped), not rejected", () => {
+    const filterOp = operation({
+      parameters: [
+        param({ name: "todoId", location: "path", required: true }),
+        param({ name: "assignee", location: "query" }),
+      ],
+    });
+    // `assignee` is supplied and mapped by no binding, but the composer acknowledged it —
+    // so it is served with the value dropped, not rejected as unmapped-consumer-input.
+    const result = validateInboundRequest(
+      filterOp,
+      request({ pathParameters: { todoId: "42" }, query: { assignee: "sam" } }),
+      new Set(["todoId"]),
+      new Set(["assignee"]),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("CO-5.4: acknowledging one unmapped parameter does not serve a different unmapped one", () => {
+    const filterOp = operation({
+      parameters: [
+        param({ name: "todoId", location: "path", required: true }),
+        param({ name: "assignee", location: "query" }),
+        param({ name: "label", location: "query" }),
+      ],
+    });
+    // `assignee` acknowledged, `label` not → `label` still rejects loud (RP-2.4).
+    const result = validateInboundRequest(
+      filterOp,
+      request({
+        pathParameters: { todoId: "42" },
+        query: { assignee: "sam", label: "urgent" },
+      }),
+      new Set(["todoId"]),
+      new Set(["assignee"]),
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason: "unmapped-consumer-input",
+      detail: "consumer parameter 'label' has no configured mapping to a backend",
+    });
+  });
+
   it("RP-2.5: an omitted optional mapped parameter is accepted (absence is not an error)", () => {
     const optionalOp = operation({
       parameters: [param({ name: "cursor", location: "query", required: false })],
     });
-    const result = validateInboundRequest(optionalOp, request(), new Set(["cursor"]));
+    const result = validateInboundRequest(optionalOp, request(), new Set(["cursor"]), new Set());
     expect(result).toEqual({ ok: true });
   });
 
@@ -126,8 +171,12 @@ describe("validateInboundRequest — RP-2", () => {
         fields: [{ name: "title", type: "string", required: true }],
       },
     });
-    expect(validateInboundRequest(writeOp, request({ body: {} }), new Set()).ok).toBe(false);
-    expect(validateInboundRequest(writeOp, request({ body: { title: "x" } }), new Set())).toEqual({
+    expect(validateInboundRequest(writeOp, request({ body: {} }), new Set(), new Set()).ok).toBe(
+      false,
+    );
+    expect(
+      validateInboundRequest(writeOp, request({ body: { title: "x" } }), new Set(), new Set()),
+    ).toEqual({
       ok: true,
     });
   });

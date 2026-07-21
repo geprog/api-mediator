@@ -14,11 +14,23 @@ import {
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
 import { BadRequestError, ConflictError, NotFoundError } from "../../app-errors.js";
-import { DbCompositionContextLoader, type CompositionContextLoader } from "./context.js";
+import {
+  analyzeSupplementLoadBearing,
+  deriveConsumerInputCoverage,
+  type ConsumerInputCoverage,
+  type SupplementAnalysisBinding,
+  type SupplementLoadBearingAnalysis,
+} from "./analysis.js";
+import {
+  DbCompositionContextLoader,
+  type CompositionContext,
+  type CompositionContextLoader,
+} from "./context.js";
 import {
   formatCompositionRejection,
   validateComposition,
   type CompositionSubmission,
+  type CompositionValidation,
 } from "./validate.js";
 
 /**
@@ -48,6 +60,26 @@ export interface AdapterCompositionServiceDeps {
 export interface ComposeResult {
   readonly endpoint: AdapterEndpoint;
   readonly bindings: readonly AdapterBinding[];
+}
+
+/**
+ * The **derived** composition analysis the composer sees **before** confirming (CO-4 +
+ * CO-5) — the "compose-preview". Nothing here is activated or persisted: it informs the
+ * decision (derive-then-confirm). The composer submits the *proposed* strategy/roles/
+ * acknowledgements and gets back:
+ *  - `supplementAnalysis` — per `supplement` of a `fanout-merge`, whether it is
+ *    load-bearing, plus that a `primary`'s failure always fails the request (CO-4);
+ *  - `coverage` — the consumer inputs reaching no backend, per binding and endpoint-wide
+ *    (CO-5.1);
+ *  - `validation` — whether the proposed composition would activate, including the
+ *    blocking required-unmapped-input findings (CO-5.3) and the acknowledge-or-reject
+ *    check, so the composer sees them before confirming.
+ */
+export interface CompositionPreview {
+  readonly endpointId: string;
+  readonly supplementAnalysis: SupplementLoadBearingAnalysis;
+  readonly coverage: ConsumerInputCoverage;
+  readonly validation: CompositionValidation;
 }
 
 export class AdapterCompositionService {
@@ -88,7 +120,11 @@ export class AdapterCompositionService {
       );
     }
 
-    const validation = validateComposition({ submission, bindingFacts: context.bindingFacts });
+    const validation = validateComposition({
+      submission,
+      bindingFacts: context.bindingFacts,
+      consumerInputs: context.consumerInputs,
+    });
     if (!validation.ok) {
       // Fail loud, before any transaction: nothing is activated and the endpoint keeps
       // serving its previous configuration (CO-2.8). Each reason names the offender.
@@ -115,6 +151,45 @@ export class AdapterCompositionService {
     });
 
     return { endpoint: result.endpoint, bindings: result.bindings };
+  }
+
+  /**
+   * **CO-4 + CO-5 preview** — derive the composition analysis the composer sees before
+   * confirming, for a *proposed* `submission` (strategy/roles/acknowledgements). Pure
+   * read: it loads the endpoint's context, derives the supplement load-bearing analysis
+   * and the consumer-input coverage, and runs the same validator `compose` will run — but
+   * activates and persists **nothing** (derive-then-confirm). Throws `NotFoundError` for
+   * an unknown endpoint.
+   */
+  public async previewComposition(
+    endpointId: string,
+    submission: CompositionSubmission,
+  ): Promise<CompositionPreview> {
+    const context = await this.#loader.load(endpointId);
+    if (context === undefined) {
+      throw new NotFoundError(`Adapter endpoint ${endpointId} not found.`);
+    }
+    return {
+      endpointId,
+      supplementAnalysis: analyzeSupplementLoadBearing({
+        aggregationStrategy: submission.aggregationStrategy,
+        bindings: supplementAnalysisBindings(context, submission),
+        requiredConsumerResponseFieldNames: context.requiredConsumerResponseFieldNames,
+      }),
+      coverage: deriveConsumerInputCoverage({
+        consumerInputs: context.consumerInputs,
+        bindings: context.bindingFacts.map((facts) => ({
+          bindingId: facts.bindingId,
+          mappedConsumerParamNames: facts.mappedConsumerParamNames,
+          mappedConsumerBodyFieldNames: facts.mappedConsumerBodyFieldNames,
+        })),
+      }),
+      validation: validateComposition({
+        submission,
+        bindingFacts: context.bindingFacts,
+        consumerInputs: context.consumerInputs,
+      }),
+    };
   }
 
   /**
@@ -145,6 +220,25 @@ export class AdapterCompositionService {
   }
 }
 
+/**
+ * The CO-4 per-binding input: each submitted binding's *proposed* role paired with the
+ * consumer response fields the loader derived it supplies (pair-scoped). A submitted
+ * binding with no matching facts (a mismatch the validator flags separately) contributes
+ * an empty supplied set rather than throwing — the preview stays a total read.
+ */
+function supplementAnalysisBindings(
+  context: CompositionContext,
+  submission: CompositionSubmission,
+): readonly SupplementAnalysisBinding[] {
+  const factsById = new Map(context.bindingFacts.map((facts) => [facts.bindingId, facts]));
+  return submission.bindings.map((binding) => ({
+    bindingId: binding.bindingId,
+    role: binding.role,
+    suppliedConsumerResponseFieldPaths:
+      factsById.get(binding.bindingId)?.consumerResponseFieldPaths ?? new Set<string>(),
+  }));
+}
+
 /** Map the validated submission to the repository's activation payload. */
 function toApplyCompositionInput(
   endpointId: string,
@@ -156,6 +250,13 @@ function toApplyCompositionInput(
       aggregationStrategy: submission.aggregationStrategy,
       strictness: submission.strictness,
       cacheTtl: submission.cacheTtl ?? null,
+      // CO-5.4 — persist the composer's acknowledged-ignored inputs so the runtime can
+      // serve an acknowledged input (dropped, non-silent) and reject an unacknowledged
+      // one (RP-2.4). Absent = `null` (no acknowledgements — the fail-loud default).
+      acknowledgedIgnoredInputs:
+        submission.acknowledgedIgnoredInputs === undefined
+          ? null
+          : [...submission.acknowledgedIgnoredInputs],
     },
     bindings: submission.bindings.map((binding) => ({
       bindingId: binding.bindingId,

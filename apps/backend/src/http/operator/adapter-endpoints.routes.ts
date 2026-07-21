@@ -1,15 +1,21 @@
 import {
+  composeAdapterEndpointPreviewResponseSchema,
   composeAdapterEndpointRequestSchema,
   composeAdapterEndpointResponseSchema,
+  type ComposeAdapterEndpointPreviewResponse,
   type ComposeAdapterEndpointRequest,
   type ComposeAdapterEndpointResponse,
+  type SupplementAnalysisEntryDto,
 } from "@mediator/contracts";
 import type { AdapterBinding, AdapterEndpoint } from "@mediator/domain";
 import type { FastifyInstance } from "fastify";
 
-import type {
-  AdapterCompositionService,
-  ComposeResult,
+import {
+  formatCompositionRejection,
+  type AdapterCompositionService,
+  type ComposeResult,
+  type CompositionPreview,
+  type SupplementAnalysisEntry,
 } from "../../modules/adapter-composition/index.js";
 import type { CompositionSubmission } from "../../modules/adapter-composition/index.js";
 import { getPrincipal, requireOperator } from "../auth/index.js";
@@ -44,6 +50,65 @@ export function registerAdapterEndpointRoutes(
       return composeAdapterEndpointResponseSchema.parse(toComposeResponse(result));
     },
   );
+
+  // CO-4 + CO-5 compose-preview — the derive-then-confirm read. It runs the same
+  // derivation and validation `compose` runs against the *proposed* submission but
+  // activates and persists NOTHING, so the composer sees the load-bearing supplement
+  // analysis, the consumer-input coverage, and the blocking findings before confirming.
+  app.post(
+    "/api/adapter-endpoints/:id/composition/preview",
+    { preHandler: requireOperator },
+    async (request): Promise<ComposeAdapterEndpointPreviewResponse> => {
+      const { id } = parseInput(idParamSchema, request.params, "path parameters");
+      const body = parseInput(
+        composeAdapterEndpointRequestSchema,
+        request.body,
+        "endpoint composition preview",
+      );
+      const preview = await composition.previewComposition(id, toCompositionSubmission(body));
+      return composeAdapterEndpointPreviewResponseSchema.parse(toPreviewResponse(preview));
+    },
+  );
+}
+
+/** One CO-4 verdict → its DTO; readonly supplied-fields becomes a mutable array for the schema. */
+function toSupplementAnalysisEntryDto(entry: SupplementAnalysisEntry): SupplementAnalysisEntryDto {
+  return entry.kind === "supplement"
+    ? {
+        kind: "supplement",
+        bindingId: entry.bindingId,
+        suppliedConsumerResponseFields: [...entry.suppliedConsumerResponseFields],
+        allSuppliedFieldsOptional: entry.allSuppliedFieldsOptional,
+        loadBearing: entry.loadBearing,
+      }
+    : { kind: "primary-always-fails", bindingId: entry.bindingId, role: entry.role };
+}
+
+/** Map the derived composition preview to its response DTO (CO-4 + CO-5). */
+function toPreviewResponse(preview: CompositionPreview): ComposeAdapterEndpointPreviewResponse {
+  return {
+    endpointId: preview.endpointId,
+    supplementAnalysis: preview.supplementAnalysis.applicable
+      ? {
+          applicable: true,
+          entries: preview.supplementAnalysis.entries.map(toSupplementAnalysisEntryDto),
+        }
+      : {
+          applicable: false,
+          aggregationStrategy: preview.supplementAnalysis.aggregationStrategy,
+        },
+    coverage: {
+      perBinding: preview.coverage.perBinding.map((binding) => ({
+        bindingId: binding.bindingId,
+        unmappedParameters: [...binding.unmappedParameters],
+        unmappedBodyFields: [...binding.unmappedBodyFields],
+      })),
+      unmappedByAllBackends: preview.coverage.unmappedByAllBackends.map((input) => ({ ...input })),
+    },
+    validation: preview.validation.ok
+      ? { ok: true }
+      : { ok: false, issues: preview.validation.reasons.map(formatCompositionRejection) },
+  };
 }
 
 /**
@@ -57,6 +122,9 @@ function toCompositionSubmission(body: ComposeAdapterEndpointRequest): Compositi
     aggregationStrategy: body.aggregationStrategy,
     strictness: body.strictness,
     ...(body.cacheTtl !== undefined ? { cacheTtl: body.cacheTtl } : {}),
+    ...(body.acknowledgedIgnoredInputs !== undefined
+      ? { acknowledgedIgnoredInputs: body.acknowledgedIgnoredInputs }
+      : {}),
     bindings: body.bindings.map((binding) => ({
       bindingId: binding.bindingId,
       role: binding.role,

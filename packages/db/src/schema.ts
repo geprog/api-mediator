@@ -18,6 +18,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import type {
+  AcknowledgedIgnoredInput,
   AdapterBindingRole,
   AdapterBindingStatus,
   AdapterEndpointStatus,
@@ -1362,6 +1363,12 @@ export const adapterEndpoint = pgTable(
     // mapper converts it back (see {@link PostMergePaginationRow}).
     postMergePagination: jsonb("post_merge_pagination").$type<PostMergePaginationRow>(),
     postMergeDedup: jsonb("post_merge_dedup").$type<PostMergeDedup>(),
+    // ── CO-5.4 acknowledged-ignored consumer inputs (nullable, NO DB default) ──
+    // NULL = no acknowledgements (the backward-compatible default: every unmapped
+    // input rejects at request validation, RP-2.4). Existing rows read back NULL.
+    acknowledgedIgnoredInputs: jsonb("acknowledged_ignored_inputs").$type<
+      AcknowledgedIgnoredInput[]
+    >(),
   },
   (table) => [
     index("adapter_endpoint_consumer_app_id_idx").on(table.consumerAppId),
