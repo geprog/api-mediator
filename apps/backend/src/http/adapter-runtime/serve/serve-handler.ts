@@ -4,7 +4,15 @@ import type {
   ServeInput,
   ServeOutcome,
 } from "@mediator/adapter-engine";
-import type { AdapterEndpoint, ChainInput, IrOperation } from "@mediator/domain";
+import type {
+  AdapterEndpoint,
+  AdapterWriteOutcome,
+  AdapterWriteResult,
+  ChainInput,
+  FieldMapping,
+  IrOperation,
+  OperationAction,
+} from "@mediator/domain";
 import type { JsonValue } from "@mediator/transform";
 
 import { topLevelConsumerFieldName } from "../../../modules/adapter-composition/analysis.js";
@@ -27,12 +35,14 @@ import {
   type UnionServeConfig,
 } from "./ir-validation.js";
 import { planResolution, type BindingHealthInput } from "./planner.js";
+import { resolveAdapterWriteIdempotencyKey } from "./idempotency-key.js";
 import {
   bindingFailureCause,
   plannerCauseToFailure,
   resultFailureCause,
   type BindingFailure,
   type BindingResult,
+  type EliminatedBinding,
   type PlanExecutionGroup,
   type PlannedBinding,
   type ResolutionPlan,
@@ -44,7 +54,8 @@ import {
   resolveChainInputs,
 } from "./request-mapping.js";
 import { mapBackendResponseToConsumer } from "./response-mapping.js";
-import type { ServeContext, ServeContextLoader } from "./serve-context.js";
+import type { LoadedBinding, ServeContext, ServeContextLoader } from "./serve-context.js";
+import type { RecordWriteOutcomeInput, WriteOutcomeStore } from "./write-outcome-store.js";
 import {
   aggregateCollectionUnion,
   type CollectionUnionContext,
@@ -129,6 +140,13 @@ export interface AdapterServeHandlerDeps {
   readonly unionLinkResolver?: UnionLinkResolver;
   /** AG-5.1 — the config-defined per-request row ceiling; default {@link DEFAULT_UNION_ROW_CEILING}. */
   readonly unionRowCeiling?: number;
+  /**
+   * WR-3 — the bounded write-outcome store the write serve path deduplicates against.
+   * Required only when a served endpoint is a **write** (its single binding's
+   * `OperationMapping.action` is create/update/delete); a write served without one
+   * fails loud (a composition-root wiring gap). Read endpoints never consult it.
+   */
+  readonly writeOutcomeStore?: WriteOutcomeStore;
 }
 
 /** A union contributor's fetch outcome: a per-binding envelope, or a whole-request fail-loud. */
@@ -189,6 +207,15 @@ export class AdapterServeHandler implements ServeHandler {
       return this.defect(input.endpoint.id, `planning failed: ${planResult.detail}`);
     }
     const plan = planResult.plan;
+
+    // WR-1/WR-2 — a **write** request (its single binding's approved
+    // `OperationMapping.action` is create/update/delete, the same signal CO-2.7
+    // composes on) takes the dedicated write serve path: idempotency + write-outcome
+    // store + strict failure, never a fan-out. A read (every other action) falls
+    // through to the byte-for-byte-unchanged aggregation path below.
+    if (isWriteRequest(context)) {
+      return this.serveWrite(plan, context, consumerOperation, input);
+    }
 
     // AG-1/AG-2/AG-3/AG-6 — execute + aggregate per the endpoint's strategy. `collection-union`
     // (AG-3/4/5) runs its own bounded paged fetch + merge/dedup/filter/sort/paginate path;
@@ -866,12 +893,353 @@ export class AdapterServeHandler implements ServeHandler {
     );
     return { kind: "failed", cause: "mediator-transform-error" };
   }
+
+  /**
+   * **WR-2/WR-3/WR-5 — serve a write (create/update/delete).** A write is always
+   * `single` with exactly one active binding (WR-1), so there is no fan-out and no
+   * chaining; the round trip is TE-1 → the one governed/credentialed backend call →
+   * TE-4 → AG-7, wrapped in the write-outcome store's idempotency:
+   *
+   *  1. **Single-only backstop** (defense-in-depth): a write whose plan is not `single`
+   *     with exactly one active binding is a CO-2.7 composition defect — fail loud,
+   *     never fan out a side effect.
+   *  2. **Idempotency key** (WR-3.1/3.2): the caller's declared key, else derived from
+   *     the request; namespaced by endpoint + binding.
+   *  3. **Dedup replay** (WR-3.3/3.4/3.5): a still-in-window recorded outcome is
+   *     replayed verbatim — a success as a success, a failure as that same failure —
+   *     **never re-executed, never fabricated**.
+   *  4. **RP-3 pre-call elimination** (WR-5.2): a stale/suspended/backend-disabled
+   *     binding fails with that specific cause, makes **no** call, and records **nothing**
+   *     (the record-only-after-the-backend-call rule — a retry must re-evaluate).
+   *  5. **Execute + record** (WR-2/WR-5.3): once the call reaches the backend, the
+   *     outcome — success, a reached-backend failure (incl. a timeout that may have
+   *     applied), or a post-call transform/AG-7 defect — is recorded, so a keyed retry
+   *     is answered from the store rather than re-run.
+   *
+   * Strict throughout (WR-5.1): any error fails the whole request with its specific
+   * cause; there is no partial/degraded write response.
+   */
+  private async serveWrite(
+    plan: ResolutionPlan,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    input: ServeInput,
+  ): Promise<ServeOutcome> {
+    const endpointId = input.endpoint.id;
+    const store = this.deps.writeOutcomeStore;
+    if (store === undefined) {
+      return this.writeDefect(
+        endpointId,
+        "write serving requires a write-outcome store, which is not wired",
+      );
+    }
+
+    // (1) Runtime single-only backstop — CO-2.7 should have guaranteed this. A write is
+    // never fanned out: exactly one `single` active binding, or fail loud.
+    const loaded = context.bindings.length === 1 ? context.bindings[0] : undefined;
+    if (plan.aggregationStrategy !== "single" || loaded === undefined) {
+      return this.writeDefect(
+        endpointId,
+        "a write endpoint must be `single` with exactly one active binding (CO-2.7 backstop)",
+      );
+    }
+
+    // (2) The idempotency key: declared passthrough, else request-derived (WR-3.1/3.2).
+    const { key } = resolveAdapterWriteIdempotencyKey({
+      endpointId,
+      bindingId: loaded.binding.id,
+      consumerOperation,
+      request: input.request,
+    });
+
+    // (3) Dedup — a recorded outcome inside the window is REPLAYED, never re-executed and
+    // never upgraded to a success (WR-3.3/3.4). An aged-out entry reads as absent (WR-3.5,
+    // enforced by the store's lookup), so the write below runs as a genuinely new delivery.
+    const recorded = await store.lookup(endpointId, key);
+    if (recorded !== undefined) {
+      return this.writeOutcomeToServeOutcome(recorded, loaded, key, true);
+    }
+
+    // (4) RP-3 pre-call elimination — a stale/suspended/backend-disabled binding fails with
+    // that specific cause and makes NO call. It is deliberately NOT recorded: no backend
+    // call happened, so there is nothing to dedup against, and a retry after re-review /
+    // un-suspend / re-enable MUST re-evaluate rather than replay a pinned config failure.
+    const planned = firstPlannedBinding(plan);
+    if (planned === undefined) {
+      const eliminated = firstEliminatedBinding(plan);
+      if (eliminated !== undefined) {
+        return {
+          kind: "failed",
+          cause: bindingFailureCause(plannerCauseToFailure(eliminated.cause)),
+          idempotencyKey: key,
+        };
+      }
+      return this.writeDefect(endpointId, "write plan retained no active binding", key);
+    }
+
+    // (5) Execute the single write round trip.
+    return this.executeWrite(planned, loaded, store, consumerOperation, input, key);
+  }
+
+  /**
+   * TE-1 → the one backend call → TE-4/no-body-204 → AG-7 → record. Which failures are
+   * recorded is the load-bearing WR-5.3 rule: a **pre-call** failure (an unresolvable
+   * backend op, a TE-1 refusal, a request that could not be built, or a call refused
+   * before reaching the backend) records **nothing**; a failure once the call reached the
+   * backend — a non-2xx, a timeout that may have applied, or a post-call transform/AG-7
+   * defect — is recorded so a keyed retry is answered from the store, never re-run.
+   */
+  private async executeWrite(
+    planned: PlannedBinding,
+    loaded: LoadedBinding,
+    store: WriteOutcomeStore,
+    consumerOperation: IrOperation,
+    input: ServeInput,
+    idempotencyKey: string,
+  ): Promise<ServeOutcome> {
+    const endpointId = input.endpoint.id;
+    if (loaded.backendOperation === undefined || loaded.backendBaseUrl === undefined) {
+      // A non-servable binding (unresolvable backend operation / base URL) is a
+      // composition/config defect, not a live failure — PRE-call, so not recorded.
+      return this.writeDefect(
+        endpointId,
+        "backend operation or base URL is unresolvable for the write binding",
+        idempotencyKey,
+      );
+    }
+
+    // TE-1 — consumer request → backend request (body from request-phase FieldMappings,
+    // path/query from ParameterMappings). No chaining — a write is single-binding. A TE-1
+    // refusal is a PRE-call composition defect, so it is not recorded.
+    const mapped = mapRequestToBackend({
+      mappingId: loaded.mappingId,
+      consumerOperation,
+      backendOperation: loaded.backendOperation,
+      parameterMappings: loaded.parameterMappings,
+      requestPhaseFieldMappings: loaded.requestPhaseFieldMappings,
+      request: input.request,
+    });
+    if (!mapped.ok) {
+      return this.writeDefect(endpointId, mapped.detail, idempotencyKey);
+    }
+
+    // TE-2 — the single governed/credentialed backend call (per-app ceiling + withCredential).
+    const call = await this.deps.backendCaller.call({
+      targetAppId: loaded.binding.backendAppId,
+      baseUrl: loaded.backendBaseUrl,
+      operation: loaded.backendOperation,
+      mapped: mapped.request,
+      ...(loaded.backendLimits !== undefined ? { limits: loaded.backendLimits } : {}),
+    });
+    if (!call.ok) {
+      if (call.kind === "upstream-error") {
+        if (call.reachedBackend === false) {
+          // The call never reached the backend (a load-ceiling denial / pre-send credential
+          // failure): no side effect, so record NOTHING — the keyed retry re-evaluates.
+          return { kind: "failed", cause: "upstream-error", idempotencyKey };
+        }
+        // WR-5.3 — the call reached the backend (a non-2xx, or a timeout where the write may
+        // have applied): RECORD the failure so a keyed retry is answered with it, never re-run.
+        return this.recordWriteAndAnswer(store, loaded, endpointId, idempotencyKey, {
+          outcome: "failure",
+          cause: "upstream-error",
+        });
+      }
+      // `defect` — the request could not even be built (bad method / unfilled path): a PRE-call
+      // mediator-side composition defect, not recorded.
+      return this.writeDefect(endpointId, call.detail, idempotencyKey);
+    }
+
+    // WR-2.2/2.3 — map the backend response to the consumer shape (TE-4), or serve empty when
+    // the backend returned no body and the consumer schema tolerates it; never fabricate.
+    const shaped = shapeWriteResponse(
+      consumerOperation,
+      loaded.responsePhaseFieldMappings,
+      call.body,
+    );
+    if (!shaped.ok) {
+      const detail =
+        shaped.kind === "requires-body"
+          ? "backend returned no body but the consumer schema requires one (WR-2.3)"
+          : shaped.detail;
+      this.deps.logger.warn(
+        { endpointId, bindingId: planned.bindingId, cause: "mediator-transform-error", detail },
+        "adapter serve: write response could not be produced (post-call)",
+      );
+      // Post-call (the backend applied the write) → recorded, so a keyed retry replays it.
+      return this.recordWriteAndAnswer(store, loaded, endpointId, idempotencyKey, {
+        outcome: "failure",
+        cause: "mediator-transform-error",
+      });
+    }
+
+    // AG-7 (WR-2.5) — validate the consumer-shape response. A failure is a mediator-side
+    // defect, logged and never returned as data — and recorded (the write DID happen).
+    const validation = validateConsumerResponse(consumerOperation, shaped.payload);
+    if (!validation.ok) {
+      this.deps.logger.warn(
+        { endpointId, cause: "mediator-transform-error", detail: validation.detail },
+        "adapter serve: write response failed consumer schema validation (AG-7)",
+      );
+      return this.recordWriteAndAnswer(store, loaded, endpointId, idempotencyKey, {
+        outcome: "failure",
+        cause: "mediator-transform-error",
+      });
+    }
+
+    // WR-4.1 — a successful adapter write is deliberately NOT tagged in the loop-prevention
+    // recently-written cache and creates NO suppressing `SyncFieldState` baseline (this path
+    // simply never touches either), so the Sync Engine's next poll picks it up as a genuine
+    // change and propagates it to that backend's sync peers like any other edit.
+    // TODO(CH-*): invalidate cached entries of every endpoint bound to this backend resource
+    // (WR-4.3); write responses are never cached (WR-4.4).
+    return this.recordWriteAndAnswer(store, loaded, endpointId, idempotencyKey, {
+      outcome: "success",
+      responseStatus: WRITE_SERVED_STATUS,
+      responseBody: shaped.payload,
+    });
+  }
+
+  /**
+   * Record this delivery's outcome (WR-3.3 — once the call reached the backend) and answer
+   * with the **authoritative persisted** record: this delivery's on a clean insert, or a
+   * still-fresh duplicate's on a race, so two racing identical writes collapse to one
+   * answer. This is a fresh execution, never a `deduplicated` replay.
+   */
+  private async recordWriteAndAnswer(
+    store: WriteOutcomeStore,
+    loaded: LoadedBinding,
+    endpointId: string,
+    idempotencyKey: string,
+    result: AdapterWriteResult,
+  ): Promise<ServeOutcome> {
+    const record: RecordWriteOutcomeInput = {
+      idempotencyKey,
+      adapterEndpointId: endpointId,
+      adapterBindingId: loaded.binding.id,
+      result,
+    };
+    const persisted = await store.record(record);
+    return this.writeOutcomeToServeOutcome(persisted, loaded, idempotencyKey, false);
+  }
+
+  /**
+   * Turn a recorded {@link AdapterWriteOutcome} into the {@link ServeOutcome} the caller
+   * receives — a success into a `served` response carrying the recorded body, a failure
+   * into a `failed` response carrying the recorded specific cause (WR-3.4). `deduplicated`
+   * is `true` only on a replay of an already-recorded outcome (WR-5.4); the idempotency
+   * key rides along for the metadata-only audit row (the body never does).
+   */
+  private writeOutcomeToServeOutcome(
+    outcome: AdapterWriteOutcome,
+    loaded: LoadedBinding,
+    idempotencyKey: string,
+    deduplicated: boolean,
+  ): ServeOutcome {
+    if (outcome.result.outcome === "success") {
+      return {
+        kind: "served",
+        body: outcome.result.responseBody ?? null,
+        degraded: false,
+        contributingBackendAppIds: [loaded.binding.backendAppId],
+        idempotencyKey,
+        ...(deduplicated ? { deduplicated: true } : {}),
+      };
+    }
+    return {
+      kind: "failed",
+      // A recorded failure always carries its specific cause; fall back defensively.
+      cause: outcome.result.cause ?? "upstream-error",
+      idempotencyKey,
+      ...(deduplicated ? { deduplicated: true } : {}),
+    };
+  }
+
+  /** A write-path mediator defect (no side effect recorded): logged and failed loud (WR-5.1). */
+  private writeDefect(endpointId: string, detail: string, idempotencyKey?: string): ServeOutcome {
+    this.deps.logger.warn(
+      { endpointId, cause: "mediator-transform-error", detail },
+      "adapter serve: write pre-call mediator defect",
+    );
+    return {
+      kind: "failed",
+      cause: "mediator-transform-error",
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    };
+  }
 }
 
 /** The backend resource ref (leading segment) of a `resourceRef/operationId` operation ref. */
 function backendResourceRefOf(operationRef: string): string {
   const slash = operationRef.indexOf("/");
   return slash <= 0 ? operationRef : operationRef.slice(0, slash);
+}
+
+/** The consumer-facing HTTP status a served write renders (README OQ2 — status mapping is REST-side). */
+const WRITE_SERVED_STATUS = 200;
+
+/** A request is a write iff its (single) active binding's `OperationMapping.action` writes (WR-1). */
+function isWriteRequest(context: ServeContext): boolean {
+  return context.bindings.some((loaded) => isWriteAction(loaded.action));
+}
+
+/** Whether an `OperationMapping.action` is a write (create/update/delete) — the CO-2.7 signal. */
+function isWriteAction(
+  action: OperationAction | undefined,
+): action is "create" | "update" | "delete" {
+  return action === "create" || action === "update" || action === "delete";
+}
+
+/** The single planned (healthy) binding of a `single` plan, or `undefined` when it was eliminated. */
+function firstPlannedBinding(plan: ResolutionPlan): PlannedBinding | undefined {
+  for (const group of plan.groups) {
+    const binding = group.bindings[0];
+    if (binding !== undefined) {
+      return binding;
+    }
+  }
+  return undefined;
+}
+
+/** The single planner-eliminated binding of a `single` plan, if the binding was eliminated (RP-3). */
+function firstEliminatedBinding(plan: ResolutionPlan): EliminatedBinding | undefined {
+  return plan.eliminated[0];
+}
+
+/** The consumer-shape write response, or the WR-2.3 reason it cannot be produced. */
+type WriteResponseShape =
+  | { readonly ok: true; readonly payload: JsonValue }
+  | { readonly ok: false; readonly kind: "requires-body" }
+  | { readonly ok: false; readonly kind: "transform"; readonly detail: string };
+
+/**
+ * WR-2.2/2.3 — shape the backend response for the consumer. A present body is mapped by
+ * TE-4. A **no-body** response (e.g. `204`) never fabricates field values: if the consumer
+ * schema requires a body the mediator cannot produce, it fails (`requires-body`); if the
+ * schema tolerates an empty body it is served empty (the response transform is not run over
+ * nothing, so no field is invented).
+ */
+function shapeWriteResponse(
+  consumerOperation: IrOperation,
+  responsePhaseFieldMappings: readonly FieldMapping[],
+  backendBody: JsonValue | undefined,
+): WriteResponseShape {
+  if (backendBody === undefined) {
+    if (consumerRequiresResponseBody(consumerOperation)) {
+      return { ok: false, kind: "requires-body" };
+    }
+    return { ok: true, payload: consumerOperation.responseSchema !== undefined ? {} : null };
+  }
+  const shaped = mapBackendResponseToConsumer(responsePhaseFieldMappings, backendBody);
+  return shaped.ok
+    ? { ok: true, payload: shaped.payload }
+    : { ok: false, kind: "transform", detail: shaped.detail };
+}
+
+/** Whether the consumer response schema requires a body — any top-level required field (WR-2.3). */
+function consumerRequiresResponseBody(operation: IrOperation): boolean {
+  const schema = operation.responseSchema;
+  return schema !== undefined && schema.fields.some((field) => field.required);
 }
 
 /** The union of consumer parameter names any active binding maps (for RP-2.4). */

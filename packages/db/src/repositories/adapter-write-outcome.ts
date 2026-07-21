@@ -26,6 +26,16 @@ export interface AdapterWriteOutcomeOps {
    */
   recordOutcomeIfAbsent(outcome: AdapterWriteOutcome): Promise<AdapterWriteOutcome>;
   /**
+   * Record this delivery's outcome, treating an **aged-out** row for the same
+   * `(adapterEndpointId, idempotencyKey)` as absent (WR-3.5): on conflict the row is
+   * **replaced only when it has already left its dedup window** (`expiresAt <= now`),
+   * so a genuinely-new delivery after the window records afresh — while a still-fresh
+   * conflicting row is left untouched and returned instead, preserving the
+   * concurrency guard (a duplicate delivery never clobbers the original outcome).
+   * Returns the authoritative persisted record for this key.
+   */
+  recordOutcome(outcome: AdapterWriteOutcome, now: Date): Promise<AdapterWriteOutcome>;
+  /**
    * The recorded outcome for a delivery, if one is still in the store — what a
    * deduplicated repeat delivery is answered with (AD-4.1). Returns the **full**
    * record (incl. the response body) because replay reconstructs the original
@@ -63,6 +73,44 @@ export class AdapterWriteOutcomeRepository implements AdapterWriteOutcomeOps {
     const existing = await this.findByDedupKey(outcome.adapterEndpointId, outcome.idempotencyKey);
     if (existing === undefined) {
       throw new Error("adapter_write_outcome record-if-absent found no row after a conflict");
+    }
+    return existing;
+  }
+
+  public async recordOutcome(
+    outcome: AdapterWriteOutcome,
+    now: Date,
+  ): Promise<AdapterWriteOutcome> {
+    const values = toAdapterWriteOutcomeInsert(outcome);
+    const [written] = await this.db
+      .insert(adapterWriteOutcome)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [adapterWriteOutcome.adapterEndpointId, adapterWriteOutcome.idempotencyKey],
+        // Overwrite every data column with this delivery's outcome (the PK `id` is a
+        // surrogate and is intentionally left untouched on an in-place replacement).
+        set: {
+          adapterBindingId: values.adapterBindingId,
+          outcome: values.outcome,
+          cause: values.cause,
+          responseStatus: values.responseStatus,
+          responseBody: values.responseBody,
+          executedAt: values.executedAt,
+          expiresAt: values.expiresAt,
+        },
+        // Replace ONLY an aged-out row (WR-3.5); a still-fresh row is a live dedup
+        // hit and must not be clobbered — the update is skipped and we read it back.
+        setWhere: lte(adapterWriteOutcome.expiresAt, now),
+      })
+      .returning();
+    if (written !== undefined) {
+      return mapAdapterWriteOutcomeRow(written);
+    }
+    // The conflicting row was still fresh (the `setWhere` guard held) → the original
+    // recorded outcome wins; answer with it rather than this delivery's (AD-4.5).
+    const existing = await this.findByDedupKey(outcome.adapterEndpointId, outcome.idempotencyKey);
+    if (existing === undefined) {
+      throw new Error("adapter_write_outcome record-outcome found no row after a fresh conflict");
     }
     return existing;
   }

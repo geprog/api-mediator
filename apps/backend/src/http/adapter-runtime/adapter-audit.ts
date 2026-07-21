@@ -40,6 +40,11 @@ export interface AdapterAuditContext {
  */
 export function buildAdapterRequestAudit(context: AdapterAuditContext): AuditLogEntry {
   const { fields, trace } = context;
+  // WR-5.4 — a deduplicated write delivery is made distinguishable on the metadata-only
+  // audit row via a `details` marker (the audit schema has no dedicated flag, and this
+  // slice adds no audit column). The idempotency key rides along as an opaque id.
+  const details =
+    fields.details ?? (fields.deduplicated === true ? DEDUP_DELIVERY_DETAIL : undefined);
   return {
     id: context.newId(),
     type: "adapter-request",
@@ -51,7 +56,11 @@ export function buildAdapterRequestAudit(context: AdapterAuditContext): AuditLog
     ...(fields.degraded !== undefined ? { degraded: fields.degraded } : {}),
     ...(fields.endpointId !== undefined ? { relatedEndpointId: fields.endpointId } : {}),
     ...(fields.bindingId !== undefined ? { relatedBindingId: fields.bindingId } : {}),
-    ...(fields.details !== undefined ? { details: fields.details } : {}),
+    ...(fields.idempotencyKey !== undefined ? { idempotencyKey: fields.idempotencyKey } : {}),
+    ...(details !== undefined ? { details } : {}),
     ...(trace !== null ? { traceId: trace.traceId, spanId: trace.spanId } : {}),
   };
 }
+
+/** The `details` marker distinguishing a deduplicated write delivery on the audit row (WR-5.4). */
+export const DEDUP_DELIVERY_DETAIL = "deduplicated-delivery";

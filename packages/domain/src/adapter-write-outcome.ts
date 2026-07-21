@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { adapterWriteOutcomeStatusSchema } from "./adapter-enums.js";
+import { adapterRequestCauseSchema, adapterWriteOutcomeStatusSchema } from "./adapter-enums.js";
 
 /**
  * `AdapterWriteOutcome` — one record of the bounded **write-outcome store**
@@ -44,6 +44,12 @@ import { adapterWriteOutcomeStatusSchema } from "./adapter-enums.js";
  * - `failure` — the write failed; `responseStatus`/`responseBody` carry the
  *   upstream error where the call reached the backend at all, and are **absent**
  *   when it did not (a timeout or connection failure produced no HTTP response).
+ *   `cause` is the specific {@link AdapterRequestCause} the original delivery
+ *   failed with (`upstream-error` for a backend failure, `mediator-transform-error`
+ *   for a post-call transform/AG-7 defect) — retained so a deduplicated replay is
+ *   answered with the *same* specific cause, never a generic one, and never upgraded
+ *   to a success (WR-3.4 / WR-5.1). Optional so the existing failure shape (which
+ *   predates the write serve path) still validates; the serve path always sets it.
  *   A replayed delivery is answered with this failure rather than treated as
  *   never-executed.
  */
@@ -57,6 +63,7 @@ export const adapterWriteResultSchema = z.discriminatedUnion("outcome", [
     outcome: z.literal(adapterWriteOutcomeStatusSchema.enum.failure),
     responseStatus: z.number().int().optional(),
     responseBody: z.unknown().optional(),
+    cause: adapterRequestCauseSchema.optional(),
   }),
 ]);
 export type AdapterWriteResult = z.infer<typeof adapterWriteResultSchema>;

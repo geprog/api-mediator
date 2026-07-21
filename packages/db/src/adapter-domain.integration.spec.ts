@@ -465,6 +465,86 @@ suite("Phase-5 adapter-domain persistence integration (requires Postgres)", () =
     expect(afterPrune).toBeUndefined();
   });
 
+  it("recordOutcome round-trips a failure cause, keeps a fresh row, and replaces an aged-out one (WR-3.4/3.5)", async () => {
+    const endpointId = randomUUID();
+    const bindingId = randomUUID();
+    await new DownstreamArtifactRepository(db).ensureAdapterEndpoint({
+      id: endpointId,
+      consumerAppId: APP_CONSUMER,
+      consumerOperationId: "recordOutcome",
+      status: "active",
+      aggregationStrategy: "single",
+    });
+    await db.insert(adapterBinding).values({
+      id: bindingId,
+      adapterEndpointId: endpointId,
+      backendAppId: APP_BACKEND,
+      backendOperationId: "writeBackend",
+      approvedMappingId: CP_MAPPING,
+      role: "primary",
+      status: "active",
+    });
+    const store = new AdapterWriteOutcomeRepository(db);
+    const now = new Date("2026-07-20T00:00:00.000Z");
+    const inWindow = (from: Date): Date => new Date(from.getTime() + 3_600_000);
+
+    // Fresh insert — a failure carrying its specific cause (round-trips through the column).
+    const first = await store.recordOutcome(
+      {
+        id: randomUUID(),
+        idempotencyKey: "ro-key",
+        adapterEndpointId: endpointId,
+        adapterBindingId: bindingId,
+        result: { outcome: "failure", cause: "upstream-error" },
+        executedAt: now,
+        expiresAt: inWindow(now),
+      },
+      now,
+    );
+    expect(first.result).toEqual({ outcome: "failure", cause: "upstream-error" });
+
+    // A still-fresh duplicate does NOT clobber the original (the concurrency guard).
+    const dup = await store.recordOutcome(
+      {
+        id: randomUUID(),
+        idempotencyKey: "ro-key",
+        adapterEndpointId: endpointId,
+        adapterBindingId: bindingId,
+        result: { outcome: "success", responseStatus: 200, responseBody: { clobbered: true } },
+        executedAt: now,
+        expiresAt: inWindow(now),
+      },
+      now,
+    );
+    expect(dup.id).toBe(first.id);
+    expect(dup.result).toEqual({ outcome: "failure", cause: "upstream-error" });
+
+    // Once the original has aged out, a new delivery REPLACES it in place (WR-3.5).
+    const later = new Date(now.getTime() + 7_200_000);
+    const replaced = await store.recordOutcome(
+      {
+        id: randomUUID(),
+        idempotencyKey: "ro-key",
+        adapterEndpointId: endpointId,
+        adapterBindingId: bindingId,
+        result: { outcome: "success", responseStatus: 201, responseBody: { fresh: true } },
+        executedAt: later,
+        expiresAt: inWindow(later),
+      },
+      later,
+    );
+    expect(replaced.result).toEqual({
+      outcome: "success",
+      responseStatus: 201,
+      responseBody: { fresh: true },
+    });
+    const rows = await db
+      .select()
+      .from(adapterWriteOutcome)
+      .where(eq(adapterWriteOutcome.adapterEndpointId, endpointId));
+    expect(rows).toHaveLength(1);
+  });
+
   it("round-trips Credential.validUntil and exposes it as queryable metadata (AD-3.3)", async () => {
     const withBound: Credential = {
       id: randomUUID(),

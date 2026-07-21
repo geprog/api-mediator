@@ -14,6 +14,7 @@ import type {
   FieldMapping,
   Ir,
   IrOperation,
+  OperationAction,
   OperationMapping,
   OutboundLoadLimits,
   ParameterMapping,
@@ -46,6 +47,14 @@ export interface LoadedBinding {
   readonly mappingStatus: ApprovedMappingStatus;
   readonly backendStatus: RegisteredAppStatus;
   readonly parameterMappings: readonly ParameterMapping[];
+  /**
+   * The approved `OperationMapping.action` of this binding's consumer↔backend
+   * operation pair — the write signal (`create` | `update` | `delete`) the serve
+   * handler branches on (WR-1/WR-2), the same fact CO-2.7 composes on. `undefined`
+   * when the pair's `OperationMapping` does not resolve (a config defect): treated as
+   * a non-write so it never takes the write path on a broken binding.
+   */
+  readonly action?: OperationAction;
   readonly requestPhaseFieldMappings: readonly FieldMapping[];
   readonly responsePhaseFieldMappings: readonly FieldMapping[];
   readonly backendBaseUrl: string | undefined;
@@ -148,11 +157,12 @@ export class DbServeContextLoader implements ServeContextLoader {
       artifacts.listFieldMappings(binding.approvedMappingId),
     ]);
 
-    const operationMappingId = matchingOperationMappingId(
+    const operationMapping = matchingOperationMapping(
       operationMappings,
       consumerOperationId,
       binding.backendOperationId,
     );
+    const operationMappingId = operationMapping?.id;
     const scopedParameterMappings =
       operationMappingId === undefined
         ? []
@@ -195,6 +205,8 @@ export class DbServeContextLoader implements ServeContextLoader {
       mappingStatus: mapping?.status ?? "archived",
       backendStatus: backendApp?.status ?? "disabled",
       parameterMappings: scopedParameterMappings,
+      // The write signal (WR-1/WR-2), read from the pair's approved OperationMapping.
+      ...(operationMapping !== undefined ? { action: operationMapping.action } : {}),
       requestPhaseFieldMappings: fieldMappingsForResourcePair(
         requestPhase,
         consumerResourceRef,
@@ -242,16 +254,15 @@ export class DbServeContextLoader implements ServeContextLoader {
   }
 }
 
-/** The id of the `OperationMapping` pairing this consumer operation with this backend operation. */
-function matchingOperationMappingId(
+/** The `OperationMapping` pairing this consumer operation with this backend operation. */
+function matchingOperationMapping(
   operationMappings: readonly OperationMapping[],
   consumerOperationId: string,
   backendOperationId: string,
-): string | undefined {
-  const match = operationMappings.find(
+): OperationMapping | undefined {
+  return operationMappings.find(
     (operation) =>
       operation.sourceOperationRef === consumerOperationId &&
       operation.targetOperationRef === backendOperationId,
   );
-  return match?.id;
 }

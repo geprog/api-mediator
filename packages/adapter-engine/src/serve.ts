@@ -78,6 +78,15 @@ export type ServeOutcome =
        * failed backend out of band without ever touching the body.
        */
       readonly degradedBackendAppIds?: readonly string[];
+      /**
+       * WR-3.6/5.4 — write-only audit metadata (absent on a read): the opaque
+       * idempotency key of a write delivery, and `deduplicated: true` when this
+       * response was replayed from the write-outcome store rather than freshly
+       * executed. Both are metadata (an opaque id + a flag) — the response *body*
+       * lives only in the store, never in the audit row.
+       */
+      readonly idempotencyKey?: string;
+      readonly deduplicated?: boolean;
     }
   | {
       readonly kind: "rejected";
@@ -87,6 +96,14 @@ export type ServeOutcome =
   | {
       readonly kind: "failed";
       readonly cause: AdapterRequestCause;
+      /**
+       * WR-3.6/5.4 — write-only audit metadata (absent on a read failure): the write
+       * delivery's opaque idempotency key, and `deduplicated: true` when this failure
+       * was replayed from the write-outcome store (a recorded failure answered again,
+       * never re-executed — WR-3.4).
+       */
+      readonly idempotencyKey?: string;
+      readonly deduplicated?: boolean;
     };
 
 /**
