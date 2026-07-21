@@ -22,6 +22,7 @@ import {
   AdapterCompositionService,
   type EndpointCacheInvalidator,
 } from "./modules/adapter-composition/index.js";
+import { DbAdapterRequestHistoryReader, DbAdapterStateReader } from "./modules/adapter-state.js";
 import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
 import {
@@ -217,6 +218,12 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       newId: randomUUID,
       ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
     }),
+    // Phase-5 adapter read surface (AP-1 state, AP-5 history + health): pooled, read-only,
+    // metadata only. `DbAdapterStateReader` composes the composition/mapping/app/spec repos
+    // behind the AP-1/AP-5.3 derivation; `DbAdapterRequestHistoryReader` reads the
+    // `adapter-request` audit log for AP-5.1 (no payload, no token).
+    adapterState: new DbAdapterStateReader(db),
+    adapterRequestHistory: new DbAdapterRequestHistoryReader(db),
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.

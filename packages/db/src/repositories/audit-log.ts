@@ -1,5 +1,10 @@
-import type { AuditLogEntry, AuditLogStatus, AuditLogType } from "@mediator/domain";
-import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm";
+import type {
+  AdapterRequestCause,
+  AuditLogEntry,
+  AuditLogStatus,
+  AuditLogType,
+} from "@mediator/domain";
+import { and, desc, eq, gte, inArray, lte, sql, type SQL } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAuditLogRow, toAuditLogInsert } from "../mappers/audit-log.js";
@@ -46,6 +51,22 @@ export interface SyncEventQuery {
    * an unbounded read.
    */
   readonly offset?: number;
+  readonly limit: number;
+}
+
+/**
+ * The AP-5.1 **adapter request history** filter: `adapter-request` rows by endpoint,
+ * binding, a `[since, until]` time window, and/or execution `status`/`cause`. Every filter
+ * is optional (AND-combined); `limit` bounds the scan so history is never unbounded
+ * (`docs/requirements/phase-5-adapter-api.md` AP-5.1).
+ */
+export interface AdapterRequestQuery {
+  readonly relatedEndpointId?: string;
+  readonly relatedBindingId?: string;
+  readonly since?: Date;
+  readonly until?: Date;
+  readonly status?: AuditLogStatus;
+  readonly cause?: AdapterRequestCause;
   readonly limit: number;
 }
 
@@ -132,6 +153,44 @@ export class AuditLogRepository {
       .orderBy(desc(auditLog.timestamp))
       .limit(query.limit)
       .offset(query.offset ?? 0);
+    return rows.map(mapAuditLogRow);
+  }
+
+  /**
+   * The AP-5.1 **adapter request history** query: `adapter-request` rows filtered by
+   * endpoint/binding/time window and optional `status`/`cause`, most-recent-first, bounded
+   * by `limit`. The rows carry status/cause/degraded/ids and `traceId`/`spanId` — **never**
+   * a request or response payload value, and **never** an adapter token or credential
+   * material, by construction of the `audit_log` schema (AP-5.4,
+   * `docs/architecture/security.md` *Audit logging*). The DTO mapper decides which columns
+   * reach the wire.
+   */
+  public async queryAdapterRequests(query: AdapterRequestQuery): Promise<AuditLogEntry[]> {
+    const conditions: SQL[] = [eq(auditLog.type, "adapter-request")];
+    if (query.relatedEndpointId !== undefined) {
+      conditions.push(eq(auditLog.relatedEndpointId, query.relatedEndpointId));
+    }
+    if (query.relatedBindingId !== undefined) {
+      conditions.push(eq(auditLog.relatedBindingId, query.relatedBindingId));
+    }
+    if (query.since !== undefined) {
+      conditions.push(gte(auditLog.timestamp, query.since));
+    }
+    if (query.until !== undefined) {
+      conditions.push(lte(auditLog.timestamp, query.until));
+    }
+    if (query.status !== undefined) {
+      conditions.push(eq(auditLog.status, query.status));
+    }
+    if (query.cause !== undefined) {
+      conditions.push(eq(auditLog.cause, query.cause));
+    }
+    const rows = await this.db
+      .select()
+      .from(auditLog)
+      .where(and(...conditions))
+      .orderBy(desc(auditLog.timestamp))
+      .limit(query.limit);
     return rows.map(mapAuditLogRow);
   }
 
