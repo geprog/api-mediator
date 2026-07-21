@@ -102,11 +102,17 @@ function onCutover(): void {
 
 async function copyToken(): Promise<void> {
   if (rawToken.value === null) return;
+  // Only claim success once the Clipboard API actually wrote the value — absent (or
+  // denied) clipboard access leaves the token visible to copy manually, but is never
+  // reported as "copied".
+  if (navigator.clipboard === undefined) {
+    copied.value = false;
+    return;
+  }
   try {
-    await navigator.clipboard?.writeText(rawToken.value);
+    await navigator.clipboard.writeText(rawToken.value);
     copied.value = true;
   } catch {
-    // Clipboard access can be denied; the value is still visible to copy manually.
     copied.value = false;
   }
 }

@@ -101,6 +101,17 @@ describe("health-model — request summary (CU-4.3)", () => {
     expect(summary.byCause.get("backend-disabled")).toBe(1);
   });
 
+  it("excludes operator-action (outcome 'other') rows from the total, errors, and degraded", () => {
+    const summary = summarizeRequests([
+      request(),
+      // A compose/enable/disable audit row carries relatedEndpointId but is not a served request.
+      request({ id: "op-1", outcome: "other", status: null, cause: null, actor: "operator:alice" }),
+    ]);
+    expect(summary.total).toBe(1);
+    expect(summary.errors).toBe(0);
+    expect(summary.degraded).toBe(0);
+  });
+
   it("filters rows by endpoint", () => {
     const rows = [request(), request({ id: "r-2", relatedEndpointId: "ep-2" })];
     expect(requestsForEndpoint(rows, "ep-1")).toHaveLength(1);

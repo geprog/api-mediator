@@ -57,9 +57,16 @@ export interface RequestSummary {
  */
 export function summarizeRequests(rows: readonly AdapterRequestDto[]): RequestSummary {
   const byCause = new Map<string, number>();
+  let total = 0;
   let errors = 0;
   let degraded = 0;
   for (const row of rows) {
+    if (row.outcome === "other") {
+      // An operator-action row (compose/enable/disable) is not a served request — it
+      // must not inflate the request count, the errors, or the degraded count.
+      continue;
+    }
+    total += 1;
     if (row.outcome === "failure") {
       errors += 1;
     }
@@ -70,7 +77,7 @@ export function summarizeRequests(rows: readonly AdapterRequestDto[]): RequestSu
       byCause.set(row.cause, (byCause.get(row.cause) ?? 0) + 1);
     }
   }
-  return { total: rows.length, errors, degraded, byCause };
+  return { total, errors, degraded, byCause };
 }
 
 /** Rows for a specific endpoint (CU-4.3 per-endpoint counts). */

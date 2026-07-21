@@ -2,8 +2,8 @@ import type {
   AdapterEndpointStateDto,
   ComposeAdapterEndpointPreviewResponse,
 } from "@mediator/contracts";
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { testGlobalOptions } from "../../testing/render";
 import CompositionForm from "./CompositionForm.vue";
@@ -209,5 +209,99 @@ describe("CompositionForm (CU-1)", () => {
     expect(
       wrapper.get('[data-testid="composition-strategy"]').attributes("disabled"),
     ).toBeDefined();
+  });
+});
+
+describe("CompositionForm + UnionCompositionPanel — union edits settle (no reactive loop)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function unionEndpoint(): AdapterEndpointStateDto {
+    return endpoint({
+      id: "ep-union",
+      consumerOperationId: "listWorkItems",
+      aggregationStrategy: "collection-union",
+      bindings: [
+        binding({ id: "b1", role: "supplement" }),
+        binding({ id: "b2", backendAppId: "backend-2", role: "supplement" }),
+      ],
+    });
+  }
+
+  function unionPreview(): ComposeAdapterEndpointPreviewResponse {
+    return {
+      endpointId: "ep-union",
+      supplementAnalysis: { applicable: false, aggregationStrategy: "collection-union" },
+      coverage: { perBinding: [], unmappedByAllBackends: [] },
+      validation: { ok: true },
+      union: {
+        unserviceableFilters: ["status"],
+        unconfiguredSortParameters: ["sortBy"],
+        unconfiguredPaginationParameters: ["page", "pageSize"],
+        dedupConflictPrecedence: "executionOrder-then-bindingId",
+        largeCollectionRisk: { flagged: true, mitigation: "cacheTtl", cacheTtlConfigured: false },
+      },
+    };
+  }
+
+  it("edits filter/pagination/dedup through the wired panel without recursing (MUST-FIX)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = mount(CompositionForm, {
+      props: {
+        endpoint: unionEndpoint(),
+        preview: unionPreview(),
+        readonly: false,
+        pending: false,
+        rejection: null,
+      },
+      global: testGlobalOptions(),
+    });
+    await flushPromises();
+
+    // The union panel is wired in (collection-union strategy).
+    expect(wrapper.find('[data-testid="union-panel"]').exists()).toBe(true);
+
+    // Edit a filter parameter's post-merge semantics — this is the path that looped.
+    await wrapper.get('[data-testid="union-filter-field-status"]').setValue("state");
+    await flushPromises();
+
+    // Configure and confirm a pagination convention (derive-then-confirm).
+    await wrapper.get('[data-testid="union-pagination-mode"]').setValue("offset");
+    await wrapper.get('[data-testid="union-pagination-offset"]').setValue("skip");
+    await wrapper.get('[data-testid="union-pagination-size"]').setValue("take");
+    await flushPromises();
+    await wrapper.get('[data-testid="union-pagination-confirm"]').trigger("click");
+    await flushPromises();
+
+    // Pick a dedup choice.
+    await wrapper.get('[data-testid="union-dedup-none"]').setValue();
+    await flushPromises();
+
+    // The values settled (never wiped by a re-seed loop) …
+    expect(
+      (wrapper.get('[data-testid="union-filter-field-status"]').element as HTMLInputElement).value,
+    ).toBe("state");
+    expect(wrapper.find('[data-testid="union-pagination-confirmed"]').exists()).toBe(true);
+
+    // … and no "Maximum recursive updates exceeded" was ever logged.
+    const loggedRecursion = [...warnSpy.mock.calls, ...errorSpy.mock.calls].some((args) =>
+      args.some((arg) => typeof arg === "string" && arg.toLowerCase().includes("recursive")),
+    );
+    expect(loggedRecursion).toBe(false);
+
+    // The built request carries the edited union config (single settled emit path).
+    await wrapper.get('[data-testid="composition-submit"]').trigger("click");
+    const submitted = wrapper.emitted("submit");
+    expect(submitted).toBeTruthy();
+    const [request] = submitted?.[submitted.length - 1] as [
+      { postMergeFilters?: { consumerFieldPath: string }[]; postMergeDedup?: { mode: string } },
+    ];
+    expect(request.postMergeFilters?.[0]?.consumerFieldPath).toBe("state");
+    expect(request.postMergeDedup?.mode).toBe("none");
+
+    wrapper.unmount();
   });
 });

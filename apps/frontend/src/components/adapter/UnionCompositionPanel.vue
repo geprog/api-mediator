@@ -101,46 +101,60 @@ const sizeParamRef = ref<string>("");
 const firstPageNumber = ref<number>(1);
 const paginationConfirmedLocal = ref<boolean>(false);
 
-/** Re-seed the editable draft whenever the incoming props change (recompose/preview refresh). */
-watch(
-  () => props,
-  () => {
-    for (const key of Object.keys(filterEntries)) delete filterEntries[key];
-    for (const param of props.analysis?.unserviceableFilters ?? []) {
-      const existing = props.filters.find((filter) => filter.consumerParamRef === param);
-      filterEntries[param] = {
-        fieldPath: existing?.consumerFieldPath ?? "",
-        operator: existing?.operator ?? PostMergeFilterOperator.eq,
-      };
-    }
-    for (const key of Object.keys(sortEntries)) delete sortEntries[key];
-    for (const param of props.analysis?.unconfiguredSortParameters ?? []) {
-      const existing = props.sorts.find((sort) => sort.consumerParamRef === param);
-      sortEntries[param] = {
-        fieldPath: existing?.consumerFieldPath ?? "",
-        direction: existing?.direction ?? PostMergeSortDirection.asc,
-      };
-    }
-    dedupChoice.value = props.dedup?.mode ?? null;
-    dedupKeyFieldPath.value =
-      props.dedup?.mode === PostMergeDedupMode["dedup-key"] ? props.dedup.dedupKeyFieldPath : "";
-    const pagination = props.pagination;
-    if (pagination === null) {
-      paginationMode.value = "none";
-    } else if (pagination.convention === PostMergePaginationConvention["page-number"]) {
-      paginationMode.value = "page-number";
-      pageParamRef.value = pagination.pageParamRef;
-      sizeParamRef.value = pagination.sizeParamRef;
-      firstPageNumber.value = pagination.firstPageNumber;
-    } else {
-      paginationMode.value = "offset";
-      offsetParamRef.value = pagination.offsetParamRef;
-      sizeParamRef.value = pagination.sizeParamRef;
-    }
-    paginationConfirmedLocal.value = props.paginationConfirmed;
-  },
-  { immediate: true, deep: true },
+/**
+ * A stable signature of the union's **identifying inputs** — the set of filter / sort /
+ * pagination parameters the preview reports needs a decision. The editable draft is
+ * re-seeded only when THIS changes, never on the panel's own emitted prop echoes
+ * (`filters`/`sorts`/`dedup`/`pagination`, which the host passes straight back with the
+ * parameter sets unchanged). Re-seeding on every prop change would rebuild the entries
+ * with new identities → recompute `built*` → re-emit → an infinite update loop.
+ */
+const seedKey = computed<string>(() =>
+  JSON.stringify({
+    filters: props.analysis?.unserviceableFilters ?? [],
+    sorts: props.analysis?.unconfiguredSortParameters ?? [],
+    pagination: props.analysis?.unconfiguredPaginationParameters ?? [],
+  }),
 );
+
+/** (Re)initialise the editable draft from the current props — the persisted/initial values. */
+function reseed(): void {
+  for (const key of Object.keys(filterEntries)) delete filterEntries[key];
+  for (const param of props.analysis?.unserviceableFilters ?? []) {
+    const existing = props.filters.find((filter) => filter.consumerParamRef === param);
+    filterEntries[param] = {
+      fieldPath: existing?.consumerFieldPath ?? "",
+      operator: existing?.operator ?? PostMergeFilterOperator.eq,
+    };
+  }
+  for (const key of Object.keys(sortEntries)) delete sortEntries[key];
+  for (const param of props.analysis?.unconfiguredSortParameters ?? []) {
+    const existing = props.sorts.find((sort) => sort.consumerParamRef === param);
+    sortEntries[param] = {
+      fieldPath: existing?.consumerFieldPath ?? "",
+      direction: existing?.direction ?? PostMergeSortDirection.asc,
+    };
+  }
+  dedupChoice.value = props.dedup?.mode ?? null;
+  dedupKeyFieldPath.value =
+    props.dedup?.mode === PostMergeDedupMode["dedup-key"] ? props.dedup.dedupKeyFieldPath : "";
+  const pagination = props.pagination;
+  if (pagination === null) {
+    paginationMode.value = "none";
+  } else if (pagination.convention === PostMergePaginationConvention["page-number"]) {
+    paginationMode.value = "page-number";
+    pageParamRef.value = pagination.pageParamRef;
+    sizeParamRef.value = pagination.sizeParamRef;
+    firstPageNumber.value = pagination.firstPageNumber;
+  } else {
+    paginationMode.value = "offset";
+    offsetParamRef.value = pagination.offsetParamRef;
+    sizeParamRef.value = pagination.sizeParamRef;
+  }
+  paginationConfirmedLocal.value = props.paginationConfirmed;
+}
+
+watch(seedKey, reseed, { immediate: true });
 
 const builtFilters = computed<PostMergeFilter[]>(() =>
   Object.entries(filterEntries)
@@ -202,20 +216,28 @@ const builtPagination = computed<PostMergePaginationConventionValue | null>(() =
   return null;
 });
 
-/** Emit the whole union config whenever any editable piece changes. */
-watch(
-  [builtFilters, builtSorts, builtDedup, builtPagination, paginationConfirmedLocal],
-  () => {
-    emit("change", {
-      postMergeDedup: builtDedup.value,
-      postMergeFilters: builtFilters.value,
-      postMergeSorts: builtSorts.value,
-      postMergePagination: builtPagination.value,
-      confirmPostMergePagination: builtPagination.value !== null && paginationConfirmedLocal.value,
-    });
-  },
-  { deep: true },
-);
+/**
+ * Emit the whole union config when an editable piece changes — guarded by **value
+ * equality** so an echo that is deep-equal to what we last emitted (the host passing our
+ * own value straight back as props) is a no-op, never a fresh emit. This, with the
+ * `seedKey`-scoped re-seed above, keeps an edit from ping-ponging into a recursion loop.
+ */
+let lastEmitted = "";
+watch([builtFilters, builtSorts, builtDedup, builtPagination, paginationConfirmedLocal], () => {
+  const config: UnionConfigChange = {
+    postMergeDedup: builtDedup.value,
+    postMergeFilters: builtFilters.value,
+    postMergeSorts: builtSorts.value,
+    postMergePagination: builtPagination.value,
+    confirmPostMergePagination: builtPagination.value !== null && paginationConfirmedLocal.value,
+  };
+  const serialized = JSON.stringify(config);
+  if (serialized === lastEmitted) {
+    return;
+  }
+  lastEmitted = serialized;
+  emit("change", config);
+});
 
 const linkDedupAvailable = computed<boolean>(
   () => props.linkDedupAvailability.kind !== "unavailable",
@@ -471,6 +493,15 @@ function confirmPagination(): void {
             class="union-panel__chip"
             >{{ contributor }}</code
           >.
+        </p>
+        <p
+          v-else-if="linkDedupAvailability.kind === 'server-enforced'"
+          class="union-panel__note"
+          data-testid="union-dedup-record-link-note"
+        >
+          Note: per-contributor <code>nativeIdRef</code> coverage is not exposed here, so link-based
+          dedup is offered — but the server rejects it if any contributing backend resource lacks a
+          confirmed <code>nativeIdRef</code>.
         </p>
         <label class="union-panel__radio">
           <input
