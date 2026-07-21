@@ -9,9 +9,9 @@ import {
 } from "@mediator/domain";
 import {
   applyFieldMapping,
-  applyFieldMappings,
   isTransformError,
   readPath,
+  setPath,
   type JsonRecord,
   type JsonValue,
 } from "@mediator/transform";
@@ -304,7 +304,21 @@ function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Build the backend body from request-phase field mappings, or `undefined` when there are none. */
+/**
+ * Build the backend body from request-phase field mappings, or `undefined` when there are
+ * none (a bodyless call — a read, gated to `[]` in `serve-context`, or any operation whose
+ * pair maps no request body).
+ *
+ * Each field is applied **individually** with the same per-field `missing-input` tolerance
+ * the parameter loop uses (RP-2.5): an absent source **omits** its backend field rather than
+ * failing the whole build. This is provably safe — RP-2 (`validateInboundRequest` →
+ * `validateRequestBody`) already rejected any request missing a *required* consumer body
+ * field before this runs, so an absent source here is necessarily an **optional** consumer
+ * field the caller chose not to supply; omitting it is correct, never a silent drop of
+ * required data. Every other failure still fails loud as `mediator-transform-error`: a real
+ * transform failure (wrong type, bad config, expression error) and a refused target path
+ * both return a `request body transform:` detail, never a partial or corrupt backend body.
+ */
 function buildBackendBody(
   context: MappingContext,
 ):
@@ -314,15 +328,34 @@ function buildBackendBody(
     return { ok: true, value: undefined };
   }
   const bodySource = isJsonRecord(context.request.body) ? context.request.body : {};
-  try {
-    const applied = applyFieldMappings(context.requestPhaseFieldMappings, bodySource);
-    return { ok: true, value: applied.output };
-  } catch (error) {
-    if (isTransformError(error)) {
-      return { ok: false, detail: `request body transform: ${error.kind}` };
+  const output: JsonRecord = {};
+  for (const field of context.requestPhaseFieldMappings) {
+    let produced: JsonValue;
+    try {
+      produced = applyFieldMapping(field, bodySource).value;
+    } catch (error) {
+      if (isTransformError(error) && error.kind === "missing-input") {
+        // An optional consumer body field was not supplied (RP-2 guarantees it is not a
+        // required one) — omit the unset backend field, never a whole-body 500.
+        continue;
+      }
+      if (isTransformError(error)) {
+        // A real transform failure still fails loud, exactly as before.
+        return { ok: false, detail: `request body transform: ${error.kind}` };
+      }
+      throw error;
     }
-    throw error;
+    try {
+      setPath(output, recordRelativePath(field.targetPath), produced);
+    } catch (error) {
+      // `setPath` refuses an empty/colliding/forbidden target path (a `SetPathError`) — the
+      // same invalid-config-class failure `applyFieldMappings` itself rewraps. Surface it as
+      // the same loud, payload-free request-body transform error.
+      const kind = isTransformError(error) ? error.kind : "invalid-config";
+      return { ok: false, detail: `request body transform: ${kind}` };
+    }
   }
+  return { ok: true, value: output };
 }
 
 // ── TE-3: chained-binding input resolution ───────────────────────────────────
