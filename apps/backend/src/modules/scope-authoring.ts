@@ -901,6 +901,53 @@ export async function proposeScopeCorrespondences(
   return { proposed, skipped };
 }
 
+// ── SS-16 — consuming the typed skip reasons (surface "scoped but underivable") ────
+
+/**
+ * SS-16 — whether a {@link ScopeProposalSkipReason} means "this pair **looks scoped** but
+ * the mediator could not derive its `ScopeCorrespondence`", as opposed to the expected,
+ * uninteresting "not scoped". The three underivable reasons —
+ * `target-container-unresolved`, `no-source-scope-capture`, `no-value-preserving-pairing`
+ * — are precisely the state an operator would want to see (a container write op carries a
+ * scope parameter, yet no correspondence could be proposed, so `scope-link` stays
+ * unavailable and the pair silently cannot sync scoped). `not-scoped` is not that: it is
+ * the SS-18 out-of-scope rule firing correctly.
+ *
+ * This function is the consumer SS-18 left the reasons for: before it, the typed reasons
+ * were **returned but read by nothing** (see `proposeScopeCorrespondences`' doc). Pure, so
+ * it is unit-testable and reused wherever the skips are surfaced.
+ */
+export function isUnderivableScopeSkip(reason: ScopeProposalSkipReason): boolean {
+  return reason !== "not-scoped";
+}
+
+/**
+ * SS-16 — the underivable pairs of a proposal outcome (SS-18), i.e. `outcome.skipped`
+ * filtered to {@link isUnderivableScopeSkip}. The operator-facing half of a proposal run:
+ * an **empty** result is the healthy case (every pair either proposed a correspondence or
+ * was correctly not scoped); a non-empty one lists the pairs that look scoped but could
+ * not be derived, each with its typed reason, so a lifecycle pass / observability sink can
+ * surface them by `resourcePairRef` without re-deriving anything.
+ */
+export function underivableScopePairs(outcome: ScopeProposalOutcome): SkippedScopePair[] {
+  return outcome.skipped.filter((pair) => isUnderivableScopeSkip(pair.reason));
+}
+
+/** A one-line operator-readable explanation of why a scoped-looking pair could not derive. */
+export function describeUnderivableScopeSkip(reason: ScopeProposalSkipReason): string {
+  switch (reason) {
+    case "not-scoped":
+      // Not underivable — included for totality; callers gate on `isUnderivableScopeSkip`.
+      return "the pair is not container-scoped";
+    case "target-container-unresolved":
+      return "the target container path parameter resolves to no IR resource with a native id";
+    case "no-source-scope-capture":
+      return "the source resource captures no container identity (no confirmed sourceScopeRef components)";
+    case "no-value-preserving-pairing":
+      return "no source scope component pairs value-preservingly to any target container field";
+  }
+}
+
 /** The `OperationMapping`s whose two sides are exactly this directional resource pair. */
 function operationsForPair(
   operations: readonly OperationMapping[],

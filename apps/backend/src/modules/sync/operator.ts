@@ -33,6 +33,7 @@ import type {
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import {
+  AMBIGUOUS_CONTAINER_DETAILS_PREFIX,
   buildChangePayload,
   evaluateEnablement,
   parseAmbiguousContainerDetails,
@@ -310,6 +311,14 @@ const DEFAULT_STALE_MULTIPLIER = 3;
 /** Default bound for the audit-log/ambiguous-match scans — never unbounded history. */
 const DEFAULT_EVENT_LIMIT = 100;
 const AMBIGUOUS_DETAILS_PREFIX = "ambiguous identity match";
+/**
+ * SS-16 — how many park rows one page of {@link SyncOperatorService.listParkedContainerLinks}
+ * fetches, and the hard cap on how many it will scan in total before giving up on filling
+ * `limit`. The cap is what keeps the paged read **bounded** (never unbounded history) while
+ * still letting droppable rows be skipped rather than consume the operator's window.
+ */
+const PARKED_SCAN_PAGE = 100;
+const PARKED_SCAN_MAX = 1000;
 
 export class SyncOperatorService {
   readonly #db: Database;
@@ -580,9 +589,19 @@ export class SyncOperatorService {
    * engine recorded in the `failure` event's `details`. A record is dropped from the
    * queue once an active `RecordLink` exists for it (manually linked, or matched
    * afresh) — the "unresolved" qualifier. Bounded by `limit`.
+   *
+   * SS-16 — the family discriminator is pushed into the query
+   * ({@link SyncEventQuery.detailsPrefix}) rather than filtered in memory afterwards, so
+   * `limit` bounds *ambiguous-match* rows instead of being spent on unrelated `failure`
+   * rows that would silently empty this queue. Same defect, same fix as the parked
+   * container-link queue below; the in-memory `startsWith` stays as the exact re-check.
    */
   public async listAmbiguousMatches(limit = DEFAULT_EVENT_LIMIT): Promise<AmbiguousMatchView[]> {
-    const events = await this.#auditLog.querySyncEvents({ status: "failure", limit });
+    const events = await this.#auditLog.querySyncEvents({
+      status: "failure",
+      detailsPrefix: AMBIGUOUS_DETAILS_PREFIX,
+      limit,
+    });
     const recordLinks = new RecordLinkRepository(this.#db);
     const ruleRefCache = new Map<string, string | undefined>();
     const matches: AmbiguousMatchView[] = [];
@@ -664,38 +683,121 @@ export class SyncOperatorService {
    * `failure` `SyncEvent`s so an operator can link the container and replay. A parked
    * entry drops off once an active `ScopeLink` covers its source scope (mirroring the
    * ambiguous-record queue's drop-resolved). Bounded by `limit`. No payload/secret value.
+   *
+   * ## SS-16 — why this read pages, and what else it drops
+   *
+   * `audit_log` deliberately holds **no foreign keys**, so a park row **outlives every
+   * entity it references**. Two consequences made the pre-SS-16 read able to hide genuine
+   * parked containers rather than merely show stale ones — a *functional* defect, because
+   * the read is bounded:
+   *
+   * 1. **The bound was spent on the wrong rows.** The scan asked for the newest `limit`
+   *    `failure` rows of *any* family and only then filtered to container parks, so
+   *    ordinary write/conflict failures alone could fill the window and return an empty
+   *    queue while containers sat parked. Fixed by pushing the family discriminator into
+   *    SQL ({@link SyncEventQuery.detailsPrefix}), which makes `limit` a bound on park rows.
+   * 2. **Unclearable rows could never leave.** A park is cleared by linking its container,
+   *    but once the pair's `ScopeCorrespondence` or the source `RegisteredApp` is gone
+   *    (the deregistration cascade) there is nothing left to link *to*:
+   *    `lookupByScopeKey` can never return a covering link, `linkContainers` 404s, and no
+   *    dismiss route exists. Such rows are **permanently** unresolvable, so they are
+   *    dropped here as part of the same lifecycle cascade — no dismissal state to persist,
+   *    and therefore **no migration**. The audit row itself is retained untouched
+   *    (`docs/architecture/extensibility.md`: "the audit log retains all historical
+   *    events"); only its claim on this operator queue lapses.
+   *
+   * Dropping happens *after* the bounded fetch, so a page can still be consumed entirely
+   * by droppable rows. The scan therefore **pages** — up to {@link PARKED_SCAN_MAX} rows —
+   * until `limit` live entries are collected, so stale entries can no longer push a genuine
+   * parked container out of the response. Still bounded, never unbounded history.
    */
   public async listParkedContainerLinks(
     limit = DEFAULT_EVENT_LIMIT,
   ): Promise<ParkedContainerLinkView[]> {
-    const events = await this.#auditLog.querySyncEvents({ status: "failure", limit });
     const views: ParkedContainerLinkView[] = [];
-    for (const event of events) {
-      if (event.details === undefined) {
-        continue;
-      }
-      const parsed = parseAmbiguousContainerDetails(event.details);
-      if (parsed === undefined) {
-        continue;
-      }
-      // Drop already-resolved containers: an active ScopeLink covering the source scope.
-      const active = await this.#sync.scopeLinks.lookupByScopeKey(parsed.resourcePairRef, {
-        appId: parsed.sourceAppId,
-        scopeKey: parsed.sourceScopeKey,
+    // Per-read memo: one pair/app is typically shared by many park rows, so the liveness
+    // probes collapse to one query each rather than one per row.
+    const liveness = new Map<string, boolean>();
+    let scanned = 0;
+
+    while (views.length < limit && scanned < PARKED_SCAN_MAX) {
+      const page = await this.#auditLog.querySyncEvents({
+        status: "failure",
+        detailsPrefix: AMBIGUOUS_CONTAINER_DETAILS_PREFIX,
+        offset: scanned,
+        limit: Math.min(PARKED_SCAN_PAGE, PARKED_SCAN_MAX - scanned),
       });
-      if (active !== undefined) {
-        continue;
+      if (page.length === 0) {
+        break;
       }
-      views.push({
-        syncEventId: event.id,
-        resourcePairRef: parsed.resourcePairRef,
-        sourceAppId: parsed.sourceAppId,
-        sourceScopeKey: parsed.sourceScopeKey,
-        candidateTargetNativeIds: parsed.candidateNativeIds,
-        observedAt: event.timestamp,
-      });
+      scanned += page.length;
+
+      for (const event of page) {
+        if (views.length >= limit) {
+          break;
+        }
+        if (event.details === undefined) {
+          continue;
+        }
+        const parsed = parseAmbiguousContainerDetails(event.details);
+        if (parsed === undefined) {
+          continue;
+        }
+        // Drop already-resolved containers: an active ScopeLink covering the source scope.
+        const active = await this.#sync.scopeLinks.lookupByScopeKey(parsed.resourcePairRef, {
+          appId: parsed.sourceAppId,
+          scopeKey: parsed.sourceScopeKey,
+        });
+        if (active !== undefined) {
+          continue;
+        }
+        // SS-16 — drop entries no operator action could ever clear (see the doc above).
+        if (!(await this.#parkIsActionable(parsed.resourcePairRef, parsed.sourceAppId, liveness))) {
+          continue;
+        }
+        views.push({
+          syncEventId: event.id,
+          resourcePairRef: parsed.resourcePairRef,
+          sourceAppId: parsed.sourceAppId,
+          sourceScopeKey: parsed.sourceScopeKey,
+          candidateTargetNativeIds: parsed.candidateNativeIds,
+          observedAt: event.timestamp,
+        });
+      }
     }
     return views;
+  }
+
+  /**
+   * SS-16 — whether a parked container is still **actionable**: both entities the
+   * operator's remedy needs must still exist. Linking the container (SS-11.6) resolves
+   * the pair's `ScopeCorrespondence` and establishes a `ScopeLink` between two live apps,
+   * so a park whose correspondence *or* whose source app is gone can never be cleared and
+   * has no business occupying the bounded queue. Memoized per read (`liveness`), keyed by
+   * a prefixed key so a pair ref and an app id can never collide.
+   */
+  async #parkIsActionable(
+    resourcePairRef: string,
+    sourceAppId: string,
+    liveness: Map<string, boolean>,
+  ): Promise<boolean> {
+    const pairKey = `pair:${resourcePairRef}`;
+    let pairLives = liveness.get(pairKey);
+    if (pairLives === undefined) {
+      pairLives =
+        (await this.#scopeCorrespondences.getByResourcePair(resourcePairRef)) !== undefined;
+      liveness.set(pairKey, pairLives);
+    }
+    if (!pairLives) {
+      return false;
+    }
+    const appKey = `app:${sourceAppId}`;
+    let appLives = liveness.get(appKey);
+    if (appLives === undefined) {
+      appLives = (await this.#repos.registeredApps.getById(sourceAppId)) !== undefined;
+      liveness.set(appKey, appLives);
+    }
+    return appLives;
   }
 
   // ── SS-15: scope identity key confirmation + container-linking context ───────

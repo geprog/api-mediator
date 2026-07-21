@@ -10,6 +10,7 @@ import type {
 } from "@mediator/domain";
 import type { EstablishScopeLinkResult, ScopeLinkStore } from "@mediator/db";
 import {
+  AMBIGUOUS_CONTAINER_DETAILS_PREFIX,
   parseAmbiguousContainerDetails,
   type ContainerParkReader,
   type ContainerResolutionOutcome,
@@ -499,10 +500,18 @@ function leafSegment(path: string): string {
 
 // ── Container-park dedup reader (SS-11.7) ──────────────────────────────────────
 
-/** The narrow `failure`-event read the {@link RepoContainerParkReader} needs. */
+/**
+ * The narrow `failure`-event read the {@link RepoContainerParkReader} needs.
+ *
+ * SS-16 — `detailsPrefix` is part of the port because the dedup scan is **bounded**: without
+ * pushing the container-park discriminator down to SQL, the bound is spent on `failure` rows
+ * of every other family, the reader finds no open park to reuse, and the sweep mints a
+ * **duplicate** park every pass — the unbounded audit-log growth SS-11.7 exists to prevent.
+ */
 export interface ContainerParkAuditReader {
   querySyncEvents(query: {
     readonly status: "failure";
+    readonly detailsPrefix: string;
     readonly limit: number;
   }): Promise<AuditLogEntry[]>;
 }
@@ -534,7 +543,11 @@ export class RepoContainerParkReader implements ContainerParkReader {
     resourcePairRef: string,
     sourceScopeKey: ScopeKey,
   ): Promise<string | undefined> {
-    const events = await this.#audit.querySyncEvents({ status: "failure", limit: this.#limit });
+    const events = await this.#audit.querySyncEvents({
+      status: "failure",
+      detailsPrefix: AMBIGUOUS_CONTAINER_DETAILS_PREFIX,
+      limit: this.#limit,
+    });
     for (const event of events) {
       if (event.details === undefined) {
         continue;

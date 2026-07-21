@@ -12,6 +12,7 @@ import { createDb } from "@mediator/db";
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
 import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
+import { buildScopeProposalReporter } from "./modules/artifact-instantiation/report-scope-proposal.js";
 import { buildDetectionBackground } from "./modules/detection/background.js";
 import { buildSyncBackground } from "./modules/sync/background.js";
 
@@ -49,7 +50,13 @@ const { app, shutdown: shutdownServer } = buildServer({ config, db, logger, sync
 // own — it registers on the single shared outbox dispatcher below (a second
 // dispatcher over the same outbox would mark a foreign event published without
 // delivering it to its consumer).
-const artifactInstantiation = buildArtifactInstantiation({ db });
+// SS-16 — surface "scoped but underivable" pairs (SS-18's typed skip reasons) to the
+// operator through the shared logger, so a pair that looks scoped yet could not derive a
+// `ScopeCorrespondence` is no longer silently dropped on the floor.
+const artifactInstantiation = buildArtifactInstantiation({
+  db,
+  reportScopeProposal: buildScopeProposalReporter(logger),
+});
 
 // The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers
 // `SpecIngested` to the detection consumer, which enqueues a job), the durable

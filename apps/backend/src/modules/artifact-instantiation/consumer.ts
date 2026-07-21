@@ -9,9 +9,23 @@ import {
 } from "@mediator/domain";
 import { parseMappingApproved, type DeliveredEvent, type EventConsumer } from "@mediator/event-bus";
 
-import type { ScopeCorrespondenceProposalOps } from "../scope-authoring.js";
+import type { ScopeCorrespondenceProposalOps, ScopeProposalOutcome } from "../scope-authoring.js";
 import { proposeScopeCorrespondences } from "../scope-authoring.js";
 import { instantiateArtifacts } from "./instantiate.js";
+
+/**
+ * SS-16 — an optional sink for the `ScopeCorrespondence` proposal outcome. Injected so the
+ * typed {@link ScopeProposalSkipReason}s SS-18 returns are **read** (see
+ * `underivableScopePairs`): the composition root wires it to surface "scoped but
+ * underivable" pairs to the operator. It is called with the **whole** outcome after each
+ * proposal run; a no-op default keeps every existing harness behaving exactly as before.
+ * Synchronous and side-effect-only (it must not throw): the reaction's correctness never
+ * depends on the report, so an observability sink can never fail the instantiation tx.
+ */
+export type ScopeProposalReporter = (
+  outcome: ScopeProposalOutcome,
+  context: { readonly approvedMappingId: string },
+) => void;
 
 /**
  * The stable consumer identity the Event Bus deduplicates under (its
@@ -62,6 +76,11 @@ export interface MappingApprovedInstantiationConsumerDeps<TTx> {
    * proposal is additive to the reaction, never a precondition of it).
    */
   readonly scopeProposalOps?: ScopeCorrespondenceProposalOpsFactory<TTx>;
+  /**
+   * SS-16 — optional sink for the proposal outcome, so the underivable-skip reasons are
+   * surfaced to the operator (see {@link ScopeProposalReporter}). Omitted → no report.
+   */
+  readonly reportScopeProposal?: ScopeProposalReporter;
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
 }
@@ -89,12 +108,14 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
   readonly #load: ApprovedMappingLoader<TTx>;
   readonly #ops: DownstreamArtifactOpsFactory<TTx>;
   readonly #scopeProposalOps: ScopeCorrespondenceProposalOpsFactory<TTx> | undefined;
+  readonly #reportScopeProposal: ScopeProposalReporter | undefined;
   readonly #newId: () => string;
 
   public constructor(deps: MappingApprovedInstantiationConsumerDeps<TTx>) {
     this.#load = deps.load;
     this.#ops = deps.ops;
     this.#scopeProposalOps = deps.scopeProposalOps;
+    this.#reportScopeProposal = deps.reportScopeProposal;
     this.#newId = deps.newId ?? ((): string => randomUUID());
   }
 
@@ -126,13 +147,15 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
     // and never clobbers a confirmed one.
     const scopeProposalOps = this.#scopeProposalOps;
     if (scopeProposalOps !== undefined) {
-      await proposeScopeCorrespondences({
+      const outcome = await proposeScopeCorrespondences({
         mapping: loaded.mapping,
         fields: loaded.fields,
         operations: loaded.operations,
         ops: scopeProposalOps(tx),
         newId: this.#newId,
       });
+      // SS-16 — surface the outcome (its underivable skips especially) to the operator.
+      this.#reportScopeProposal?.(outcome, { approvedMappingId });
     }
   }
 }

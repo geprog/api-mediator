@@ -1,5 +1,5 @@
-import type { ScopeKey, ScopeLink } from "@mediator/domain";
-import { and, eq, or, sql } from "drizzle-orm";
+import type { ScopeKey, ScopeLink, ScopeLinkEstablishedBy } from "@mediator/domain";
+import { and, eq, or, sql, type SQL } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapScopeLinkRow, toScopeLinkInsert } from "../mappers/scope-link.js";
@@ -229,17 +229,37 @@ export class ScopeLinkRepository implements ScopeLinkStore {
   }
 
   /**
-   * Archive **every** `ScopeLink` under a correspondence (SS-10.5): set
-   * `status = 'archived'` — **never delete** — so a `RecordLink.scopeRef` pointing at
+   * Archive the **active** `ScopeLink`s under a correspondence (SS-10.5 / SS-16.4/16.5):
+   * set `status = 'archived'` — **never delete** — so a `RecordLink.scopeRef` pointing at
    * one still resolves its frozen key for a final delete/audit (SS-10 criterion 5).
-   * The archive *trigger* (a container/app leaving the landscape) is Phase-6 app
-   * lifecycle; this is the capability it will call. Returns the number archived.
+   *
+   * Two callers, two `establishedBy` scopes (SS-16):
+   *  - a **container/app leaving the landscape** archives **all** links (default, no
+   *    filter) — every link points at a container that is gone;
+   *  - a **scope-identity-key** break (SS-16.4) archives only `establishedBy =
+   *    "identity-match"` links — those formed by the value-preserving comparison that no
+   *    longer type-checks; a `constant`/`manual` link is an operator's explicit pinning,
+   *    independent of the identity key, so it is left active.
+   *
+   * Only **active** rows are flipped (the `status = 'active'` guard), so a re-run over an
+   * already-archived correspondence is a no-op and the returned count is the number of
+   * links this call actually archived — not a re-count of history. Returns that count.
    */
-  public async archiveByCorrespondence(scopeCorrespondenceId: string): Promise<number> {
+  public async archiveByCorrespondence(
+    scopeCorrespondenceId: string,
+    options: { readonly establishedBy?: ScopeLinkEstablishedBy } = {},
+  ): Promise<number> {
+    const conditions: SQL[] = [
+      eq(scopeLink.scopeCorrespondenceId, scopeCorrespondenceId),
+      eq(scopeLink.status, "active"),
+    ];
+    if (options.establishedBy !== undefined) {
+      conditions.push(eq(scopeLink.establishedBy, options.establishedBy));
+    }
     const archived = await this.db
       .update(scopeLink)
       .set({ status: "archived" })
-      .where(eq(scopeLink.scopeCorrespondenceId, scopeCorrespondenceId))
+      .where(and(...conditions))
       .returning({ id: scopeLink.id });
     return archived.length;
   }

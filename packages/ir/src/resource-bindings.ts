@@ -322,7 +322,7 @@ function scalarContainerComponents(
 }
 
 /** The top-level field names of a schema the group knows (primary or cross-ref). */
-function schemaFieldNames(group: IrResourceGroup, type: string): string[] | undefined {
+export function schemaFieldNames(group: IrResourceGroup, type: string): string[] | undefined {
   if (type.endsWith("[]")) return undefined;
   const named = group.schemas.find((schema) => schema.name === type);
   if (named !== undefined) return named.fields.map((schemaField) => schemaField.name);
@@ -395,7 +395,7 @@ function scopeComponent(fieldPath: string): ScopeComponent {
  * `enum`/`default`/`example` hint — still unconfirmed, so used nowhere (SS-2
  * criteria 2, 5).
  */
-function deriveScopePathBindings(group: IrResourceGroup): ScopePathBinding[] {
+export function deriveScopePathBindings(group: IrResourceGroup): ScopePathBinding[] {
   return collectScopeParameterNames(group).map((parameterName) => ({
     kind: "constant",
     parameterName,
@@ -406,7 +406,7 @@ function deriveScopePathBindings(group: IrResourceGroup): ScopePathBinding[] {
 }
 
 /** Distinct scope-parameter names across a group's operations, first-seen order. */
-function collectScopeParameterNames(group: IrResourceGroup): string[] {
+export function collectScopeParameterNames(group: IrResourceGroup): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];
   for (const operation of group.operations) {
@@ -489,7 +489,7 @@ function singleValueHint(parameter: IrParameter): string | undefined {
  * the shortest path, then lexicographic order for a stable tiebreak. Absent when
  * the group offers no such GET.
  */
-function pickCollectionRead(operations: readonly IrOperation[]): IrOperation | undefined {
+export function pickCollectionRead(operations: readonly IrOperation[]): IrOperation | undefined {
   const candidates = operations.filter(
     (operation) => operation.method === "get" && !lastSegmentIsParameter(operation.path),
   );
@@ -507,7 +507,7 @@ function pickCollectionRead(operations: readonly IrOperation[]): IrOperation | u
  * refs. Prefers the collection read's (item-flattened) response, then any single
  * GET's response, then the first group schema carrying a native-id-like field.
  */
-function pickRepresentationFields(
+export function pickRepresentationFields(
   group: IrResourceGroup,
   collectionRead: IrOperation | undefined,
 ): readonly IrField[] {

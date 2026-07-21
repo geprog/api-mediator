@@ -17,7 +17,11 @@ import {
   proposeScopeCorrespondences,
   type ScopeCorrespondenceProposalOps,
 } from "../scope-authoring.js";
-import { MappingApprovedInstantiationConsumer, type LoadedApprovedMapping } from "./consumer.js";
+import {
+  MappingApprovedInstantiationConsumer,
+  type LoadedApprovedMapping,
+  type ScopeProposalReporter,
+} from "./consumer.js";
 import { instantiateArtifacts } from "./instantiate.js";
 import { ArtifactInstantiationReconciler } from "./reconciler.js";
 
@@ -37,6 +41,12 @@ import { ArtifactInstantiationReconciler } from "./reconciler.js";
  */
 export interface ArtifactInstantiationDeps {
   readonly db: Database;
+  /**
+   * SS-16 — optional sink for the SS-18 `ScopeCorrespondence` proposal outcome. The
+   * composition root wires it (from the shared logger) to surface "scoped but underivable"
+   * pairs to the operator; omitted, no report is made (existing harnesses unaffected).
+   */
+  readonly reportScopeProposal?: ScopeProposalReporter;
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
 }
@@ -81,6 +91,9 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
     load,
     ops: (handle) => new DownstreamArtifactRepository(handle),
     scopeProposalOps,
+    ...(deps.reportScopeProposal !== undefined
+      ? { reportScopeProposal: deps.reportScopeProposal }
+      : {}),
     newId,
   });
 
@@ -103,13 +116,15 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
         // The reconciler re-derives the WHOLE reaction, proposal included (SS-18.6's
         // "a re-run instantiation" case) — idempotent, so a pair that already has a
         // correspondence keeps exactly the one it has.
-        await proposeScopeCorrespondences({
+        const outcome = await proposeScopeCorrespondences({
           mapping: loaded.mapping,
           fields: loaded.fields,
           operations: loaded.operations,
           ops: scopeProposalOps(handle),
           newId,
         });
+        // SS-16 — surface the outcome's underivable skips through the same reporter.
+        deps.reportScopeProposal?.(outcome, { approvedMappingId });
       }),
   });
 

@@ -76,6 +76,7 @@ export {
   resourceBindingRefKindEnum,
   reviewStateEnum,
   scopeCorrespondence,
+  scopeLink,
   syncFieldState,
   syncFieldStateSideEnum,
   syncFieldStateStatusEnum,
