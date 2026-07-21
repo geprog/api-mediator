@@ -20,6 +20,7 @@ import {
   type FanoutMergeContext,
 } from "./aggregator.js";
 import type { BackendCaller } from "./backend-call.js";
+import { orderFirstSuccessAttempts, firstSuccessExhaustionCause } from "./first-success.js";
 import {
   validateConsumerResponse,
   validateInboundRequest,
@@ -28,6 +29,7 @@ import {
 import { planResolution, type BindingHealthInput } from "./planner.js";
 import {
   bindingFailureCause,
+  plannerCauseToFailure,
   resultFailureCause,
   type BindingFailure,
   type BindingResult,
@@ -73,12 +75,18 @@ interface ChainSource {
 
 /**
  * **The real `ServeHandler` (RP/TE/AG) injected behind the RT Protocol-Server seam.**
- * It runs the serve pipeline for the `single` (AG-1) and `fanout-merge` (AG-2, with TE-3
- * chained bindings) strategies:
+ * It runs the serve pipeline for the `single` (AG-1), `fanout-merge` (AG-2, with TE-3
+ * chained bindings), `collection-union` (AG-3/4/5), and `fanout-first-success` (AG-6,
+ * ordered fallback) strategies:
  *
  *   load context → RP-2 validate inbound → RP-3/RP-4 plan → per binding
  *   (TE-1 map request, TE-3 fill chained inputs, TE-2 call backend, TE-4 map response) →
  *   TE-5 envelopes → AG-1/AG-2 aggregate → AG-7 validate response → {@link ServeOutcome}.
+ *
+ * `collection-union` and `fanout-first-success` run their own I/O loops instead of the
+ * eager `executePlan`: the union fans out a bounded paged fetch, while
+ * `fanout-first-success` walks its ordered chain **lazily**, one binding at a time, so the
+ * first success short-circuits the rest (AG-6.2).
  *
  * Bindings run **grouped by `executionOrder`** — a group in parallel, groups in ascending
  * order — and a **chained** binding (`dependsOnBindingId`) waits for its upstream's
@@ -182,18 +190,30 @@ export class AdapterServeHandler implements ServeHandler {
     }
     const plan = planResult.plan;
 
-    // AG-1/AG-2/AG-3 — execute + aggregate per the endpoint's strategy. `collection-union`
+    // AG-1/AG-2/AG-3/AG-6 — execute + aggregate per the endpoint's strategy. `collection-union`
     // (AG-3/4/5) runs its own bounded paged fetch + merge/dedup/filter/sort/paginate path;
-    // `single`/`fanout-merge` run the per-binding executor + their aggregators.
-    const aggregate =
-      plan.aggregationStrategy === "collection-union"
-        ? await this.serveCollectionUnion(plan, context, consumerOperation, input)
-        : this.aggregate(
-            plan,
-            await this.executePlan(plan, context, consumerOperation, input.request),
-            context,
-            consumerOperation,
-          );
+    // `fanout-first-success` (AG-6) walks its ordered chain LAZILY, short-circuiting on the
+    // first success (so the eager `executePlan` must NOT run for it — it would call every
+    // binding, violating AG-6.2); `single`/`fanout-merge` run the per-binding executor + their
+    // aggregators.
+    let aggregate: AggregateOutcome;
+    if (plan.aggregationStrategy === "collection-union") {
+      aggregate = await this.serveCollectionUnion(plan, context, consumerOperation, input);
+    } else if (plan.aggregationStrategy === "fanout-first-success") {
+      aggregate = await this.serveFanoutFirstSuccess(
+        plan,
+        context,
+        consumerOperation,
+        input.request,
+      );
+    } else {
+      aggregate = this.aggregate(
+        plan,
+        await this.executePlan(plan, context, consumerOperation, input.request),
+        context,
+        consumerOperation,
+      );
+    }
     if (aggregate.kind === "failure") {
       return { kind: "failed", cause: bindingFailureCause(aggregate.failure) };
     }
@@ -510,6 +530,83 @@ export class AdapterServeHandler implements ServeHandler {
       "adapter serve: mediator-side union defect",
     );
     return { kind: "fail-loud", failure: { cause: "mediator-transform-error", detail } };
+  }
+
+  /**
+   * **AG-6 — serve a `fanout-first-success` endpoint (ordered fallback).** The `primary` is
+   * tried first, then each `fallback` in ascending `executionOrder` (AG-6.1); the chain is
+   * walked **lazily, one binding at a time**, so the first success short-circuits — no later
+   * binding is called at all (AG-6.2, the load-bearing invariant). A planner-eliminated binding
+   * is skipped exactly like a failure without a call (AG-6.3); a live call failure likewise
+   * continues. When the whole chain is exhausted, the request fails with the primary's specific
+   * cause so a chain exhausted by staleness reports `mapping-stale`, never a generic upstream
+   * error (AG-6.4).
+   *
+   * Strictness is deliberately NOT threaded into the abort decision: fallback-on-failure is the
+   * whole contract of this strategy, and strictness only governs `supplement` degradation
+   * (AG-2), which this strategy has none of. The ordering, role-validity defense, and
+   * exhaustion-cause selection are the pure {@link orderFirstSuccessAttempts} /
+   * {@link firstSuccessExhaustionCause}; only {@link executeBinding} does I/O. There is no
+   * chaining and no `supplement` path here — the planner's TE-3.6 backstop fails loud on a
+   * chained binding, and the role defense fails loud on a `supplement` or a primary count ≠ 1.
+   *
+   * (Write endpoints may not use this strategy — a timed-out primary may have succeeded — but
+   * that enforcement is deferred to WR-1; this handler serves reads only.)
+   */
+  private async serveFanoutFirstSuccess(
+    plan: ResolutionPlan,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    request: AdapterRequest,
+  ): Promise<AggregateOutcome> {
+    // AG-6.1 defense-in-depth — order the chain and re-validate the role table at execution
+    // (exactly one primary, zero supplements); a violation is a CO-2 composition defect surfaced
+    // loud, never trusted from the planner.
+    const ordered = orderFirstSuccessAttempts(plan);
+    if (!ordered.ok) {
+      return this.firstSuccessDefect(plan.endpointId, ordered.detail);
+    }
+
+    const recordedCauses: BindingFailure[] = [];
+    for (const attempt of ordered.attempts) {
+      if (attempt.kind === "eliminated") {
+        // AG-6.3 — a planner-eliminated binding (mapping-stale / mapping-suspended /
+        // backend-disabled) is skipped like a failure: NOT called, its cause recorded, next tried.
+        recordedCauses.push(plannerCauseToFailure(attempt.eliminated.cause));
+        continue;
+      }
+
+      // AG-6.2 — call exactly this binding; a success short-circuits so no later binding runs.
+      const result = await this.executeBinding(
+        attempt.planned,
+        undefined,
+        context,
+        consumerOperation,
+        request,
+      );
+      if (result.kind === "success") {
+        return {
+          kind: "success",
+          payload: result.payload,
+          contributingBackendAppIds: [result.backendAppId],
+          degraded: false,
+          degradedBackendAppIds: [],
+        };
+      }
+      recordedCauses.push(resultFailureCause(result));
+    }
+
+    // AG-6.4 — the whole chain is exhausted: fail with the first-tried (primary's) specific cause.
+    return { kind: "failure", failure: firstSuccessExhaustionCause(recordedCauses) };
+  }
+
+  /** A whole-request fail-loud for a `fanout-first-success` role/ordering defect (AG-6.1 / AG-7.4). */
+  private firstSuccessDefect(endpointId: string, detail: string): AggregateOutcome {
+    this.deps.logger.warn(
+      { endpointId, cause: "mediator-transform-error", detail },
+      "adapter serve: mediator-side fanout-first-success defect",
+    );
+    return { kind: "failure", failure: { cause: "mediator-transform-error", detail } };
   }
 
   /**

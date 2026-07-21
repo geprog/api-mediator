@@ -1,6 +1,7 @@
 import type { ServeInput } from "@mediator/adapter-engine";
 import type {
   AdapterBinding,
+  AdapterBindingRole,
   AdapterEndpoint,
   ApprovedMappingStatus,
   FieldMapping,
@@ -573,5 +574,343 @@ describe("AdapterServeHandler — chained bindings (TE-3)", () => {
     // The primary failed → whole request fails; the dependent supplement was never called.
     expect(outcome).toEqual({ kind: "failed", cause: "upstream-error" });
     expect(caller.inputsByApp.has("billing")).toBe(false);
+  });
+});
+
+// ── fanout-first-success (AG-6) ordered fallback ─────────────────────────────
+
+/** A single-object consumer op served by whichever backend answers first. */
+const consumerGetThing: IrOperation = {
+  operationId: "getThing",
+  method: "get",
+  path: "/things/{thingId}",
+  parameters: [param({ name: "thingId", location: "path", required: true })],
+  responseSchema: {
+    name: "Thing",
+    fields: [
+      { name: "id", type: "string", required: true },
+      { name: "title", type: "string", required: true },
+    ],
+  },
+};
+
+/** A backend `GET /{resource}/{id}` operation; each alternative backend has its own resource. */
+function backendGet(resource: string): IrOperation {
+  return {
+    operationId: `get_${resource}`,
+    method: "get",
+    path: `/${resource}/{id}`,
+    parameters: [param({ name: "id", location: "path", required: true })],
+  };
+}
+
+function thingIdParam(resource: string): ParameterMapping {
+  return {
+    id: `pm-${resource}`,
+    operationMappingId: `om-${resource}`,
+    sourceParamRef: "things/getThing#thingId",
+    targetParamRef: `${resource}/get_${resource}#id`,
+  };
+}
+
+/** Map a backend's native `{resource}_id`/`{resource}_name` to the consumer `{id,title}` shape. */
+function thingResponsePhase(resource: string): readonly FieldMapping[] {
+  return [
+    rename(`fm-${resource}-id`, `${resource}/${resource}_id`, "things/id"),
+    rename(`fm-${resource}-title`, `${resource}/${resource}_name`, "things/title"),
+  ];
+}
+
+/** A `fanout-first-success` binding: its own backend app + resource, role, and executionOrder. */
+function ffsBinding(
+  id: string,
+  role: AdapterBindingRole,
+  backendAppId: string,
+  resource: string,
+  executionOrder: number,
+): AdapterBinding {
+  return {
+    id,
+    adapterEndpointId: "endpoint-ffs",
+    backendAppId,
+    backendOperationId: `${resource}/get_${resource}`,
+    approvedMappingId: "mapping-1",
+    role,
+    status: "active",
+    executionOrder,
+  };
+}
+
+function ffsLoaded(
+  bind: AdapterBinding,
+  resource: string,
+  overrides: Partial<LoadedBinding> = {},
+): LoadedBinding {
+  return {
+    binding: bind,
+    mappingId: "mapping-1",
+    mappingStatus: "active",
+    backendStatus: "active",
+    parameterMappings: [thingIdParam(resource)],
+    requestPhaseFieldMappings: [],
+    responsePhaseFieldMappings: thingResponsePhase(resource),
+    backendBaseUrl: `http://${bind.backendAppId}.example`,
+    backendOperation: backendGet(resource),
+    ...overrides,
+  };
+}
+
+function ffsEndpoint(): AdapterEndpoint {
+  return {
+    id: "endpoint-ffs",
+    consumerAppId: "consumer-app",
+    consumerOperationId: "things/getThing",
+    status: "active",
+    aggregationStrategy: "fanout-first-success",
+    strictness: "degraded",
+  };
+}
+
+function ffsInput(activeBindings: readonly AdapterBinding[]): ServeInput {
+  return {
+    request: {
+      consumerAppId: "consumer-app",
+      operationKey: "things/getThing",
+      pathParameters: { thingId: "1" },
+      query: {},
+      headers: {},
+      body: undefined,
+    },
+    endpoint: ffsEndpoint(),
+    activeBindings,
+  };
+}
+
+/** A backend success returning a resource-tagged body (so the winner is identifiable). */
+function thingOk(resource: string): BackendCallResult {
+  return { ok: true, body: { [`${resource}_id`]: "1", [`${resource}_name`]: `from-${resource}` } };
+}
+const upstream500: BackendCallResult = { ok: false, kind: "upstream-error", detail: "HTTP 500" };
+
+describe("AdapterServeHandler — fanout-first-success (AG-6)", () => {
+  it("AG-6.2: a succeeding primary short-circuits — the fallback backend is never called", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const fallback = ffsBinding("f", "fallback", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(primary, "alpha"), ffsLoaded(fallback, "bravo")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", thingOk("alpha")],
+        // A success is scripted for the fallback too — proving it is never CALLED, not that it fails.
+        ["bravo-app", thingOk("bravo")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, fallback]));
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "1", title: "from-alpha" },
+      degraded: false,
+      contributingBackendAppIds: ["alpha-app"],
+    });
+    // AG-6.2 — the load-bearing invariant: only the primary was called.
+    expect(caller.order).toEqual(["alpha-app"]);
+  });
+
+  it("AG-6.2: a failing primary falls to the first fallback; a later fallback is never called", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const f1 = ffsBinding("f1", "fallback", "bravo-app", "bravo", 1);
+    const f2 = ffsBinding("f2", "fallback", "charlie-app", "charlie", 2);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(primary, "alpha"), ffsLoaded(f1, "bravo"), ffsLoaded(f2, "charlie")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", upstream500],
+        ["bravo-app", thingOk("bravo")],
+        ["charlie-app", thingOk("charlie")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, f1, f2]));
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "1", title: "from-bravo" },
+      degraded: false,
+      contributingBackendAppIds: ["bravo-app"],
+    });
+    // Exactly the primary + first fallback were tried; the second fallback never ran.
+    expect(caller.order).toEqual(["alpha-app", "bravo-app"]);
+  });
+
+  it("AG-6.1: the primary is tried FIRST even when a fallback has a lower executionOrder", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 9);
+    const fallback = ffsBinding("f", "fallback", "bravo-app", "bravo", 0);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(primary, "alpha"), ffsLoaded(fallback, "bravo")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", upstream500],
+        ["bravo-app", thingOk("bravo")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, fallback]));
+    expect(outcome.kind).toBe("served");
+    // The primary (order 9) was tried before the fallback (order 0) — order by role, not number.
+    expect(caller.order).toEqual(["alpha-app", "bravo-app"]);
+  });
+
+  it("AG-6.1: fallbacks are tried in ascending executionOrder", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    // f2 (order 2) is listed BEFORE f1 (order 1); ordering must still try f1 first.
+    const f2 = ffsBinding("f2", "fallback", "charlie-app", "charlie", 2);
+    const f1 = ffsBinding("f1", "fallback", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(primary, "alpha"), ffsLoaded(f2, "charlie"), ffsLoaded(f1, "bravo")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", upstream500],
+        ["bravo-app", upstream500],
+        ["charlie-app", thingOk("charlie")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, f2, f1]));
+    expect(outcome.kind).toBe("served");
+    if (outcome.kind !== "served") return;
+    expect(outcome.body).toEqual({ id: "1", title: "from-charlie" });
+    expect(caller.order).toEqual(["alpha-app", "bravo-app", "charlie-app"]);
+  });
+
+  it("AG-6.3: an eliminated (stale) binding is skipped WITHOUT a call; the next is tried", async () => {
+    // The primary's mapping is stale → the planner eliminates it; the walk skips it (no call).
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const fallback = ffsBinding("f", "fallback", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [
+        ffsLoaded(primary, "alpha", { mappingStatus: "stale" }),
+        ffsLoaded(fallback, "bravo"),
+      ],
+    };
+    const caller = new MultiBackendCaller(new Map([["bravo-app", thingOk("bravo")]]));
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, fallback]));
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "1", title: "from-bravo" },
+      degraded: false,
+      contributingBackendAppIds: ["bravo-app"],
+    });
+    // The eliminated primary was never called; only the fallback ran.
+    expect(caller.order).toEqual(["bravo-app"]);
+  });
+
+  it("AG-6.3: a mix of eliminated + live-failed bindings is walked until one succeeds", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const f1 = ffsBinding("f1", "fallback", "bravo-app", "bravo", 1);
+    const f2 = ffsBinding("f2", "fallback", "charlie-app", "charlie", 2);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [
+        // primary eliminated (suspended), f1 a live failure, f2 succeeds.
+        ffsLoaded(primary, "alpha", { mappingStatus: "suspended" }),
+        ffsLoaded(f1, "bravo"),
+        ffsLoaded(f2, "charlie"),
+      ],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["bravo-app", upstream500],
+        ["charlie-app", thingOk("charlie")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, f1, f2]));
+    expect(outcome).toMatchObject({ kind: "served", body: { id: "1", title: "from-charlie" } });
+    // primary skipped (eliminated), f1 called + failed, f2 called + won.
+    expect(caller.order).toEqual(["bravo-app", "charlie-app"]);
+  });
+
+  it("AG-6.4: an all-stale chain fails as mapping-stale, calling no backend", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const fallback = ffsBinding("f", "fallback", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [
+        ffsLoaded(primary, "alpha", { mappingStatus: "stale" }),
+        ffsLoaded(fallback, "bravo", { mappingStatus: "stale" }),
+      ],
+    };
+    const caller = new MultiBackendCaller(new Map());
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, fallback]));
+    expect(outcome).toEqual({ kind: "failed", cause: "mapping-stale" });
+    expect(caller.order).toEqual([]);
+  });
+
+  it("AG-6.4: an exhausted mixed chain reports the primary's cause (never a generic upstream error)", async () => {
+    // Primary stale (eliminated), fallback a live upstream failure → the chain reports the
+    // primary's mapping-stale, NOT the fallback's upstream-error.
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const fallback = ffsBinding("f", "fallback", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [
+        ffsLoaded(primary, "alpha", { mappingStatus: "stale" }),
+        ffsLoaded(fallback, "bravo"),
+      ],
+    };
+    const caller = new MultiBackendCaller(new Map([["bravo-app", upstream500]]));
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([primary, fallback]));
+    expect(outcome).toEqual({ kind: "failed", cause: "mapping-stale" });
+    expect(caller.order).toEqual(["bravo-app"]);
+  });
+
+  it("AG-6.1 role defense: a supplement in the set fails loud as mediator-transform-error, no call", async () => {
+    const primary = ffsBinding("p", "primary", "alpha-app", "alpha", 0);
+    const supplement = ffsBinding("s", "supplement", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(primary, "alpha"), ffsLoaded(supplement, "bravo")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", thingOk("alpha")],
+        ["bravo-app", thingOk("bravo")],
+      ]),
+    );
+    const logger = new RecordingLogger();
+    const handler = new AdapterServeHandler({
+      loader: fakeLoader(ctx),
+      backendCaller: caller,
+      logger,
+    });
+    const outcome = await handler.serve(ffsInput([primary, supplement]));
+    expect(outcome).toEqual({ kind: "failed", cause: "mediator-transform-error" });
+    // The composition defect is caught before any binding runs.
+    expect(caller.order).toEqual([]);
+    expect(logger.warnings.some((w) => w.fields["cause"] === "mediator-transform-error")).toBe(
+      true,
+    );
+  });
+
+  it("AG-6.1 role defense: a primary count ≠ 1 (two primaries) fails loud, no call", async () => {
+    const p1 = ffsBinding("p1", "primary", "alpha-app", "alpha", 0);
+    const p2 = ffsBinding("p2", "primary", "bravo-app", "bravo", 1);
+    const ctx: ServeContext = {
+      consumerOperation: consumerGetThing,
+      bindings: [ffsLoaded(p1, "alpha"), ffsLoaded(p2, "bravo")],
+    };
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["alpha-app", thingOk("alpha")],
+        ["bravo-app", thingOk("bravo")],
+      ]),
+    );
+    const outcome = await multiHandler(ctx, caller).serve(ffsInput([p1, p2]));
+    expect(outcome).toEqual({ kind: "failed", cause: "mediator-transform-error" });
+    expect(caller.order).toEqual([]);
   });
 });
