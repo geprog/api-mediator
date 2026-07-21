@@ -1,4 +1,4 @@
-import type { Credential } from "@mediator/domain";
+import { type Credential, stripUndefined } from "@mediator/domain";
 import { eq } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
@@ -23,12 +23,14 @@ export class CredentialRepository {
   /** Store a credential row. Returns metadata only — never the payload. */
   public async create(cred: Credential): Promise<CredentialMetadata> {
     await this.db.insert(credential).values(toCredentialInsert(cred));
-    return {
+    return stripUndefined({
       id: cred.id,
       type: cred.type,
       scopes: cred.scopes,
       lastRotatedAt: cred.lastRotatedAt,
-    };
+      // AD-3 rotation bound; absent domain key stays absent in the metadata.
+      validUntil: cred.validUntil ?? undefined,
+    });
   }
 
   /** Metadata for an app's credentials — `encrypted_payload` is not selected. */
@@ -39,6 +41,7 @@ export class CredentialRepository {
         type: credential.type,
         scopes: credential.scopes,
         lastRotatedAt: credential.lastRotatedAt,
+        validUntil: credential.validUntil,
       })
       .from(credential)
       .where(eq(credential.appId, appId));

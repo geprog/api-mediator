@@ -3,6 +3,7 @@ import {
   bigserial,
   boolean,
   doublePrecision,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -10,6 +11,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   type AnyPgColumn,
@@ -19,6 +21,10 @@ import type {
   AdapterBindingRole,
   AdapterBindingStatus,
   AdapterEndpointStatus,
+  AdapterRequestCause,
+  AdapterWriteOutcomeStatus,
+  AdapterWriteResult,
+  AggregationStrategy,
   ApiSpecRole,
   ApiSpecStatus,
   AppCapabilities,
@@ -27,10 +33,12 @@ import type {
   AuditLogType,
   BackfillMode,
   BackfillStatus,
+  ChainInput,
   ConfirmableRef,
   ConflictPolicy,
   CredentialType,
   DeletePropagation,
+  EndpointStrictness,
   GeneratedBy,
   GraphEdgeMetadata,
   GraphEdgeType,
@@ -44,6 +52,10 @@ import type {
   OperationAction,
   OutboundLoadLimits,
   ParkedConflictKind,
+  PostMergeDedup,
+  PostMergeFilter,
+  PostMergePagination,
+  PostMergeSort,
   ParkedConflictResolutionChoice,
   ParkedConflictStatus,
   PollScopeMode,
@@ -177,6 +189,21 @@ export type SourceScopeRefRow = {
     : SourceScopeRef[K];
 };
 
+/**
+ * The `jsonb`-persisted form of an `AdapterEndpoint.postMergePagination` (AD-1).
+ * Like {@link SourceScopeRefRow}, the only field `jsonb` cannot hold is the
+ * `Date` `confirmedAt`, stored as an ISO-8601 **string** (or `null`) and
+ * converted back to a `Date` by the adapter-endpoint mapper. `convention`
+ * (the discriminated pagination union) and `confirmedBy` are JSON-safe. Pinned to
+ * the domain `PostMergePagination` so a domain rename breaks the build here. The
+ * column is **nullable**: a NULL is the domain **absent** key.
+ */
+export type PostMergePaginationRow = {
+  [K in keyof PostMergePagination]: [PostMergePagination[K]] extends [Date | null]
+    ? string | null
+    : PostMergePagination[K];
+};
+
 // ── Phase-2 mapping enums (pinned to @mediator/domain unions) ─────────────────
 
 export const mappingProposalStatusEnum = pgEnum("mapping_proposal_status", [
@@ -262,6 +289,55 @@ export const adapterBindingStatusEnum = pgEnum("adapter_binding_status", [
   "proposed",
   "disabled",
 ] as const satisfies readonly AdapterBindingStatus[]);
+
+/**
+ * `AdapterEndpoint.aggregationStrategy` (Phase-5 AD-1). Pinned to the
+ * `@mediator/domain` `AggregationStrategy` union; the column is nullable (a
+ * not-yet-composed endpoint has none).
+ */
+export const aggregationStrategyEnum = pgEnum("aggregation_strategy", [
+  "single",
+  "fanout-merge",
+  "collection-union",
+  "fanout-first-success",
+] as const satisfies readonly AggregationStrategy[]);
+
+/**
+ * `AdapterEndpoint.strictness` (AD-1) — the partial-failure mode. Nullable: a
+ * not-yet-composed endpoint has none, and it is set at composition (never a DB
+ * default, per AD-6.2).
+ */
+export const endpointStrictnessEnum = pgEnum("endpoint_strictness", [
+  "strict",
+  "degraded",
+] as const satisfies readonly EndpointStrictness[]);
+
+/**
+ * `AdapterWriteOutcome.result.outcome` (AD-4) — whether the recorded original
+ * execution succeeded or failed, the top-level discriminant of the write-outcome
+ * store row.
+ */
+export const adapterWriteOutcomeStatusEnum = pgEnum("adapter_write_outcome_status", [
+  "success",
+  "failure",
+] as const satisfies readonly AdapterWriteOutcomeStatus[]);
+
+/**
+ * `audit_log.cause` on an `adapter-request` row (AD-5) — which of the six named
+ * causes (or a generic `upstream-error`) an adapter request failed with. A
+ * SEPARATE column from `audit_log.status`, which reuses the Phase-4 enum
+ * unchanged (AD-5.5). Nullable: NULL on a clean success and on every non-adapter
+ * row.
+ */
+export const adapterRequestCauseEnum = pgEnum("adapter_request_cause", [
+  "not-yet-mapped",
+  "endpoint-disabled",
+  "mapping-stale",
+  "mapping-suspended",
+  "backend-disabled",
+  "mediator-transform-error",
+  "upstream-error",
+] as const satisfies readonly AdapterRequestCause[]);
 
 export const graphEdgeTypeEnum = pgEnum("graph_edge_type", [
   "sync",
@@ -526,9 +602,18 @@ export const resourceBindingRef = pgTable(
 
 /**
  * `Credential` — encrypted per-app auth material. `encrypted_payload` is the
- * only payload column and it is opaque ciphertext; there is deliberately **no
+ * only payload column and it is opaque ciphertext (or, for an `adapterToken` row,
+ * a salted hash — see the domain `Credential`); there is deliberately **no
  * plaintext column** and no read path that returns this column (see
  * `CredentialRepository`).
+ *
+ * `valid_until` (Phase-5 AD-3) bounds a token's validity for the rotation overlap
+ * window: **nullable, NO DB default** — NULL is the unbounded current token (and
+ * every non-`adapterToken` row), so this column adds nothing to a pre-Phase-5 row
+ * (backward compatible). "Still valid" is the queryable predicate
+ * `valid_until IS NULL OR valid_until > now()`; an elapsed overlap and an explicit
+ * revocation are the same fact (a `valid_until` in the past), so there is no
+ * separate `revoked_at`.
  */
 export const credential = pgTable(
   "credential",
@@ -543,6 +628,7 @@ export const credential = pgTable(
     // NOT NULL: the domain contract is `Credential.lastRotatedAt: Date`, always
     // set at creation by `CredentialStore.store` (data-model.md `Credential`).
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }).notNull(),
+    validUntil: timestamp("valid_until", { withTimezone: true }),
   },
   (table) => [index("credential_app_id_idx").on(table.appId)],
 );
@@ -1005,6 +1091,21 @@ export const auditLog = pgTable(
     // slices that write them; CD-3 adds only what a credential-access row needs.
     traceId: text("trace_id"),
     spanId: text("span_id"),
+    // ── Phase-5 adapter-request columns (AD-5) ────────────────────────────────
+    // An `adapter-request` row's serving context. `related_binding_id` (named by
+    // the data model) and `related_endpoint_id` are loose (no FK), like every
+    // other `related_*` ref, so the audit row survives a later deletion of the
+    // binding/endpoint it served. `cause` is which of the six named causes an
+    // adapter request failed with (a SEPARATE column from `status`, which reuses
+    // the Phase-4 enum unchanged — AD-5.5); `degraded` marks a served-but-degraded
+    // response (a failed supplement under non-strict mode), distinct from both a
+    // clean success and a failure (AD-5.3). All nullable; NULL on every non-adapter
+    // row and on a clean adapter success. IDS/ENUM/BOOL ONLY — never a payload
+    // value (AD-5.4).
+    relatedBindingId: uuid("related_binding_id"),
+    relatedEndpointId: uuid("related_endpoint_id"),
+    cause: adapterRequestCauseEnum("cause"),
+    degraded: boolean("degraded"),
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1218,13 +1319,28 @@ export const pollScopeState = pgTable(
  * `(consumer_app_id, consumer_operation_id)` UNIQUE index is what makes the
  * ensure-exists idempotent (AI-2 criterion 1).
  *
- * Phase 3 creates it NON-serving: no `aggregation_strategy`/`cache_ttl`/post-merge
- * columns (Phase 5) and its `status` reflects that composition and serving are
- * deferred — `composition-required`, the enum value that means "binding(s)
- * attached, an aggregation decision is still owed before anything serves" (AI-2
- * criterion 4; the flow's single-binding "activate immediately" is overridden by
- * the phase-3 reconciliation note in the requirement — there is no Adapter Server
- * Runtime until Phase 5).
+ * Phase 3 creates it NON-serving: none of the AD-1 composition columns below and
+ * its `status` reflects that composition and serving are deferred —
+ * `composition-required`, the enum value that means "binding(s) attached, an
+ * aggregation decision is still owed before anything serves" (AI-2 criterion 4;
+ * the flow's single-binding "activate immediately" is overridden by the phase-3
+ * reconciliation note in the requirement — there is no Adapter Server Runtime
+ * until Phase 5).
+ *
+ * ## Phase-5 AD-1 composition/serving columns
+ *
+ * The serving state the Request Router, Resolution Planner, Response Aggregator,
+ * and response cache read at request time. **Every column is nullable with NO DB
+ * default** — the same SD-1 discipline the `sync_rule` execution columns use: a
+ * `.default()` here would reconstruct a *present* value on a Phase-3
+ * `composition-required` row that was composed with nothing (AD-1.6/AD-6.2). The
+ * concept's auto-activation defaults (`single` + non-strict + no caching for a
+ * single-binding endpoint) are applied by the CO-1 auto-activation slice, not by
+ * these columns, so a Phase-3 row loads with all of them NULL and the mapper
+ * collapses each back to an absent domain key. The four `post_merge_*` columns are
+ * `collection-union` only (the domain refinement enforces that); they are `jsonb`
+ * because their open-ended per-parameter shapes don't fit fixed columns — the same
+ * treatment as `resource_binding.scope_path_bindings`.
  */
 export const adapterEndpoint = pgTable(
   "adapter_endpoint",
@@ -1235,6 +1351,17 @@ export const adapterEndpoint = pgTable(
       .references(() => registeredApp.id),
     consumerOperationId: text("consumer_operation_id").notNull(),
     status: adapterEndpointStatusEnum("status").notNull(),
+    // ── AD-1 composition/serving columns (all nullable, NO DB default) ────────
+    aggregationStrategy: aggregationStrategyEnum("aggregation_strategy"),
+    // Response-cache lifetime in milliseconds; NULL = no caching (the default).
+    cacheTtl: integer("cache_ttl"),
+    strictness: endpointStrictnessEnum("strictness"),
+    postMergeFilters: jsonb("post_merge_filters").$type<PostMergeFilter[]>(),
+    postMergeSorts: jsonb("post_merge_sorts").$type<PostMergeSort[]>(),
+    // `jsonb` cannot hold the `Date` `confirmedAt` — stored ISO-8601 string, the
+    // mapper converts it back (see {@link PostMergePaginationRow}).
+    postMergePagination: jsonb("post_merge_pagination").$type<PostMergePaginationRow>(),
+    postMergeDedup: jsonb("post_merge_dedup").$type<PostMergeDedup>(),
   },
   (table) => [
     index("adapter_endpoint_consumer_app_id_idx").on(table.consumerAppId),
@@ -1262,6 +1389,22 @@ export const adapterEndpoint = pgTable(
  * part of the key deliberately — two DIFFERENT mappings attaching a binding to the
  * same endpoint for the same backend operation are distinct candidate bindings
  * (a Phase-5 composition decision), not a duplicate.
+ *
+ * ## Phase-5 AD-2 execution/chaining columns
+ *
+ * `execution_order`, `depends_on_binding_id`, and `chain_inputs` — the composition
+ * state that decides parallel-vs-sequential execution at request time. **All
+ * nullable, NO DB default** (AD-6.2): a Phase-3-attached `proposed` binding loads
+ * with `execution_order` NULL (the reader resolves the documented default `0` via
+ * `resolveExecutionOrder`, never a column default that would fabricate a present
+ * value on an uncomposed row) and the other two absent.
+ *
+ * `depends_on_binding_id` is constrained to a binding of the **same** endpoint
+ * (AD-6.3) by the composite self-foreign-key
+ * `(depends_on_binding_id, adapter_endpoint_id) → (id, adapter_endpoint_id)`,
+ * backed by the `(id, adapter_endpoint_id)` UNIQUE below. Postgres MATCH SIMPLE
+ * skips the check when `depends_on_binding_id` is NULL (an unchained binding is
+ * unconstrained), and a cross-endpoint dependency is simply not representable.
  */
 export const adapterBinding = pgTable(
   "adapter_binding",
@@ -1279,6 +1422,10 @@ export const adapterBinding = pgTable(
       .references(() => approvedMapping.id, { onDelete: "cascade" }),
     role: adapterBindingRoleEnum("role").notNull(),
     status: adapterBindingStatusEnum("status").notNull(),
+    // ── AD-2 execution/chaining columns (all nullable, NO DB default) ─────────
+    executionOrder: integer("execution_order"),
+    dependsOnBindingId: uuid("depends_on_binding_id"),
+    chainInputs: jsonb("chain_inputs").$type<ChainInput[]>(),
   },
   (table) => [
     index("adapter_binding_adapter_endpoint_id_idx").on(table.adapterEndpointId),
@@ -1290,6 +1437,75 @@ export const adapterBinding = pgTable(
       table.backendOperationId,
       table.approvedMappingId,
     ),
+    // The referenced side of the composite same-endpoint self-FK (AD-6.3). `id`
+    // is already unique alone, so this pair is trivially unique; Postgres requires
+    // the exact `(id, adapter_endpoint_id)` unique constraint for the FK below.
+    unique("adapter_binding_id_endpoint_uq").on(table.id, table.adapterEndpointId),
+    // A chained binding may depend only on a binding of the SAME endpoint.
+    foreignKey({
+      name: "adapter_binding_depends_on_same_endpoint_fk",
+      columns: [table.dependsOnBindingId, table.adapterEndpointId],
+      foreignColumns: [table.id, table.adapterEndpointId],
+    }),
+  ],
+);
+
+/**
+ * `AdapterWriteOutcome` — the bounded **write-outcome store** (AD-4). A record of
+ * a completed adapter write's status + response body, so a deduplicated repeat
+ * delivery is answered with what actually happened rather than re-executed or
+ * fabricated (`docs/architecture/adapter-engine.md` *Write operations*).
+ *
+ * Deliberately its **own** table, not a `SyncEvent`/`audit_log` row, because it
+ * retains a live response body — the Audit Log stays metadata-only (AD-4.2). The
+ * store is **bounded** (AD-4.3): every row carries `expires_at` (scoped to the
+ * dedup window) and the pruning index below makes "delete the expired rows" a
+ * range scan. It holds NO credential material and its `response_body` is never
+ * dumped through the operator API/UI — only its metadata is readable (AD-4.4;
+ * enforced by the mapper's metadata projection, mirroring `credential`).
+ *
+ * `outcome` (`success` | `failure`) is the top-level discriminant so a recorded
+ * failure can never be read as a success on replay (AD-4.5); `response_status` and
+ * `response_body` are nullable — absent on a bodyless success (`204`) and on a
+ * failure that never reached the backend.
+ *
+ * Both FKs `ON DELETE CASCADE`: the store is scoped to its `adapter_endpoint`
+ * (AD-4.4 boundedness + AD-6.4 cascade — write-outcome rows are removed with the
+ * endpoint) and to the `adapter_binding` that executed the write. The dedup
+ * lookup is `(adapter_endpoint_id, idempotency_key)` — a write endpoint is always
+ * `single`, so the endpoint + key identify the delivery; that UNIQUE also stops a
+ * double-insert of the same original outcome.
+ */
+export const adapterWriteOutcome = pgTable(
+  "adapter_write_outcome",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    adapterEndpointId: uuid("adapter_endpoint_id")
+      .notNull()
+      .references(() => adapterEndpoint.id, { onDelete: "cascade" }),
+    adapterBindingId: uuid("adapter_binding_id")
+      .notNull()
+      .references(() => adapterBinding.id, { onDelete: "cascade" }),
+    outcome: adapterWriteOutcomeStatusEnum("outcome").notNull(),
+    responseStatus: integer("response_status"),
+    // The recorded response body — a live payload value, which is exactly why this
+    // store is separate from the metadata-only audit log. `unknown` (the domain
+    // `AdapterWriteResult.responseBody`), NULL for a bodyless/absent response.
+    responseBody: jsonb("response_body").$type<AdapterWriteResult["responseBody"]>(),
+    executedAt: timestamp("executed_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    // The dedup lookup + double-insert guard: one recorded outcome per
+    // (endpoint, idempotency key). A write endpoint is single-binding, so the
+    // endpoint + key identify the delivery.
+    uniqueIndex("adapter_write_outcome_endpoint_key_uq").on(
+      table.adapterEndpointId,
+      table.idempotencyKey,
+    ),
+    // "delete every outcome past its dedup window" — the boundedness sweep.
+    index("adapter_write_outcome_expires_at_idx").on(table.expiresAt),
   ],
 );
 

@@ -36,6 +36,11 @@ export function mapAuditLogRow(row: AuditLogRow): AuditLogEntry {
     originAppId: row.originAppId ?? undefined,
     traceId: row.traceId ?? undefined,
     spanId: row.spanId ?? undefined,
+    // AD-5 adapter-request fields — NULL → absent domain key.
+    relatedBindingId: row.relatedBindingId ?? undefined,
+    relatedEndpointId: row.relatedEndpointId ?? undefined,
+    cause: row.cause ?? undefined,
+    degraded: row.degraded ?? undefined,
     timestamp: row.timestamp,
   });
 }
@@ -62,6 +67,11 @@ export function toAuditLogInsert(entry: AuditLogEntry): AuditLogInsert {
     originAppId: entry.originAppId ?? null,
     traceId: entry.traceId ?? null,
     spanId: entry.spanId ?? null,
+    // AD-5 adapter-request fields — absent domain key → SQL NULL.
+    relatedBindingId: entry.relatedBindingId ?? null,
+    relatedEndpointId: entry.relatedEndpointId ?? null,
+    cause: entry.cause ?? null,
+    degraded: entry.degraded ?? null,
     timestamp: entry.timestamp,
   };
 }
