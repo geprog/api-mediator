@@ -159,6 +159,32 @@ export const postMergeDedupSchema = z.discriminatedUnion("mode", [
 ]);
 export type PostMergeDedup = z.infer<typeof postMergeDedupSchema>;
 
+// ── acknowledgedIgnoredInputs (CO-5.4) ───────────────────────────────────────
+
+/**
+ * One consumer input the composer has **explicitly acknowledged as ignored** — an
+ * input that reaches no backend (no `ParameterMapping`/`chainInput` for a parameter,
+ * no request-phase `FieldMapping` for a body field) and that the composer chose to
+ * **serve-and-drop** rather than reject (CO-5.2/CO-5.4). Recorded on the
+ * `AdapterEndpoint` so the runtime can tell an acknowledged input (served, dropped —
+ * the acknowledgement is what makes the drop non-silent) from an unacknowledged one
+ * (still rejected as `unmapped-consumer-input`, RP-2.4).
+ *
+ * A **discriminated union** on `kind` rather than an optional-field bag: a
+ * `parameter` is matched at request time by its **bare consumer parameter name**
+ * (`consumerParamName`, the name the RP-2 inbound check compares), a `body-field` by
+ * its **consumer request-schema field path** (`consumerFieldPath`).
+ *
+ * Only an **optional** unmapped input can be acknowledged: a **required** consumer
+ * input that reaches no backend is a mapping defect, a blocking composition finding
+ * (CO-5.3) that cannot be acknowledged away.
+ */
+export const acknowledgedIgnoredInputSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("parameter"), consumerParamName: z.string().min(1) }),
+  z.object({ kind: z.literal("body-field"), consumerFieldPath: z.string().min(1) }),
+]);
+export type AcknowledgedIgnoredInput = z.infer<typeof acknowledgedIgnoredInputSchema>;
+
 // ── chainInputs (AD-2.2) ─────────────────────────────────────────────────────
 
 /**

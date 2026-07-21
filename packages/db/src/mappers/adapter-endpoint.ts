@@ -54,6 +54,7 @@ export function mapAdapterEndpointRow(row: AdapterEndpointRow): AdapterEndpoint 
         ? undefined
         : mapPostMergePaginationRow(row.postMergePagination),
     postMergeDedup: row.postMergeDedup ?? undefined,
+    acknowledgedIgnoredInputs: row.acknowledgedIgnoredInputs ?? undefined,
   });
 }
 
@@ -79,5 +80,6 @@ export function toAdapterEndpointInsert(endpoint: AdapterEndpoint): AdapterEndpo
         ? null
         : toPostMergePaginationRow(endpoint.postMergePagination),
     postMergeDedup: endpoint.postMergeDedup ?? null,
+    acknowledgedIgnoredInputs: endpoint.acknowledgedIgnoredInputs ?? null,
   };
 }

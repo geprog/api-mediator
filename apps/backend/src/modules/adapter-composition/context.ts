@@ -8,12 +8,15 @@ import type {
   AdapterBinding,
   AdapterEndpoint,
   ApiSpec,
+  FieldMapping,
   Ir,
   IrOperation,
   OperationMapping,
+  ParameterMapping,
 } from "@mediator/domain";
 
 import { fieldMappingsForResourcePair } from "../sync/resolution.js";
+import { topLevelConsumerFieldName, type ConsumerInputUniverse } from "./analysis.js";
 import { bareParamName } from "./refs.js";
 import type { ComposableBindingFacts } from "./validate.js";
 
@@ -33,6 +36,19 @@ export interface CompositionContext {
   readonly endpoint: AdapterEndpoint;
   readonly bindings: readonly AdapterBinding[];
   readonly bindingFacts: readonly ComposableBindingFacts[];
+  /**
+   * The consumer operation's inputs (parameters + request body fields), the universe the
+   * CO-5 coverage report is derived against. Empty when the consumer operation cannot be
+   * resolved from its CONSUMER spec IR.
+   */
+  readonly consumerInputs: ConsumerInputUniverse;
+  /**
+   * The **required** field names of the consumer operation's response schema (bare,
+   * top-level) — the CO-4 required-ness the load-bearing analysis reads. The runtime
+   * re-derives this from the same schema at request time, so it is never persisted as
+   * authoritative (CO-4.4).
+   */
+  readonly requiredConsumerResponseFieldNames: ReadonlySet<string>;
 }
 
 export interface CompositionContextLoader {
@@ -98,6 +114,59 @@ const WRITE_ACTIONS: ReadonlySet<OperationMapping["action"]> = new Set([
   "delete",
 ]);
 
+/**
+ * The CO-5 consumer input universe of a consumer operation — its parameters (cookie
+ * params excluded, matching the runtime's RP-2 inbound check) and its request body
+ * fields. A path parameter is treated as required regardless of its declared flag (it
+ * must be filled to form the route), the same rule the runtime and CO-2.6 apply. Empty
+ * when the operation is unresolvable.
+ */
+function consumerInputUniverse(operation: IrOperation | undefined): ConsumerInputUniverse {
+  if (operation === undefined) {
+    return { parameters: [], bodyFields: [] };
+  }
+  return {
+    parameters: operation.parameters
+      .filter((parameter) => parameter.location !== "cookie")
+      .map((parameter) => ({
+        name: parameter.name,
+        required: parameter.location === "path" || parameter.required,
+      })),
+    bodyFields: (operation.requestSchema?.fields ?? []).map((field) => ({
+      name: field.name,
+      required: field.required,
+    })),
+  };
+}
+
+/** The bare consumer parameter names a `ParameterMapping` sources (primary + additional inputs). */
+function mappedConsumerParamNamesOf(
+  parameterMappings: readonly ParameterMapping[],
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const mapping of parameterMappings) {
+    names.add(bareParamName(mapping.sourceParamRef));
+    for (const additional of mapping.transformConfig?.additionalInputPaths ?? []) {
+      names.add(bareParamName(additional));
+    }
+  }
+  return names;
+}
+
+/** The top-level consumer body field names a request-phase `FieldMapping` reads (primary + additional). */
+function mappedConsumerBodyFieldNamesOf(
+  requestPhaseFieldMappings: readonly FieldMapping[],
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const mapping of requestPhaseFieldMappings) {
+    names.add(topLevelConsumerFieldName(mapping.sourcePath));
+    for (const additional of mapping.transformConfig?.additionalInputPaths ?? []) {
+      names.add(topLevelConsumerFieldName(additional));
+    }
+  }
+  return names;
+}
+
 /** The `@mediator/db`-backed {@link CompositionContextLoader}. */
 export class DbCompositionContextLoader implements CompositionContextLoader {
   public constructor(private readonly db: Database) {}
@@ -112,7 +181,31 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
     const bindingFacts = await Promise.all(
       bindings.map((binding) => this.#factsFor(binding, endpoint.consumerOperationId)),
     );
-    return { endpoint, bindings, bindingFacts };
+
+    // Operation-level consumer facts: the CO-5 input universe (parameters + request body
+    // fields) and the CO-4 required consumer-response field names, both read from the
+    // consumer operation's own CONSUMER-spec IR — the same schema the runtime re-derives
+    // required-ness from at request time (CO-4.4), never a persisted snapshot.
+    const consumerSpecs = await new ApiSpecRepository(this.db).listByAppId(endpoint.consumerAppId);
+    const consumerOperation = resolveOperation(
+      consumerSpecs,
+      "CONSUMER",
+      endpoint.consumerOperationId,
+    );
+    const consumerInputs = consumerInputUniverse(consumerOperation);
+    const requiredConsumerResponseFieldNames = new Set(
+      (consumerOperation?.responseSchema?.fields ?? [])
+        .filter((field) => field.required)
+        .map((field) => field.name),
+    );
+
+    return {
+      endpoint,
+      bindings,
+      bindingFacts,
+      consumerInputs,
+      requiredConsumerResponseFieldNames,
+    };
   }
 
   async #factsFor(
@@ -168,6 +261,19 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
       ),
     );
 
+    // CO-5 — which consumer inputs THIS binding maps. The request phase runs consumer →
+    // backend, so its `FieldMapping`s are scoped (consumer resource → backend resource),
+    // the mirror of the response-phase scoping above and the same
+    // `fieldMappingsForResourcePair` the runtime applies — never a foreign pair's fields.
+    const requestPhase = fieldMappings.filter((field) => field.phase === "request");
+    const scopedRequestPhase = fieldMappingsForResourcePair(
+      requestPhase,
+      consumerResourceRef,
+      backendResourceRef,
+    );
+    const mappedConsumerParamNames = mappedConsumerParamNamesOf(scopedParameterMappings);
+    const mappedConsumerBodyFieldNames = mappedConsumerBodyFieldNamesOf(scopedRequestPhase);
+
     return {
       bindingId: binding.id,
       isWriteOperation:
@@ -176,6 +282,8 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
       requiredBackendParameterNames,
       parameterMappedTargetNames,
       consumerResponseFieldPaths,
+      mappedConsumerParamNames,
+      mappedConsumerBodyFieldNames,
     };
   }
 }

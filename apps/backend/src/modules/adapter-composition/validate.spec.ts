@@ -1,12 +1,14 @@
 import type { AdapterBindingRole } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
+import type { ConsumerInputUniverse } from "./analysis.js";
 import {
   ROLE_VALIDITY_BY_STRATEGY,
   validateComposition,
   type ComposableBindingFacts,
   type CompositionRejectionReason,
   type CompositionSubmission,
+  type CompositionValidation,
   type SubmittedBindingComposition,
 } from "./validate.js";
 
@@ -28,8 +30,28 @@ function facts(
     requiredBackendParameterNames: new Set<string>(),
     parameterMappedTargetNames: new Set<string>(),
     consumerResponseFieldPaths: new Set<string>(),
+    mappedConsumerParamNames: new Set<string>(),
+    mappedConsumerBodyFieldNames: new Set<string>(),
     ...overrides,
   };
+}
+
+const EMPTY_CONSUMER_INPUTS: ConsumerInputUniverse = { parameters: [], bodyFields: [] };
+
+/**
+ * Run the validator with a default empty consumer-input universe (the CO-2 cases below
+ * do not exercise CO-5); a case that needs CO-5 passes `consumerInputs` explicitly.
+ */
+function validate(input: {
+  submission: CompositionSubmission;
+  bindingFacts: readonly ComposableBindingFacts[];
+  consumerInputs?: ConsumerInputUniverse;
+}): CompositionValidation {
+  return validateComposition({
+    submission: input.submission,
+    bindingFacts: input.bindingFacts,
+    consumerInputs: input.consumerInputs ?? EMPTY_CONSUMER_INPUTS,
+  });
 }
 
 /** A submitted binding with a default `primary` role. */
@@ -76,7 +98,7 @@ describe("validateComposition — role-validity table (CO-2.2)", () => {
   for (const { strategy, rejected } of cases) {
     for (const role of rejected) {
       it(`rejects role '${role}' under '${strategy}'`, () => {
-        const result = validateComposition({
+        const result = validate({
           submission: submission({
             aggregationStrategy: strategy,
             bindings: [submitted("b1", { role })],
@@ -90,7 +112,7 @@ describe("validateComposition — role-validity table (CO-2.2)", () => {
 
     for (const role of ROLE_VALIDITY_BY_STRATEGY[strategy]) {
       it(`accepts valid role '${role}' under '${strategy}'`, () => {
-        const result = validateComposition({
+        const result = validate({
           submission: submission({
             aggregationStrategy: strategy,
             bindings: [submitted("b1", { role })],
@@ -105,7 +127,7 @@ describe("validateComposition — role-validity table (CO-2.2)", () => {
 
 describe("validateComposition — fanout-merge structural minimum (CO-2.2)", () => {
   it("rejects a fanout-merge with zero primaries (no base object to supplement)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -119,7 +141,7 @@ describe("validateComposition — fanout-merge structural minimum (CO-2.2)", () 
   });
 
   it("rejects a fanout-merge with two primaries (two competing base objects)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1", { role: "primary" }), submitted("b2", { role: "primary" })],
@@ -130,7 +152,7 @@ describe("validateComposition — fanout-merge structural minimum (CO-2.2)", () 
   });
 
   it("accepts a fanout-merge with exactly one primary and supplements", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -151,7 +173,7 @@ describe("validateComposition — fanout-merge structural minimum (CO-2.2)", () 
 
 describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   it("accepts a dependency on another binding of the same endpoint under fanout-merge", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -165,7 +187,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects dependsOnBindingId under single", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "single",
         bindings: [submitted("b1", { dependsOnBindingId: "b2" })],
@@ -176,7 +198,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects dependsOnBindingId under fanout-first-success", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-first-success",
         bindings: [
@@ -190,7 +212,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects a dependency on a binding of another endpoint (unknown id)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1", { role: "supplement", dependsOnBindingId: "foreign" })],
@@ -201,7 +223,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects a self-dependency", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1", { role: "supplement", dependsOnBindingId: "b1" })],
@@ -212,7 +234,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects a two-node dependency cycle", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -227,7 +249,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("rejects a three-node dependency cycle", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -246,7 +268,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   });
 
   it("accepts an acyclic chain of three bindings", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -267,7 +289,7 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
 
 describe("validateComposition — executionOrder under fanout-first-success (CO-2.4)", () => {
   it("rejects a tie (two bindings sharing an order)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-first-success",
         bindings: [
@@ -281,7 +303,7 @@ describe("validateComposition — executionOrder under fanout-first-success (CO-
   });
 
   it("rejects the implicit tie of two order-absent bindings (both default 0)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-first-success",
         bindings: [submitted("b1"), submitted("b2", { role: "fallback" })],
@@ -292,7 +314,7 @@ describe("validateComposition — executionOrder under fanout-first-success (CO-
   });
 
   it("accepts a strict total order", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-first-success",
         bindings: [
@@ -312,7 +334,7 @@ describe("validateComposition — chainInputs validity (CO-2.5)", () => {
   };
 
   it("rejects an upstreamFieldPath the upstream response does not provide", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         ...base,
         bindings: [
@@ -333,7 +355,7 @@ describe("validateComposition — chainInputs validity (CO-2.5)", () => {
   });
 
   it("rejects a targetParamRef that is not a backend parameter of this binding", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         ...base,
         bindings: [
@@ -354,7 +376,7 @@ describe("validateComposition — chainInputs validity (CO-2.5)", () => {
   });
 
   it("accepts a chainInput whose field and param both resolve (targetParamRef as a full ref)", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         ...base,
         bindings: [
@@ -379,7 +401,7 @@ describe("validateComposition — chainInputs validity (CO-2.5)", () => {
 
 describe("validateComposition — required parameter coverage (CO-2.6)", () => {
   it("rejects a required backend parameter with neither a ParameterMapping nor a chainInput, naming it", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
       bindingFacts: [
         facts({
@@ -399,7 +421,7 @@ describe("validateComposition — required parameter coverage (CO-2.6)", () => {
   });
 
   it("accepts a required parameter covered by a ParameterMapping", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
       bindingFacts: [
         facts({
@@ -414,7 +436,7 @@ describe("validateComposition — required parameter coverage (CO-2.6)", () => {
   });
 
   it("accepts a required parameter covered by a chainInput", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [
@@ -441,7 +463,7 @@ describe("validateComposition — required parameter coverage (CO-2.6)", () => {
 
 describe("validateComposition — write endpoints (CO-2.7)", () => {
   it("rejects a write endpoint composed as fanout-merge and with more than one binding", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1"), submitted("b2", { role: "supplement" })],
@@ -456,7 +478,7 @@ describe("validateComposition — write endpoints (CO-2.7)", () => {
   });
 
   it("accepts a write endpoint composed as single with exactly one binding", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
       bindingFacts: [facts({ bindingId: "b1", isWriteOperation: true })],
     });
@@ -466,7 +488,7 @@ describe("validateComposition — write endpoints (CO-2.7)", () => {
 
 describe("validateComposition — submission coverage + passing composition", () => {
   it("rejects a submission that omits a proposed binding", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1")],
@@ -477,7 +499,7 @@ describe("validateComposition — submission coverage + passing composition", ()
   });
 
   it("rejects a submission naming a binding that is not part of the endpoint", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1"), submitted("ghost", { role: "supplement" })],
@@ -488,12 +510,148 @@ describe("validateComposition — submission coverage + passing composition", ()
   });
 
   it("returns ok for a clean fanout-merge composition", () => {
-    const result = validateComposition({
+    const result = validate({
       submission: submission({
         aggregationStrategy: "fanout-merge",
         bindings: [submitted("b1"), submitted("b2", { role: "supplement" })],
       }),
       bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+});
+
+describe("validateComposition — consumer-input coverage (CO-5)", () => {
+  it("CO-5.3: a REQUIRED consumer parameter reaching no backend is a blocking finding", () => {
+    const result = validate({
+      submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: {
+        parameters: [
+          { name: "todoId", required: true },
+          { name: "tenant", required: true },
+        ],
+        bodyFields: [],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const reason = result.reasons.find((r) => r.code === "required-consumer-input-unmapped");
+    expect(reason).toEqual({
+      code: "required-consumer-input-unmapped",
+      inputKind: "parameter",
+      inputName: "tenant",
+    });
+  });
+
+  it("CO-5.3: a REQUIRED request-body field reaching no backend is a blocking finding", () => {
+    const result = validate({
+      submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
+      bindingFacts: [facts({ bindingId: "b1" })],
+      consumerInputs: {
+        parameters: [],
+        bodyFields: [{ name: "amount", required: true }],
+      },
+    });
+    expect(codesOf(result)).toContain("required-consumer-input-unmapped");
+  });
+
+  it("CO-5.2: an OPTIONAL unmapped input with no acknowledgement is accepted (rejected at request time, not blocked)", () => {
+    // The reject-at-request-time option is a valid, non-silent outcome — the composition
+    // still activates; RP-2.4 rejects requests using `assignee`.
+    const result = validate({
+      submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: {
+        parameters: [
+          { name: "todoId", required: true },
+          { name: "assignee", required: false },
+        ],
+        bodyFields: [],
+      },
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+
+  it("CO-5.4: acknowledging an optional unmapped input is accepted", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1")],
+        acknowledgedIgnoredInputs: [{ kind: "parameter", consumerParamName: "assignee" }],
+      }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: {
+        parameters: [
+          { name: "todoId", required: true },
+          { name: "assignee", required: false },
+        ],
+        bodyFields: [],
+      },
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+
+  it("CO-5.2/5.4: acknowledging a MAPPED input is rejected (only an unmapped input can be acknowledged)", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1")],
+        acknowledgedIgnoredInputs: [{ kind: "parameter", consumerParamName: "todoId" }],
+      }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: { parameters: [{ name: "todoId", required: true }], bodyFields: [] },
+    });
+    expect(codesOf(result)).toContain("acknowledged-input-not-unmapped");
+  });
+
+  it("CO-5.2/5.4: acknowledging an UNKNOWN input is rejected", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1")],
+        acknowledgedIgnoredInputs: [{ kind: "parameter", consumerParamName: "ghost" }],
+      }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: { parameters: [{ name: "todoId", required: true }], bodyFields: [] },
+    });
+    expect(codesOf(result)).toContain("acknowledged-input-not-unmapped");
+  });
+
+  it("CO-5.3: a required unmapped input cannot be acknowledged away (still blocks)", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "single",
+        bindings: [submitted("b1")],
+        // The composer tries to acknowledge a REQUIRED unmapped parameter.
+        acknowledgedIgnoredInputs: [{ kind: "parameter", consumerParamName: "tenant" }],
+      }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: {
+        parameters: [
+          { name: "todoId", required: true },
+          { name: "tenant", required: true },
+        ],
+        bodyFields: [],
+      },
+    });
+    expect(codesOf(result)).toContain("required-consumer-input-unmapped");
+  });
+
+  it("derive-then-confirm: no acknowledgements submitted → none applied, the composition simply validates", () => {
+    // Nothing is auto-acknowledged (CO-5.5): with an optional unmapped input and no
+    // submitted acknowledgement, the validator neither invents one nor blocks — the
+    // reject-at-request-time default stands.
+    const result = validate({
+      submission: submission({ aggregationStrategy: "single", bindings: [submitted("b1")] }),
+      bindingFacts: [facts({ bindingId: "b1", mappedConsumerParamNames: new Set(["todoId"]) })],
+      consumerInputs: {
+        parameters: [
+          { name: "todoId", required: true },
+          { name: "assignee", required: false },
+        ],
+        bodyFields: [],
+      },
     });
     expect(result).toStrictEqual({ ok: true });
   });

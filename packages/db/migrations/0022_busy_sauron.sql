@@ -1,0 +1,1 @@
+ALTER TABLE "adapter_endpoint" ADD COLUMN "acknowledged_ignored_inputs" jsonb;

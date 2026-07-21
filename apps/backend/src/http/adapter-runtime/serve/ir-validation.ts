@@ -122,9 +122,15 @@ function readSuppliedParam(
  *  - `invalid-request` — a required parameter is absent, or the body fails the
  *    consumer's own request schema (the caller's fix, RP-2.1).
  *  - `unmapped-consumer-input` — the request *supplies* a declared consumer parameter
- *    the composition never mapped (`mappedConsumerParamNames`), so it would be silently
- *    dropped; rejected instead (RP-2.4). An omitted **optional** mapped parameter is
- *    accepted — absence is not an error (RP-2.5).
+ *    the composition never mapped (`mappedConsumerParamNames`) **and** the composer did
+ *    not acknowledge as ignored (`acknowledgedIgnoredParamNames`), so it would be
+ *    silently dropped; rejected instead (RP-2.4). An omitted **optional** mapped
+ *    parameter is accepted — absence is not an error (RP-2.5).
+ *
+ * A supplied parameter the composer **acknowledged-ignored** (CO-5.4) is *served* with
+ * the parameter dropped: the acknowledgement is what makes the drop non-silent, so it is
+ * not a rejection. The default — an empty `acknowledgedIgnoredParamNames` — keeps every
+ * unmapped input rejecting (the fail-loud, backward-compatible behavior).
  *
  * Undeclared transport headers are never consumer inputs and are ignored — only the
  * operation's declared parameters are checked. Union filter/sort/pagination rejections
@@ -134,6 +140,7 @@ export function validateInboundRequest(
   operation: IrOperation,
   request: AdapterRequest,
   mappedConsumerParamNames: ReadonlySet<string>,
+  acknowledgedIgnoredParamNames: ReadonlySet<string>,
 ): InboundValidation {
   const unmapped: string[] = [];
   for (const parameter of operation.parameters) {
@@ -148,7 +155,11 @@ export function validateInboundRequest(
         detail: `missing required ${parameter.location} parameter '${parameter.name}'`,
       };
     }
-    if (supplied && !mappedConsumerParamNames.has(parameter.name)) {
+    if (
+      supplied &&
+      !mappedConsumerParamNames.has(parameter.name) &&
+      !acknowledgedIgnoredParamNames.has(parameter.name)
+    ) {
       unmapped.push(parameter.name);
     }
   }

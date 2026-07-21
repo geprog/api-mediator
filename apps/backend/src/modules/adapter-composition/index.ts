@@ -14,6 +14,7 @@ export {
   AdapterCompositionService,
   type AdapterCompositionServiceDeps,
   type ComposeResult,
+  type CompositionPreview,
 } from "./service.js";
 export {
   ROLE_VALIDITY_BY_STRATEGY,
@@ -25,3 +26,14 @@ export {
   type CompositionValidation,
   type SubmittedBindingComposition,
 } from "./validate.js";
+export {
+  analyzeSupplementLoadBearing,
+  deriveConsumerInputCoverage,
+  topLevelConsumerFieldName,
+  type BindingInputCoverage,
+  type ConsumerInputCoverage,
+  type ConsumerInputUniverse,
+  type SupplementAnalysisEntry,
+  type SupplementLoadBearingAnalysis,
+  type UnmappedConsumerInput,
+} from "./analysis.js";

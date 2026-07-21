@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  acknowledgedIgnoredInputSchema,
   chainInputSchema,
   postMergeDedupSchema,
   postMergeFilterSchema,
@@ -159,6 +160,15 @@ export const adapterEndpointSchema = z
     cacheTtl: z.number().int().positive().optional(),
     /** The partial-failure mode; a decision at composition, never inferred (CO-4.3). */
     strictness: endpointStrictnessSchema.optional(),
+    /**
+     * The consumer inputs the composer **explicitly acknowledged as ignored**
+     * (CO-5.4). A request supplying an acknowledged input is served with that input
+     * dropped (the acknowledgement makes the drop non-silent); an unmapped input
+     * *not* listed here is still rejected (`unmapped-consumer-input`, RP-2.4). Absent
+     * = no acknowledgements (the backward-compatible default: every unmapped input
+     * rejects), so a Phase-3-instantiated endpoint reads back without it.
+     */
+    acknowledgedIgnoredInputs: z.array(acknowledgedIgnoredInputSchema).optional(),
     /** `collection-union` only — post-merge semantics per non-pushdown filter parameter. */
     postMergeFilters: z.array(postMergeFilterSchema).optional(),
     /** `collection-union` only — post-merge semantics per accepted sort parameter value. */

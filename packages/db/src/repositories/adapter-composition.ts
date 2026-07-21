@@ -1,4 +1,5 @@
 import type {
+  AcknowledgedIgnoredInput,
   AdapterBinding,
   AdapterBindingRole,
   AdapterEndpoint,
@@ -28,6 +29,12 @@ export interface CompositionEndpointConfig {
   readonly strictness: EndpointStrictness;
   /** `null` = no caching (the documented default); a positive number sets the TTL (ms). */
   readonly cacheTtl: number | null;
+  /**
+   * The composer's acknowledged-ignored consumer inputs (CO-5.4); `null` = none
+   * (every unmapped input rejects at request validation — the fail-loud default). A
+   * full overwrite of the column, like every other composition field.
+   */
+  readonly acknowledgedIgnoredInputs: readonly AcknowledgedIgnoredInput[] | null;
 }
 
 /**
@@ -103,6 +110,10 @@ export class AdapterCompositionRepository {
         aggregationStrategy: input.endpoint.aggregationStrategy,
         strictness: input.endpoint.strictness,
         cacheTtl: input.endpoint.cacheTtl,
+        acknowledgedIgnoredInputs:
+          input.endpoint.acknowledgedIgnoredInputs === null
+            ? null
+            : [...input.endpoint.acknowledgedIgnoredInputs],
       })
       .where(
         and(

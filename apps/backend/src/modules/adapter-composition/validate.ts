@@ -1,11 +1,18 @@
 import {
   resolveExecutionOrder,
+  type AcknowledgedIgnoredInput,
   type AdapterBindingRole,
   type AggregationStrategy,
   type ChainInput,
   type EndpointStrictness,
 } from "@mediator/domain";
 
+import {
+  acknowledgementInputName,
+  acknowledgementMatchesInput,
+  deriveConsumerInputCoverage,
+  type ConsumerInputUniverse,
+} from "./analysis.js";
 import { bareParamName } from "./refs.js";
 
 /**
@@ -77,6 +84,13 @@ export interface CompositionSubmission {
   readonly strictness: EndpointStrictness;
   readonly cacheTtl?: number;
   readonly bindings: readonly SubmittedBindingComposition[];
+  /**
+   * The consumer inputs the composer explicitly acknowledges as ignored (CO-5.4). Each
+   * must reference an **optional** consumer input that reaches no backend; a required
+   * one is a blocking finding that cannot be acknowledged away (CO-5.3). Absent = none
+   * (every unmapped input then rejects at request validation — the fail-loud default).
+   */
+  readonly acknowledgedIgnoredInputs?: readonly AcknowledgedIgnoredInput[];
 }
 
 /**
@@ -105,15 +119,38 @@ export interface ComposableBindingFacts {
   /**
    * The consumer-shape response field paths this binding provides — the `targetPath`
    * of its `phase = response` `FieldMapping`s. A chained dependent's
-   * `chainInputs[].upstreamFieldPath` must name one of these (CO-2.5).
+   * `chainInputs[].upstreamFieldPath` must name one of these (CO-2.5); it is also the
+   * per-supplement supplied-fields set the CO-4 analysis reads. Scoped to the binding's
+   * resource pair.
    */
   readonly consumerResponseFieldPaths: ReadonlySet<string>;
+  /**
+   * The bare **consumer** parameter names this binding sources — every
+   * `ParameterMapping.sourceParamRef` plus its transform's additional inputs. A consumer
+   * parameter in none of the bindings' sets reaches no backend (CO-5.1). Mirrors the
+   * runtime's `mappedConsumerParamNames`.
+   */
+  readonly mappedConsumerParamNames: ReadonlySet<string>;
+  /**
+   * The top-level **consumer** request-body field names this binding maps — the
+   * record-relative top-level segments its `phase = request` `FieldMapping`s read
+   * (primary + additional inputs), scoped to the binding's resource pair. A body field
+   * in none of the bindings' sets reaches no backend (CO-5.1).
+   */
+  readonly mappedConsumerBodyFieldNames: ReadonlySet<string>;
 }
 
 /** The full validator input: the submission plus one facts entry per endpoint binding. */
 export interface CompositionValidationInput {
   readonly submission: CompositionSubmission;
   readonly bindingFacts: readonly ComposableBindingFacts[];
+  /**
+   * The consumer operation's inputs (parameters + request body fields, cookie params
+   * excluded), the universe the CO-5 coverage report is derived against. Empty when the
+   * consumer operation is unresolvable — then no CO-5 finding is raised (the endpoint
+   * would fail RP-2 at request time anyway).
+   */
+  readonly consumerInputs: ConsumerInputUniverse;
 }
 
 // ── Named rejection reasons + result ─────────────────────────────────────────
@@ -177,6 +214,21 @@ export type CompositionRejectionReason =
   | {
       readonly code: "write-endpoint-not-single-active-binding";
       readonly activeBindingCount: number;
+    }
+  | {
+      // CO-5.3 — a required consumer input reaching no backend is a mapping defect, a
+      // blocking finding (cannot be acknowledged away).
+      readonly code: "required-consumer-input-unmapped";
+      readonly inputKind: "parameter" | "body-field";
+      readonly inputName: string;
+    }
+  | {
+      // CO-5.2/5.4 — an acknowledgement must reference a genuinely-unmapped input (an
+      // optional one reaching no backend); acknowledging a mapped or unknown input is a
+      // composer error.
+      readonly code: "acknowledged-input-not-unmapped";
+      readonly inputKind: "parameter" | "body-field";
+      readonly inputName: string;
     };
 
 /** The validation outcome: `ok`, or `rejected` with the full list of named reasons. */
@@ -395,6 +447,41 @@ export function validateComposition(input: CompositionValidationInput): Composit
     }
   }
 
+  // CO-5 — consumer-input coverage. Derive which consumer inputs reach no backend, then:
+  // (5.3) a *required* one is a blocking finding — a required input going nowhere is a
+  // mapping defect, not a composition preference, and cannot be acknowledged away; and
+  // (5.2/5.4) every submitted acknowledgement must reference a genuinely-unmapped input,
+  // so a composer cannot acknowledge a mapped or unknown input into silence.
+  const coverage = deriveConsumerInputCoverage({
+    consumerInputs: input.consumerInputs,
+    bindings: bindingFacts.map((facts) => ({
+      bindingId: facts.bindingId,
+      mappedConsumerParamNames: facts.mappedConsumerParamNames,
+      mappedConsumerBodyFieldNames: facts.mappedConsumerBodyFieldNames,
+    })),
+  });
+  for (const unmapped of coverage.unmappedByAllBackends) {
+    if (unmapped.required) {
+      reasons.push({
+        code: "required-consumer-input-unmapped",
+        inputKind: unmapped.kind,
+        inputName: unmapped.name,
+      });
+    }
+  }
+  for (const acknowledgement of submission.acknowledgedIgnoredInputs ?? []) {
+    const matches = coverage.unmappedByAllBackends.some((unmapped) =>
+      acknowledgementMatchesInput(acknowledgement, unmapped),
+    );
+    if (!matches) {
+      reasons.push({
+        code: "acknowledged-input-not-unmapped",
+        inputKind: acknowledgement.kind === "parameter" ? "parameter" : "body-field",
+        inputName: acknowledgementInputName(acknowledgement),
+      });
+    }
+  }
+
   return reasons.length === 0 ? { ok: true } : { ok: false, reasons };
 }
 
@@ -556,6 +643,17 @@ export function formatCompositionRejection(reason: CompositionRejectionReason): 
       return {
         path: "bindings",
         message: `A write endpoint must have exactly one active binding, not ${String(reason.activeBindingCount)}.`,
+      };
+    case "required-consumer-input-unmapped":
+      return {
+        path:
+          reason.inputKind === "parameter" ? "consumerInputs.parameters" : "consumerInputs.body",
+        message: `Required consumer ${reason.inputKind === "parameter" ? "parameter" : "body field"} '${reason.inputName}' reaches no backend — a required input that goes nowhere is a mapping defect and cannot be composed around or acknowledged.`,
+      };
+    case "acknowledged-input-not-unmapped":
+      return {
+        path: "acknowledgedIgnoredInputs",
+        message: `Acknowledged-ignored consumer ${reason.inputKind === "parameter" ? "parameter" : "body field"} '${reason.inputName}' is not an unmapped consumer input of this endpoint — only an input that reaches no backend can be acknowledged.`,
       };
   }
 }
