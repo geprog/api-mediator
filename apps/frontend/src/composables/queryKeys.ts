@@ -38,4 +38,12 @@ export const queryKeys = {
     "scope-identity-key",
     resourcePairRef,
   ],
+  /** Root of the adapter-endpoint state cache — invalidated wholesale after a mutation (AP-1..AP-3). */
+  adapterEndpoints: ["adapter-endpoints"] as const,
+  /** One adapter endpoint's read state (AP-1), keyed by id. */
+  adapterEndpoint: (endpointId: string): readonly string[] => ["adapter-endpoints", endpointId],
+  /** The adapter request history (AP-5.1), keyed by its (serialized) filter. */
+  adapterRequests: (filterKey: string): readonly string[] => ["adapter-requests", filterKey],
+  /** The adapter endpoint-health read (AP-5.3). */
+  adapterHealth: ["adapter-requests", "health"] as const,
 } as const;

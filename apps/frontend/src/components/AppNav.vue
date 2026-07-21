@@ -33,6 +33,9 @@ function logOut(): void {
           <RouterLink to="/sync" data-testid="nav-sync">Sync</RouterLink>
         </li>
         <li>
+          <RouterLink to="/adapter" data-testid="nav-adapter">Adapter</RouterLink>
+        </li>
+        <li>
           <RouterLink to="/apps" data-testid="nav-apps">Apps</RouterLink>
         </li>
         <li>
