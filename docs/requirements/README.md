@@ -679,3 +679,141 @@ gaps** — a name or rule the docs use but do not define.
     "compose endpoints" as an operator mutation. *Adopted (not open):* composer = an `operator` performing
     composition; **no new role is coined**. Flagged only so a human can confirm the glossary needs no line.
     (CO-*, CU-*)
+
+---
+
+## Phase 6 — Landscape evolution (the final phase)
+
+The last vertical slice, and the one that makes the landscape a **living** system rather than a
+one-time-configured one: an app's spec **changes**, an app **goes away**, and the mediator reacts without
+either silently breaking or forcing a full re-approval. Phase 6 ingests a **second** `ApiSpec` version and
+runs the whole `SpecDiff` lifecycle (additive re-pin vs. breaking → `stale` → scoped re-review → successor
+adoption); it runs the disable/deregister cascades; it completes the always-available **landscape graph**
+(the incremental `GraphEdge` update/remove the ensure-exists upsert could never do, plus the Vue Flow UI);
+it wires the two cross-engine cache-invalidation seams Phase 5 left inert; it registers the reconciliation
+sweep's Phase-6 reconcilers so **"bus loss degrades timeliness, never correctness"** becomes a *tested*
+guarantee; and it stands up the full observability metric/dashboard/alert surface.
+
+The core safety promise is unchanged: **re-pinning is automatic only because an additive diff proves nothing
+executable changed**; every path that changes what a mapping *means* — the additive delta proposal, the
+breaking-change successor, a re-inclusion — is an **ordinary human review/approval**. Nothing new executes,
+and nothing changes meaning, without a human.
+
+Phase 6 is where several deliberately-deferred seams get their **live trigger** — the stories are scoped to
+the **wiring**, not a rebuild, and each names the merged seam it activates.
+
+| File | Stories | Realizes (concept component) |
+|---|---|---|
+| [phase-6-graph.md](phase-6-graph.md) | GR-1 … GR-6 | Graph/Overview Service (`GraphEdge` update/remove + rebuild + `getGraph` + Vue Flow UI) |
+| [phase-6-spec-update-lifecycle.md](phase-6-spec-update-lifecycle.md) | SL-1 … SL-10 | Spec Registry `SpecDiff` + Mapping Engine re-mapping + successor adoption ([extensibility.md](../architecture/extensibility.md) *Spec update lifecycle*, *Successor adoption*) |
+| [phase-6-app-lifecycle.md](phase-6-app-lifecycle.md) | AL-1 … AL-4 | `RegisteredApp` disable/deregister cascades ([extensibility.md](../architecture/extensibility.md) *App lifecycle*) |
+| [phase-6-cross-engine-invalidation.md](phase-6-cross-engine-invalidation.md) | XI-1 … XI-2 | CH-3 `sync-execution` outbox producer + CH-5.3 lifecycle-transition triggers |
+| [phase-6-reconciliation.md](phase-6-reconciliation.md) | RC-1 … RC-4 | Reconciliation sweep wired to Phase-6 derivations (bus-loss capstone) |
+| [phase-6-observability.md](phase-6-observability.md) | OB-1 … OB-5 | OpenTelemetry business metrics + Grafana dashboards + alerting ([observability.md](../architecture/observability.md)) |
+
+31 stories total.
+
+### Merged seams → their Phase-6 trigger (wiring, not rebuild)
+
+Where a mechanism **already exists and only needs its trigger/wiring**, the story is scoped to the wiring.
+
+| Existing merged seam | Phase-6 story that activates it |
+|---|---|
+| CO-7 `AdapterCompositionService.adoptSuccessor` (adapter-side adoption, unit-tested against a *simulated* succession) | **SL-7** supplies the breaking-change → re-review → **successor** live trigger |
+| SS-16 `ScopeLifecycleService` + `@mediator/ir` `revalidate*` (scope-artifact re-validation policy, "not invoked from ingestion yet") | **SL-5** wires it to the `SpecDiff` |
+| SS-10.5 `ScopeLinkRepository.archiveByCorrespondence` (archive capability shipped ahead of trigger) | **SL-5** / **AL-2** cascade |
+| CH-3 `SyncEventCacheInvalidationConsumer` (registered but inert — no producer) | **XI-1** emits `sync-execution` `SyncEvent`s onto the `event_outbox` |
+| CH-5 `CacheInvalidator.invalidateEndpoint` by-endpoint seam (wired only for CO-6) | **XI-2** drives it from stale/suspend/superseded + disable/deregister |
+| `DownstreamArtifactRepository.upsertGraphEdge` (ensure-exists; **cannot** update/remove) + the CO-6 `// TODO(Phase 6 graph)` markers | **GR-1** adds update/remove; **GR-3** resolves the CO-6 markers |
+| `ReconciliationSweep` framework + Phase-2/3/4 reconcilers | **RC-1** registers the Phase-6 reconcilers live |
+| `AdapterTelemetry`, `createDetectionMetricsSink`, `SyncExecutionReconcilerMetrics` ports | **OB-1/OB-2** fill the sync + mapping metric gaps around them |
+
+### Suggested implementation order (Phase 6, blocking edges)
+
+Layered per the plan (types → persistence → logic → HTTP → UI), sliced so each step is demonstrable:
+
+1. **SL-1** (`SpecDiff` computation) — the classification every lifecycle reaction reads; nothing else in
+   the spec-update lifecycle starts without it.
+2. **GR-1** (projection update/remove) — small, unblocks every graph and lifecycle status/removal reaction.
+3. **SL-2 → SL-3** (additive re-pin + carry-forward → scoped delta analysis) — the demonstrable additive
+   slice: an additive v2 keeps everything running and opens a small delta proposal.
+4. **SL-4 → SL-5** (breaking: stale/pause/flag + operational-ref re-validation, wiring SS-16) →
+   **XI-2** (CH-5.3 cache drop on staleness) → **GR-2/GR-3** (edges recompute; GR-3 clears the CO-6 TODOs).
+5. **SL-6** (scoped re-analysis → successor proposal) → **SL-7 → SL-8** (adoption: re-point in place, drive
+   CO-7, preserve sync state + reconcile field pairs) — the breaking end-to-end slice.
+6. **SL-9** (`analysisExclusions` re-inclusion) and **SL-10** (manual suspend/resume) — the sibling
+   transitions, reusing SL-3's scoped analysis and the XI-2/GR/RP-3 plumbing.
+7. **AL-1 → AL-2 → AL-3** (disable/enable → deregister cascade → re-registration guard) → **AL-4** (API/UI).
+8. **XI-1** (the CH-3 `sync-execution` outbox producer) — independent of the SL/AL chain; needs only the
+   Phase-4 executor + Phase-5 CH-3 consumer.
+9. **GR-4 → GR-5 → GR-6** (activity metadata → `getGraph` read → Vue Flow UI).
+10. **RC-1 … RC-4** (register Phase-6 reconcilers → graph/spec-lifecycle/adoption reconcilers → bus-loss
+    capstone) — follows the derivations they recover.
+11. **OB-1 … OB-5** (sync metrics → mapping-metric gaps → landscape/lifecycle metrics → dashboards → alerts)
+    — the metrics precede the dashboards/alerts that consume them; runnable in parallel with the rest.
+
+**What can parallelize:** XI-1 ∥ the whole SL/AL chain; OB-* ∥ everything (metrics only read what the other
+stories already produce); GR-4..GR-6 once GR-1..GR-3 land. **What must not:** any lifecycle status/removal
+reaction (SL-4/SL-7/SL-10, AL-1/AL-2) before **GR-1** and **XI-2** exist — otherwise a stale/removed
+relationship is masked by a stale edge or a stale cache.
+
+### Phase boundary map (Phase 6 is the final phase — what remains is *out of scope*, not a later phase)
+
+| Deferred concern | Status |
+|---|---|
+| Webhook/push change detection | **Out of scope** — polling is the only change-detection transport; a push detector is a documented future *seam* that reintroduces an unauthenticated inbound surface with its own trust design ([extensibility.md](../architecture/extensibility.md) *Beyond REST/OpenAPI*; [sync-engine.md](../architecture/sync-engine.md); [security.md](../architecture/security.md)) |
+| GraphQL / AsyncAPI / gRPC protocols | **Out of scope** — a future Spec Adapter + Protocol Client/Server pair; the IR core is deliberately protocol-agnostic so this needs no rewrite ([extensibility.md](../architecture/extensibility.md) *Beyond REST/OpenAPI*) |
+| Multi-tenancy | **Out of scope** — single-tenant, self-hosted; no tenant-isolation concern in any component ([overview.md](../architecture/overview.md) *Deployment model*) |
+| High availability / active-passive standby | **Out of scope** for the initial version — components are stateless over a shared store so a standby can be added as a deployment choice without architectural change; the reconciliation sweep is a single-instance self-heal, not HA ([overview.md](../architecture/overview.md) *Deployment model*; RC-4) |
+| SSO/OIDC auth provider | **Later** — Phase 3 shipped local accounts behind the pluggable seam |
+| Auto-approval of mappings / bypassing re-review | **Never** — the core safety promise; re-pinning is the *only* automatic mapping-state change, and only because an additive diff proves nothing executable changed (SL-2) |
+
+### Open questions for a human (Phase 6 — concept silent, underspecified, or in tension)
+
+Each has a recommended default the stories adopt; confirm or override. Items 2, 4, 10 touch **concept gaps**
+— a name or rule the docs use but do not fully define.
+
+1. **Graph library.** The task names **Vue Flow**; the concept says only "graph rendering" / "always-available
+   overview" and mandates no library. *Recommended:* Vue Flow (matches the CLAUDE.md Vue 3 + `<script setup>`
+   convention); a rendering-library choice, not product behavior. (GR-6)
+2. **`GraphEdge.status` value set.** *Concept gap:* [data-model.md](../architecture/data-model.md) does **not**
+   enumerate `GraphEdge.status` (the domain models it as a plain string precisely because "the concept does
+   not enumerate the value set"), yet GR-2/GR-3/GR-6 need it to distinguish healthy / partially-paused /
+   stale/suspended edges. *Recommended:* derive a small status vocabulary from the aggregate of the edge's
+   underlying rules/bindings (e.g. `active` | `degraded` | `paused` | `stale`), documented as a projection
+   detail; a human should decide whether [data-model.md](../architecture/data-model.md) should enumerate it.
+   (GR-2, GR-3)
+3. **Graph read pagination.** Concept is silent; the landscape is ~15-20 apps
+   ([overview.md](../architecture/overview.md) *Scale assumption*). *Recommended:* return the whole graph
+   unpaginated, as Phase 1 did for `GET /apps`. (GR-5)
+4. **Additive-vs-breaking classification of ambiguous diffs.** The concept lists clear examples but not every
+   case (a widened type, a loosened enum, a new optional-with-default). *Recommended:* classify **breaking**
+   unless the change is *provably* additive — a false "additive" would silently re-pin onto a changed element,
+   the one outcome re-pinning must never produce; a human should confirm the conservative default and whether
+   the concept should enumerate the edge cases. (SL-1)
+5. **Deregister confirmation mechanism.** [extensibility.md](../architecture/extensibility.md) requires
+   "explicit confirmation" but not its form. *Recommended:* a typed confirmation (e.g. re-entering the app
+   name) plus a shown cascade summary; implementation-defined. (AL-2, AL-4)
+6. **CH-3 producer placement: in the executor's write transaction or a following step?** The event is already
+   durably recorded in the Audit Log; enqueuing on the `event_outbox` is the addition. *Recommended:* enqueue
+   in the same transaction as the `SyncEvent` write so a committed write always has its outbox row (bus loss
+   then only affects *delivery*, which the sweep/`cacheTtl` already tolerate); confirm. (XI-1)
+7. **Successor re-review is the ordinary review flow — confirmed, not new behavior.** The concept states
+   re-review is "the ordinary review flow" over the scoped proposal. *Adopted (not open):* the successor goes
+   through Phase-3 accept/edit/reject/approve; adoption is triggered only by the successor's `MappingApproved`.
+   Flagged so a human confirms there is **no** auto-adoption path. (SL-6, SL-7)
+8. **`suspend`/`resume` ownership.** Phase 3 deferred `suspend` to "the final phase" without stating which area
+   owns it. *Recommended:* home it with its sibling `ApprovedMapping`-status transitions in the spec-update
+   lifecycle file (SL-10), since it shares the stale-path plumbing (pause + `mapping-suspended` runtime +
+   CH-5.3 + graph recompute); confirm the placement. (SL-10)
+9. **Alert thresholds.** The concept gives shapes ("N× its expected interval", "crosses a threshold",
+   "growing unbounded") but no values. *Recommended:* every threshold config-defined with a conservative
+   default; the stale-`AdapterBinding` alert defaults to a **tighter** threshold than sync staleness, per the
+   documented asymmetry. (OB-5)
+10. **Dashboards/alerts are not unit-testable; the testable oracle is the metrics they read.** *Flag:* a
+    Grafana dashboard/alert JSON is not exercised by a unit/e2e test the way engine code is. *Recommended:*
+    the acceptance criteria assert (a) the **business metrics** the panels/alerts consume are emitted (OB-1..3,
+    testable against a fake meter), and (b) a **static consistency check** that every metric name referenced by
+    a provisioned dashboard/alert exists among the emitted instruments (OB-4.6/OB-5.6). A human should confirm
+    this is a sufficient definition of "the dashboard is real"; the alternative (a live Grafana in CI) is
+    heavier than the single-instance model warrants. (OB-4, OB-5)
