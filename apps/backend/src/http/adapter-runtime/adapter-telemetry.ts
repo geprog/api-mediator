@@ -5,8 +5,9 @@ import type { AdapterResult, CauseToken } from "./outcome-http.js";
 
 /**
  * OpenTelemetry for the Adapter Server Runtime (RT-5.2/5.3). One trace per inbound
- * request (the {@link tracer}) and per-`AdapterEndpoint` metrics (request rate,
- * latency, error rate) with placeholders for cache-hit and degraded rate.
+ * request (the {@link tracer}) and per-`AdapterEndpoint` metrics: request rate,
+ * latency, error rate, degraded rate, and the response-cache hit/miss counters that
+ * make cache hit rate per endpoint observable (CH-1.5).
  *
  * **Security (RT-5.5):** every attribute here is an id or an enum — the operation
  * key, the endpoint id, the consumer app id, the outcome, the cause. **Never** a
@@ -32,6 +33,7 @@ export class AdapterTelemetry {
   readonly #requestDuration: Histogram;
   readonly #degradedCount: Counter;
   readonly #cacheHitCount: Counter;
+  readonly #cacheMissCount: Counter;
 
   public constructor() {
     this.tracer = getTracer("@mediator/adapter-engine");
@@ -47,7 +49,11 @@ export class AdapterTelemetry {
       description: "Degraded (failed-supplement) adapter responses per endpoint",
     });
     this.#cacheHitCount = meter.createCounter("adapter.request.cache_hit.count", {
-      description: "Adapter response-cache hits per endpoint (placeholder until caching lands, CH)",
+      description: "Adapter response-cache hits per endpoint (CH-1)",
+    });
+    this.#cacheMissCount = meter.createCounter("adapter.request.cache_miss.count", {
+      description:
+        "Adapter response-cache misses per endpoint (CH-1); hit rate = hits / (hits + misses)",
     });
   }
 
@@ -71,11 +77,18 @@ export class AdapterTelemetry {
   }
 
   /**
-   * The cache-hit metric seam (RT-5.3 placeholder). The response cache (CH) calls
-   * this when a request is served from cache; nothing in this RT slice does, since
-   * there is no cache yet.
+   * CH-1.5 — count one response-cache **hit** for the per-endpoint hit-rate metric. The
+   * serve handler calls this when a read is served from cache (short-circuiting backends).
    */
   public recordCacheHit(operationKey: string, endpointId: string): void {
     this.#cacheHitCount.add(1, { operation: operationKey, endpoint_id: endpointId });
+  }
+
+  /**
+   * CH-1.5 — count one response-cache **miss** (a cacheable read with no live entry). Hit
+   * rate per endpoint = hits / (hits + misses) over these two counters.
+   */
+  public recordCacheMiss(operationKey: string, endpointId: string): void {
+    this.#cacheMissCount.add(1, { operation: operationKey, endpoint_id: endpointId });
   }
 }

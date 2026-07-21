@@ -14,6 +14,7 @@ export {
   type AdapterRuntime,
   type AdapterRuntimeDeps,
 } from "./build-adapter-runtime.js";
+export { AdapterTelemetry } from "./adapter-telemetry.js";
 export { buildAdapterMountReactions, type AdapterMountReactions } from "./background.js";
 export {
   headerConsumerAppResolver,
