@@ -1275,7 +1275,7 @@ function contributingBackendResources(context: ServeContext): ContributingBacken
   for (const loaded of context.bindings) {
     const backendAppId = loaded.binding.backendAppId;
     const resourceRef = backendResourceRefOf(loaded.binding.backendOperationId);
-    const dedupKey = `${backendAppId} ${resourceRef}`;
+    const dedupKey = `${backendAppId} ${resourceRef}`;
     if (seen.has(dedupKey)) {
       continue;
     }
