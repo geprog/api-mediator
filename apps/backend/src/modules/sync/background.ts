@@ -63,6 +63,7 @@ import {
   type RecentlyWrittenCache,
   type SingleRecordReadResult,
 } from "@mediator/sync-engine";
+import { PostgresEventBus } from "@mediator/event-bus";
 import { getActiveTraceContext } from "@mediator/telemetry";
 import { applyFieldMappings } from "@mediator/transform";
 import type { FastifyBaseLogger } from "fastify";
@@ -279,7 +280,14 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   // ── Shared outbound primitives (OC-3: ALL traffic to an app shares ONE governor) ──
   const protocol: ProtocolClient = deps.protocolClient ?? new FetchRestProtocolClient();
   const governor = new AppLoadGovernor();
-  const syncEventStore = new DbSyncEventStore(auditLog);
+  // XI-1 — the SyncEvent store now also enqueues each `sync-execution` onto the `event_outbox`
+  // in the audit write's transaction (transactional outbox), activating the registered-but-
+  // inert CH-3 cache-invalidation consumer. The `PostgresEventBus` is stateless (one insert
+  // per `emit`) and self-constructed here like the rest of this background's infra (the
+  // protocol client, load governor, credential store); it writes the SAME `event_outbox`
+  // table the shared `OutboxDispatcher` (wired in `index.ts`) claims from, so producer and
+  // consumer are two ends of one outbox.
+  const syncEventStore = new DbSyncEventStore(db, new PostgresEventBus());
   const executor = new OutboundCallExecutor(protocol, credentialStore, syncEventStore, governor, {
     applyCredential,
   });

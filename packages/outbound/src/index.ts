@@ -63,8 +63,17 @@ export {
   type RestSourceReaderOptions,
 } from "./rest-source-reader.js";
 
-// The SyncEvent store port + real + fake (OC-2 lookback / OC-5 write).
-export { DbSyncEventStore, FakeSyncEventStore, type SyncEventStore } from "./sync-event-store.js";
+// The SyncEvent store port + real + fake (OC-2 lookback / OC-5 write), plus the XI-1
+// transactional-outbox emit seam + the `sync-execution` outbox event projection the
+// DbSyncEventStore enqueues onto the event_outbox (activates the CH-3 consumer).
+export {
+  DbSyncEventStore,
+  FakeSyncEventStore,
+  syncExecutionOutboxEvent,
+  type SyncEventOutbox,
+  type SyncEventStore,
+  type SyncExecutionOutboxEvent,
+} from "./sync-event-store.js";
 
 // The Sync-Engine binding resolvers — IR + confirmed ResourceBinding refs + SyncRule/
 // OperationMapping state → the concrete REST wire shapes (source-read binding, write-op
