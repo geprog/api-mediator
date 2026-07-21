@@ -188,6 +188,13 @@ export type CompositionRejectionReason =
       readonly dependsOnBindingId: string;
     }
   | { readonly code: "depends-on-cycle"; readonly bindingIds: readonly string[] }
+  | {
+      readonly code: "chain-dependent-ordered-before-upstream";
+      readonly bindingId: string;
+      readonly upstreamBindingId: string;
+      readonly executionOrder: number;
+      readonly upstreamExecutionOrder: number;
+    }
   | { readonly code: "chain-inputs-without-dependency"; readonly bindingId: string }
   | {
       readonly code: "execution-order-tie-under-first-success";
@@ -345,6 +352,38 @@ export function validateComposition(input: CompositionValidationInput): Composit
   // possible (and only worth detecting) there. Detect over the well-formed edges.
   if (strategy === CHAINING_STRATEGY) {
     reasons.push(...detectDependencyCycles(submission.bindings, endpointBindingIds));
+  }
+
+  // CO-2.3 — relative order: a chained binding may never be ordered STRICTLY BEFORE the
+  // binding it depends on. Dependency overrides order at runtime, but a dependent ordered
+  // before its upstream is undispatchable there (the serve-handler backstop) and — worse
+  // for a NON-load-bearing chained supplement — the endpoint would compose, then every
+  // request would silently degrade while naming a perfectly healthy backend: a persistently
+  // misleading endpoint composition must never admit. Equal order is fine (same group — the
+  // runtime awaits the upstream). Only well-formed edges are checked; a self/unknown edge is
+  // reported by its own reason above, not compounded here.
+  if (strategy === CHAINING_STRATEGY) {
+    for (const submitted of submission.bindings) {
+      const upstreamId = submitted.dependsOnBindingId;
+      if (upstreamId === undefined || upstreamId === submitted.bindingId) {
+        continue;
+      }
+      const upstream = submittedById.get(upstreamId);
+      if (upstream === undefined) {
+        continue;
+      }
+      const executionOrder = resolveExecutionOrder(submitted);
+      const upstreamExecutionOrder = resolveExecutionOrder(upstream);
+      if (executionOrder < upstreamExecutionOrder) {
+        reasons.push({
+          code: "chain-dependent-ordered-before-upstream",
+          bindingId: submitted.bindingId,
+          upstreamBindingId: upstreamId,
+          executionOrder,
+          upstreamExecutionOrder,
+        });
+      }
+    }
   }
 
   // CO-2.4 — fanout-first-success: executionOrder must be a strict total order (ties
@@ -608,6 +647,11 @@ export function formatCompositionRejection(reason: CompositionRejectionReason): 
       return {
         path: "bindings",
         message: `dependsOnBindingId forms a cycle among bindings ${reason.bindingIds.join(" -> ")}.`,
+      };
+    case "chain-dependent-ordered-before-upstream":
+      return {
+        path: `bindings.${reason.bindingId}.executionOrder`,
+        message: `Binding ${reason.bindingId} (executionOrder ${String(reason.executionOrder)}) depends on ${reason.upstreamBindingId} (executionOrder ${String(reason.upstreamExecutionOrder)}) but is ordered before it — a chained binding must be ordered at or after its upstream.`,
       };
     case "chain-inputs-without-dependency":
       return {

@@ -233,6 +233,17 @@ describe("aggregateFanoutMerge — AG-2", () => {
     expect(outcome).toEqual({ kind: "failure", failure: upstreamErr });
   });
 
+  it("fails CLOSED: a failed supplement absent from the composed decision is treated as load-bearing", () => {
+    const outcome = aggregateFanoutMerge(
+      fanoutPlan("degraded"),
+      [success("p", 0, "crm", { id: "1", name: "Ada" }, "primary"), failure("s", 1, upstreamErr)],
+      // `s` is NOT present in bindingInfo — an internal inconsistency. It must fail the
+      // whole request (never silently degrade a possibly-load-bearing supplement).
+      ctx({ p: { backendAppId: "crm", supplies: ["id", "name"] } }, ["id"]),
+    );
+    expect(outcome).toEqual({ kind: "failure", failure: upstreamErr });
+  });
+
   it("AG-2.5: strict mode fails the whole request on any supplement failure regardless of role", () => {
     const outcome = aggregateFanoutMerge(
       fanoutPlan("strict"),

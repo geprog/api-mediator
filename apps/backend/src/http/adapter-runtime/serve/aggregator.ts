@@ -229,7 +229,12 @@ export function aggregateFanoutMerge(
 function isLoadBearing(bindingId: string, context: FanoutMergeContext): boolean {
   const supplied = context.bindingInfo.get(bindingId)?.suppliedConsumerResponseFields;
   if (supplied === undefined) {
-    return false;
+    // Fail CLOSED. A binding absent from the request-time bindingInfo is an internal
+    // inconsistency (bindingInfo is a superset of the result binding ids, so unreachable
+    // today). On the one branch that guards against serving partial-as-complete, the
+    // unsafe default is `false` (→ silently degrade a possibly-load-bearing supplement):
+    // treat an unknown binding as load-bearing so its failure fails the whole request.
+    return true;
   }
   for (const field of supplied) {
     if (context.requiredConsumerResponseFieldNames.has(field)) {
@@ -239,7 +244,12 @@ function isLoadBearing(bindingId: string, context: FanoutMergeContext): boolean 
   return false;
 }
 
-/** The backend app id a binding calls, for naming a failed backend out of band (AG-2.3). */
+/**
+ * The backend app id a binding calls, for naming a failed backend out of band (AG-2.3).
+ * Only reached for failed supplements that already passed the load-bearing check (which
+ * fails closed for an unknown binding), so `bindingId` is present in `bindingInfo`; the
+ * fallback is inert defense-in-depth, never a name a degraded response actually emits.
+ */
 function backendAppIdOf(bindingId: string, context: FanoutMergeContext): string {
   return context.bindingInfo.get(bindingId)?.backendAppId ?? bindingId;
 }
