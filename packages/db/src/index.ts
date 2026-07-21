@@ -191,6 +191,7 @@ export {
   type DetectionJobEnqueueOps,
   type DetectionJobWorkerOps,
   type DownstreamArtifactOps,
+  type GraphEdgeStatusUpdate,
   type MappingArtifacts,
   type OrderingQueueDeadLetterOps,
   type OrderingQueueDrainQuery,

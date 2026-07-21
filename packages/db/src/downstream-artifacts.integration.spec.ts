@@ -38,11 +38,13 @@ import {
  * `pnpm --filter @mediator/db test:integration`.
  *
  * Proves the real Drizzle repo's insert-if-absent / ensure-exists / upsert
- * semantics against a freshly migrated schema (chain 0000→0009): the
- * idempotent `SyncRule`/`AdapterBinding`/`GraphEdge` writes, the endpoint
- * ensure-exists (reuse, never duplicate), the incremental upsert (existing rows
- * untouched), and the reconciliation query. It is the live counterpart to the
- * fake-backed unit tests (the fakes mirror exactly these semantics).
+ * semantics against a freshly migrated schema: the idempotent
+ * `SyncRule`/`AdapterBinding`/`GraphEdge` writes, the endpoint ensure-exists
+ * (reuse, never duplicate), the incremental upsert (existing rows untouched), the
+ * GR-1 `GraphEdge` update-in-place (status recompute keyed by
+ * `(source,target,type)`, `lastActivityAt` preserved) and remove-by-key, and the
+ * reconciliation query. It is the live counterpart to the fake-backed unit tests
+ * (the fakes mirror exactly these semantics).
  */
 let databaseUrl: string | undefined;
 try {
@@ -75,6 +77,11 @@ const BINDING_1 = randomUUID();
 const BINDING_1_DUP = randomUUID();
 const EDGE_1 = randomUUID();
 const EDGE_1_DUP = randomUUID();
+// A separate adapter-dependency edge (APP_C consumer → APP_A backend) the GR-1
+// update/remove tests own, so they never disturb the sync edge above. Seeded with a
+// NON-null `lastActivityAt` so the update test can prove GR-1.5 preservation.
+const EDGE_ADEP = randomUUID();
+const ADEP_ACTIVITY_AT = new Date("2026-07-15T12:00:00.000Z");
 
 function appOf(id: string, name: string): RegisteredApp {
   return {
@@ -146,6 +153,21 @@ function syncEdgeOf(id: string): GraphEdge {
     type: "sync",
     status: "disabled",
     metadata: { direction: { sourceSpecId: SPEC_A, targetSpecId: SPEC_B }, lastActivityAt: null },
+  };
+}
+// An adapter-dependency edge (consumer APP_C → backend APP_A) carrying a non-null
+// `lastActivityAt`, so the GR-1 update test can prove a status recompute preserves it.
+function adapterDepEdgeOf(id: string, status: string): GraphEdge {
+  return {
+    id,
+    sourceNodeId: APP_C,
+    targetNodeId: APP_A,
+    type: "adapter-dependency",
+    status,
+    metadata: {
+      direction: { sourceSpecId: SPEC_C, targetSpecId: SPEC_A },
+      lastActivityAt: ADEP_ACTIVITY_AT,
+    },
   };
 }
 
@@ -306,6 +328,59 @@ suite("Phase-3 downstream-artifact persistence integration (requires Postgres)",
       direction: { sourceSpecId: SPEC_A, targetSpecId: SPEC_B },
       lastActivityAt: null,
     });
+  });
+
+  it("updateGraphEdge rewrites status in place by (source,target,type), preserving lastActivityAt and the row id (GR-1.1/1.4/1.5)", async () => {
+    const repo = new DownstreamArtifactRepository(db);
+    // Seed via the ensure-exists upsert: an adapter-dependency edge with a non-null
+    // lastActivityAt (as if GR-4 had already stamped activity on it).
+    await repo.upsertGraphEdge(adapterDepEdgeOf(EDGE_ADEP, "active"));
+    const before = await repo.getGraphEdge(APP_C, APP_A, "adapter-dependency");
+    expect(before?.id).toBe(EDGE_ADEP);
+    expect(before?.status).toBe("active");
+    expect(before?.metadata.lastActivityAt).toStrictEqual(ADEP_ACTIVITY_AT);
+
+    // Recompute the status: `active` → `degraded`. The direction is passed too (the
+    // status recompute owns it) but NOT lastActivityAt — the type excludes it.
+    await repo.updateGraphEdge({
+      sourceNodeId: APP_C,
+      targetNodeId: APP_A,
+      type: "adapter-dependency",
+      status: "degraded",
+      direction: { sourceSpecId: SPEC_C, targetSpecId: SPEC_A },
+    });
+
+    const after = await repo.getGraphEdge(APP_C, APP_A, "adapter-dependency");
+    expect(after?.id).toBe(EDGE_ADEP); // same row — update in place, not a new insert
+    expect(after?.status).toBe("degraded"); // replaced
+    expect(after?.metadata.direction).toStrictEqual({ sourceSpecId: SPEC_C, targetSpecId: SPEC_A });
+    expect(after?.metadata.lastActivityAt).toStrictEqual(ADEP_ACTIVITY_AT); // GR-1.5: preserved
+
+    // A no-such-edge update targets a non-existent key: it writes nothing and never
+    // inserts (the incremental updater's create case is upsertGraphEdge, not this op).
+    await repo.updateGraphEdge({
+      sourceNodeId: APP_A,
+      targetNodeId: APP_C,
+      type: "adapter-dependency",
+      status: "active",
+      direction: { sourceSpecId: SPEC_A, targetSpecId: SPEC_C },
+    });
+    expect(await repo.getGraphEdge(APP_A, APP_C, "adapter-dependency")).toBeUndefined();
+  });
+
+  it("removeGraphEdge deletes the edge by key and is a safe no-op when absent (GR-1.2/1.4)", async () => {
+    const repo = new DownstreamArtifactRepository(db);
+    // The adapter-dependency edge from the previous test still exists.
+    expect(await repo.getGraphEdge(APP_C, APP_A, "adapter-dependency")).toBeDefined();
+
+    await repo.removeGraphEdge(APP_C, APP_A, "adapter-dependency");
+    expect(await repo.getGraphEdge(APP_C, APP_A, "adapter-dependency")).toBeUndefined();
+
+    // Idempotent: removing an already-absent edge matches no row and does not throw.
+    await expect(repo.removeGraphEdge(APP_C, APP_A, "adapter-dependency")).resolves.toBeUndefined();
+
+    // The unrelated sync edge is untouched — remove is keyed by (source,target,type).
+    expect(await repo.getGraphEdge(APP_A, APP_B, "sync")).toBeDefined();
   });
 
   it("listActiveMappingIdsWithoutArtifacts finds only mappings with children and no artifacts", async () => {
