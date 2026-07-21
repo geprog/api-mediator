@@ -44,9 +44,9 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      // The default project runs every journey EXCEPT the landscape-gated SU-6 capstone,
-      // which needs the running `scenarios/` landscape (Gitea + Vikunja) and so lives in
-      // its own project below — keeping a plain `test:e2e` green with only compose Postgres.
+      // The default project runs every journey EXCEPT the landscape-gated capstones,
+      // which need a running `scenarios/` landscape and so live in their own projects
+      // below — keeping a plain `test:e2e` green with only the compose Postgres.
       testIgnore: /\.landscape\.spec\.ts$/,
       use: { ...devices["Desktop Chrome"] },
     },
@@ -55,7 +55,23 @@ export default defineConfig({
       // Skips itself (never fails) when Docker/the landscape is unavailable. Run it with the
       // landscape up: `playwright test --project=scenario-1-sync`.
       name: "scenario-1-sync",
-      testMatch: /\.landscape\.spec\.ts$/,
+      testMatch: /scenario-1-.*\.landscape\.spec\.ts$/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // CU-5 capstone (scenario 3): real adapter round trips against the running
+      // Vikunja + `todo-widget` CONSUMER surface. Skips itself when the landscape is
+      // down. Run with the landscape up: `playwright test --project=scenario-3-adapter`.
+      name: "scenario-3-adapter",
+      testMatch: /scenario-3-.*\.landscape\.spec\.ts$/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // CU-5 capstone (scenario 4): the real 3-backend `collection-union` (Gitea +
+      // Forgejo + Vikunja) served through the `task-dashboard` CONSUMER surface. Skips
+      // itself when the landscape is down. Run: `playwright test --project=scenario-4-adapter`.
+      name: "scenario-4-adapter",
+      testMatch: /scenario-4-.*\.landscape\.spec\.ts$/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],

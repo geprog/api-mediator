@@ -21,6 +21,23 @@ export const BACKEND_ORIGIN = `http://localhost:${String(BACKEND_PORT)}`;
 export const BASE_URL = `http://localhost:${String(FRONTEND_PORT)}`;
 
 /**
+ * The **Adapter Server Runtime** listener port for the e2e backend (Phase-5 RT-1) —
+ * a dedicated test port clear of the operator API (3433) and the dev default (3334).
+ *
+ * The generated adapter surface is **one** Fastify listener in the same backend
+ * process (`config.adapterHttp.port`, see `apps/backend/src/index.ts`) that hosts
+ * **every** active CONSUMER spec's surface and routes each request to its consumer
+ * app by the presented adapter **token** — never by port. The scenario READMEs
+ * reserve host ports `13900` (scenario-3) / `14900` (scenario-4) for "the mediator's
+ * adapter server", but those are per-landscape *notional* ports: a single mediator
+ * process binds one adapter port and serves both consumer surfaces on it,
+ * disambiguated by token→app (RT-2.3). The CU-5 capstone therefore calls this one
+ * origin with the scenario's token; which consumer surface answers is decided by the
+ * token, exactly as production decides it. */
+export const ADAPTER_PORT = 3534;
+export const ADAPTER_ORIGIN = `http://localhost:${String(ADAPTER_PORT)}`;
+
+/**
  * The compose Postgres the backend connects to and the specs seed/inspect
  * directly. A **dedicated** database (`api_mediator_e2e`) on the compose Postgres,
  * kept separate from the primary `api_mediator` dev database so an e2e run is
@@ -79,6 +96,10 @@ export const CREDENTIAL_MASTER_KEY = "nuaKgT2sF/l6wkVY8+Qb8bMGHE0T+wee0CxRJCAzNC
 export function backendEnv(): Record<string, string> {
   return {
     HTTP_PORT: String(BACKEND_PORT),
+    // The Adapter Server Runtime listener (RT-1) on its own dedicated test port, so
+    // the CU-5 capstone can call the generated adapter surface. Off the operator port
+    // and the dev default (3334); inert for the non-adapter journeys.
+    ADAPTER_HTTP_PORT: String(ADAPTER_PORT),
     DATABASE_URL,
     CREDENTIAL_MASTER_KEY,
     OPERATOR_ACCOUNTS: OPERATOR_ACCOUNTS_ENV,
