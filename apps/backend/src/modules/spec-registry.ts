@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
 
-import type { ApiSpec, ApiSpecRole, AppCapabilities, Ir } from "@mediator/domain";
+import type {
+  ApiSpec,
+  ApiSpecRole,
+  AppCapabilities,
+  ApprovedMapping,
+  AuditLogEntry,
+  Ir,
+  ResourceBinding,
+} from "@mediator/domain";
+import { stripUndefined } from "@mediator/domain";
 import { createSpecIngested } from "@mediator/event-bus";
 import {
   buildIr,
   computeContentHash,
   deriveResourceBindings,
   diffSpec,
+  revalidateResourceBinding,
+  type RevalidatableRefName,
   type SpecDiff,
 } from "@mediator/ir";
 
@@ -172,13 +183,22 @@ export class SpecRegistry {
    *    IR is computed **once** and returned in the `"advanced"` outcome, for the
    *    SL-2…SL-6 reactions to read.
    *
+   * 4. **Additive reaction (SL-2)** — when the diff classifies **additive**, the
+   *    deterministic re-pin + carry-forward runs in this same transaction (see
+   *    {@link applyAdditiveReaction}): every `active` `ApprovedMapping` pinned to the
+   *    now-`superseded` version is re-pinned to the new one (audit-logged), and the
+   *    prior version's `ResourceBinding`s + `analysisExclusions` carry forward, with
+   *    anything the new IR no longer resolves dropped. Nothing that executes changes,
+   *    so no mapping is set `stale` and no human review is required.
+   *
    * Deliberately **out of scope here** (owned by later slices, so the boundary stays
-   * clean): applying either reaction — no mapping is re-pinned or set `stale`, no
-   * `ResourceBinding`/`analysisExclusions` carry-forward (SL-2), and **no
-   * `SpecIngested` is emitted** (that event triggers a *full* detection analysis; the
-   * SL-2…SL-6 reactions are the diff's scoped consumers instead). Between this
-   * transition and those reactions an active mapping may still reference the now-
-   * `superseded` prior version — the expected intermediate the reactions resolve.
+   * clean): the additive **delta proposal** for genuinely-new elements (SL-3) and any
+   * **breaking**-change reaction — a breaking diff advances the version but marks no
+   * mapping `stale`, re-pins nothing, and carries nothing forward (SL-4…SL-6). **No
+   * `SpecIngested` is emitted** on any branch (that event triggers a *full* detection
+   * analysis; the SL-2…SL-6 reactions are the diff's scoped consumers instead). After a
+   * **breaking** advance an active mapping may still reference the now-`superseded`
+   * prior version — the expected intermediate the breaking reactions resolve.
    */
   public async ingestNewVersion(
     appId: string,
@@ -220,14 +240,212 @@ export class SpecRegistry {
       createdAt: new Date(),
     });
     const superseded = await tx.apiSpecs.updateStatus(active.id, "superseded");
+    // `updateStatus` returns undefined only if the row vanished mid-transaction (it did
+    // not — we just read it); fall back to the known prior with its new status.
+    const supersededSpec: ApiSpec = superseded ?? { ...active, status: "superseded" };
 
-    return {
-      kind: "advanced",
-      newSpec,
-      // `updateStatus` returns undefined only if the row vanished mid-transaction (it
-      // did not — we just read it); fall back to the known prior with its new status.
-      supersededSpec: superseded ?? { ...active, status: "superseded" },
-      diff,
-    };
+    if (diff.classification === "additive") {
+      // SL-2 — the deterministic additive reaction, in this same transaction (its audit
+      // rows commit with the version advance). It returns the new version reflecting the
+      // carried-forward `analysisExclusions`.
+      const repinnedNewSpec = await this.applyAdditiveReaction(supersededSpec, newSpec, tx);
+      return { kind: "advanced", newSpec: repinnedNewSpec, supersededSpec, diff };
+    }
+
+    // A breaking advance stops here (SL-4…SL-6 own its reaction): no re-pin, no
+    // carry-forward, no stale-marking.
+    return { kind: "advanced", newSpec, supersededSpec, diff };
   }
+
+  /**
+   * **SL-2 — the deterministic additive reaction to a `SpecDiff`.** Runs entirely on
+   * the version-advance transaction, so its effects (re-pins, carried-forward bindings,
+   * audit rows) commit atomically with the advance. Three parts, none of which change
+   * anything that executes — so no mapping is set `stale` and no human review runs:
+   *
+   * 1. **Re-pin (SL-2.1/2.2/2.3)** — every `active` `ApprovedMapping` pinned to the
+   *    now-`superseded` version (via `sourceSpecId`/`targetSpecId`) is re-pinned to the
+   *    new version; each re-pin changes **only** the pinned spec version and is recorded
+   *    as an audit row. After this, no `active` mapping references the superseded row.
+   *    The `counterpartMappingId` link is never touched — it is defined over spec
+   *    lineages, so each side's pinned version advances independently (SL-2.5).
+   * 2. **Carry forward `analysisExclusions` (SL-2.4)** — the prior version's exclusions
+   *    move to the new version, dropping any that no longer resolve (SL-1 created the new
+   *    version with an empty exclusion set; this fills it in).
+   * 3. **Carry forward `ResourceBinding`s (SL-2.4)** — the prior version's bindings are
+   *    re-created as fresh rows on the new version, dropping any ref the new IR no longer
+   *    resolves. For a truly additive diff nothing is dropped and confirmations carry
+   *    forward intact.
+   *
+   * Returns the new `ApiSpec` reflecting its carried-forward `analysisExclusions`.
+   */
+  private async applyAdditiveReaction(
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<ApiSpec> {
+    const now = new Date();
+
+    // (1) Re-pin every active mapping pinned to the superseded version + audit each.
+    const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    for (const mapping of mappings) {
+      const pair = repinnedSpecPair(mapping, supersededSpec.id, newSpec.id);
+      await tx.approvedMappings.repinSpecs(mapping.id, pair.sourceSpecId, pair.targetSpecId);
+      await tx.audit.insert(repinAuditEntry(mapping, supersededSpec, newSpec, now));
+    }
+
+    // (2) Carry forward the analysis exclusions, dropping any that no longer resolve.
+    const carriedExclusions = carryForwardAnalysisExclusions(
+      supersededSpec.analysisExclusions,
+      newSpec.parsedIR,
+    );
+    const updated = await tx.apiSpecs.updateAnalysisExclusions(newSpec.id, carriedExclusions);
+
+    // (3) Carry forward the resource bindings as fresh rows on the new version.
+    const priorBindings = await tx.resourceBindings.listByApiSpecId(supersededSpec.id);
+    const carriedBindings = priorBindings.flatMap((prior) => {
+      const carried = carryForwardResourceBinding(
+        prior,
+        newSpec.id,
+        randomUUID(),
+        newSpec.parsedIR,
+      );
+      return carried === undefined ? [] : [carried];
+    });
+    if (carriedBindings.length > 0) {
+      await tx.resourceBindings.createMany(carriedBindings);
+    }
+
+    return updated ?? { ...newSpec, analysisExclusions: carriedExclusions };
+  }
+}
+
+// ── SL-2 pure helpers (the additive re-pin / carry-forward policy) ─────────────
+
+/**
+ * SL-2.1/2.5 — the re-pinned spec pair for a mapping when `supersededSpecId` advances
+ * to `newSpecId`. Whichever side pinned the superseded version advances; the other side
+ * (the counterpart lineage) is carried forward unchanged, so re-pinning one side never
+ * disturbs the counterpart pairing. Pure.
+ */
+export function repinnedSpecPair(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
+  supersededSpecId: string,
+  newSpecId: string,
+): { readonly sourceSpecId: string; readonly targetSpecId: string } {
+  return {
+    sourceSpecId: mapping.sourceSpecId === supersededSpecId ? newSpecId : mapping.sourceSpecId,
+    targetSpecId: mapping.targetSpecId === supersededSpecId ? newSpecId : mapping.targetSpecId,
+  };
+}
+
+/**
+ * SL-2.4 — the `analysisExclusions` carried forward to the new version: every excluded
+ * resource group that still resolves as a group in the new IR (`analysisExclusions`
+ * names resource groups — `docs/glossary.md`). One whose group is gone is dropped. For a
+ * truly additive diff no group is removed, so this is the identity — the drop is the
+ * safety net the requirement states. Pure; preserves order.
+ */
+export function carryForwardAnalysisExclusions(
+  priorExclusions: readonly string[],
+  newIr: Ir,
+): string[] {
+  const groups = new Set(newIr.map((group) => group.resourceRef));
+  return priorExclusions.filter((resourceRef) => groups.has(resourceRef));
+}
+
+/**
+ * SL-2.4 — one prior-version `ResourceBinding` carried forward to the new version as a
+ * fresh row (`newId` on `newSpecId`), dropping any ref/artifact the new IR no longer
+ * resolves. Returns `undefined` when the resource **group** is gone from the new IR (the
+ * whole binding is moot) — an additive diff never removes a group, so that too is a
+ * safety net.
+ *
+ * The canonical IR-resolution policy (`revalidateResourceBinding`) is reused purely to
+ * learn **which** refs/artifacts no longer resolve. SL-2 then **drops** them — as
+ * opposed to returning them to unconfirmed, which is the breaking-change reaction SL-5
+ * owns. For an additive diff `findings` is empty, so this is a verbatim copy with the
+ * operator's confirmations intact — exactly "carry forward like a ref on the lineage".
+ * Pure (`newId` is supplied by the caller).
+ */
+export function carryForwardResourceBinding(
+  prior: ResourceBinding,
+  newSpecId: string,
+  newId: string,
+  newIr: Ir,
+): ResourceBinding | undefined {
+  if (!newIr.some((group) => group.resourceRef === prior.resourceRef)) {
+    return undefined;
+  }
+  const { findings } = revalidateResourceBinding(prior, newIr);
+  const droppedRefs = new Set<RevalidatableRefName>();
+  const droppedParams = new Set<string>();
+  let dropSourceScopeRef = false;
+  for (const finding of findings) {
+    switch (finding.kind) {
+      case "binding-ref-invalidated":
+        droppedRefs.add(finding.ref);
+        break;
+      case "source-scope-ref-invalidated":
+        dropSourceScopeRef = true;
+        break;
+      case "scope-parameter-removed":
+        droppedParams.add(finding.parameterName);
+        break;
+      // A newly-required parameter is NOT introduced here — carry-forward copies what
+      // existed, it never derives new scope artifacts (that is SL-3/SS-16). The container
+      // and identity-key findings are correspondence-level (SL-5), not per-binding.
+      case "scope-parameter-added":
+      case "container-resource-removed":
+      case "scope-identity-key-invalidated":
+        break;
+    }
+  }
+  return stripUndefined({
+    ...prior,
+    id: newId,
+    apiSpecId: newSpecId,
+    nativeIdRef: droppedRefs.has("nativeIdRef") ? undefined : prior.nativeIdRef,
+    recordAddressRef: droppedRefs.has("recordAddressRef") ? undefined : prior.recordAddressRef,
+    collectionReadRef: droppedRefs.has("collectionReadRef") ? undefined : prior.collectionReadRef,
+    paginationRef: droppedRefs.has("paginationRef") ? undefined : prior.paginationRef,
+    deltaCursorRef: droppedRefs.has("deltaCursorRef") ? undefined : prior.deltaCursorRef,
+    deltaDeletionRef: droppedRefs.has("deltaDeletionRef") ? undefined : prior.deltaDeletionRef,
+    changeTimestampRef: droppedRefs.has("changeTimestampRef")
+      ? undefined
+      : prior.changeTimestampRef,
+    sourceScopeRef: dropSourceScopeRef ? undefined : prior.sourceScopeRef,
+    scopePathBindings: (prior.scopePathBindings ?? []).filter(
+      (entry) => !droppedParams.has(entry.parameterName),
+    ),
+  });
+}
+
+/**
+ * SL-2.1 — the audit row that records one re-pin. Written as a `mapping-decision`
+ * entry attributed to `system` (the reaction is automatic, driven by the diff — not an
+ * operator): the existing audit vocabulary carries no dedicated re-pin type, and adding
+ * one is a schema migration this deterministic slice deliberately avoids. `details` is
+ * metadata only — the side that advanced and the spec ids/version — never a secret.
+ */
+function repinAuditEntry(
+  mapping: ApprovedMapping,
+  supersededSpec: ApiSpec,
+  newSpec: ApiSpec,
+  now: Date,
+): AuditLogEntry {
+  const side =
+    mapping.sourceSpecId === supersededSpec.id
+      ? mapping.targetSpecId === supersededSpec.id
+        ? "source+target"
+        : "source"
+      : "target";
+  return {
+    id: randomUUID(),
+    type: "mapping-decision",
+    actor: "system",
+    relatedMappingId: mapping.id,
+    details: `re-pinned ${side} spec ${supersededSpec.id} -> ${newSpec.id} (v${String(newSpec.version)})`,
+    timestamp: now,
+  };
 }

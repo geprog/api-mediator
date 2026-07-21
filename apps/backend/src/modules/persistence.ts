@@ -9,6 +9,8 @@ import type {
 } from "@mediator/db";
 import {
   ApiSpecRepository,
+  ApprovedMappingRepository,
+  AuditLogRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   tx,
@@ -20,6 +22,8 @@ import type {
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
+  ApprovedMapping,
+  AuditLogEntry,
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
@@ -81,6 +85,8 @@ export interface SpecTxRepo {
 export interface BindingTxRepo {
   createMany(bindings: ResourceBinding[]): Promise<ResourceBinding[]>;
   getById(id: string): Promise<ResourceBinding | undefined>;
+  /** SL-2.4 — the bindings pinned to a spec version (the set carried forward on an additive advance). */
+  listByApiSpecId(apiSpecId: string): Promise<ResourceBinding[]>;
   update(id: string, patch: ResourceBindingRefPatch): Promise<ResourceBinding | undefined>;
   updateScopePathBinding(
     id: string,
@@ -98,6 +104,28 @@ export interface CredentialTxStore {
 }
 
 /**
+ * The `ApprovedMapping` operations the SL-2 additive re-pin needs inside the
+ * version-advance transaction: read the `active` mappings pinned to the superseded
+ * version and re-pin each to the new one. Deliberately narrow — the additive
+ * reaction changes **only** the pinned spec version, never mapping content or state.
+ */
+export interface ApprovedMappingTxRepo {
+  /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
+  listActiveBySpecId(specId: string): Promise<ApprovedMapping[]>;
+  /** SL-2.1/2.2 — re-pin a mapping's spec ids only; every other column is untouched. */
+  repinSpecs(
+    id: string,
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined>;
+}
+
+/** Appends audit-log rows within the current transaction (SL-2.1 records each re-pin). */
+export interface AuditTxRepo {
+  insert(entry: AuditLogEntry): Promise<void>;
+}
+
+/**
  * The repositories + event emit available inside one transaction. `emit` is
  * already bound to the open transaction (transactional outbox), so callers just
  * hand it a domain event.
@@ -107,6 +135,9 @@ export interface TxStores {
   readonly apiSpecs: SpecTxRepo;
   readonly resourceBindings: BindingTxRepo;
   readonly credentialStore: CredentialTxStore;
+  // ── SL-2 additive re-pin ports (the spec-update lifecycle's reaction to a diff) ──
+  readonly approvedMappings: ApprovedMappingTxRepo;
+  readonly audit: AuditTxRepo;
   emit(event: DomainEventEnvelope): Promise<void>;
 }
 
@@ -153,6 +184,8 @@ export class DbUnitOfWork implements UnitOfWork {
           this.#keyProvider,
           this.#credentialLogger,
         ),
+        approvedMappings: new ApprovedMappingRepository(txn),
+        audit: new AuditLogRepository(txn),
         emit: (event) => this.#eventBus.emit(event, txn),
       }),
     );

@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   ApiSpecRepository,
+  ApprovedMappingRepository,
+  AuditLogRepository,
   RegisteredAppRepository,
+  ResourceBindingRepository,
   apiSpec,
   closeDb,
   createDb,
@@ -17,7 +20,7 @@ import { buildIr, computeContentHash } from "@mediator/ir";
 import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { BindingTxRepo, CredentialTxStore, TxStores } from "./modules/persistence.js";
+import type { CredentialTxStore, TxStores } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
 import { providerSpecDocument } from "./testing/sample-specs.testkit.js";
 
@@ -45,17 +48,11 @@ try {
 const suite = databaseUrl === undefined ? describe.skip : describe;
 
 /**
- * The two `TxStores` ports {@link SpecRegistry.ingestNewVersion} never touches on the
- * version-advance path — deriving bindings and storing credentials are not part of
- * SL-1. They reject so the test fails loudly if that ever changes.
+ * Storing credentials is never part of a version advance (SL-1/SL-2), so the credential
+ * port rejects — the test fails loudly if that ever changes. (Bindings/mappings/audit
+ * *are* touched by the SL-2 additive reaction and use real repositories below; these SL-1
+ * fixtures seed no mappings and no v1 bindings, so that reaction is a no-op here.)
  */
-const unusedBindings: BindingTxRepo = {
-  createMany: () => Promise.reject(new Error("ingestNewVersion must not derive bindings in SL-1")),
-  getById: () => Promise.reject(new Error("unused")),
-  update: () => Promise.reject(new Error("unused")),
-  updateScopePathBinding: () => Promise.reject(new Error("unused")),
-  updateSourceScopeRef: () => Promise.reject(new Error("unused")),
-};
 const unusedCredentials: CredentialTxStore = {
   store: () => Promise.reject(new Error("unused")),
 };
@@ -112,14 +109,17 @@ suite("SL-1 SpecRegistry.ingestNewVersion (requires Postgres)", () => {
     return { app, v1 };
   }
 
-  /** The version-advance `TxStores` over one transaction handle (real spec + app repos). */
+  /** The version-advance `TxStores` over one transaction handle (real repositories). */
   function txStoresOn(handle: DbHandle): TxStores {
     return {
       registeredApps: new RegisteredAppRepository(handle),
       apiSpecs: new ApiSpecRepository(handle),
-      resourceBindings: unusedBindings,
+      resourceBindings: new ResourceBindingRepository(handle),
       credentialStore: unusedCredentials,
-      emit: () => Promise.reject(new Error("ingestNewVersion must not emit SpecIngested in SL-1")),
+      approvedMappings: new ApprovedMappingRepository(handle),
+      audit: new AuditLogRepository(handle),
+      emit: () =>
+        Promise.reject(new Error("ingestNewVersion must not emit SpecIngested on advance")),
     };
   }
 
