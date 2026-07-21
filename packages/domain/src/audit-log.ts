@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { adapterRequestCauseSchema } from "./adapter-enums.js";
+
 /**
  * `SyncEvent / AuditLog` — the durable, business-level record of every sync
  * execution, adapter request, mapping decision, and credential access
@@ -21,6 +23,12 @@ import { z } from "zod";
  * `mapping-decision` construction sites (the approval service + its db mapper),
  * which set none of them, still validate and typecheck unchanged — a
  * `mapping-decision` row leaves `status` unset (enforced below).
+ *
+ * AD-5 layers on the **`adapter-request`** fields for the same reason and under
+ * the same discipline: an adapter request becomes a first-class business record,
+ * so every served request — including every distinct failure cause and the
+ * degraded middle ground — is queryable after the fact. Emitting the rows is
+ * RT-5/WR-*; this file only says what a row may hold.
  *
  * **Metadata only, never secrets** — the security invariant: an audit entry
  * carries who/what/when/decision and hashes/ids/status, never credential material
@@ -119,6 +127,28 @@ export const AuditLogStatus = auditLogStatusSchema.enum;
  *   every row carries them; they are modeled `.optional()` here so the pre-existing
  *   Phase-3 `mapping-decision` construction sites (which predate this slice and set
  *   neither) still compile — a later slice populates them at write time.
+ *
+ * AD-5 `adapter-request` fields (all optional — same backward-compatibility
+ * reason):
+ *
+ * - `relatedBindingId` / `relatedEndpointId` — the `AdapterBinding` an adapter
+ *   request resolved to and the `AdapterEndpoint` it served (AD-5.1). The same
+ *   loose "whichever the event type concerns" refs the data model lists
+ *   (`relatedBindingId` is named there); loose so the audit row survives a later
+ *   deletion of the binding/endpoint, exactly like `relatedRuleId`.
+ * - `cause` — on a failed or degraded `adapter-request` row, **which** of the six
+ *   named causes applied, or a generic `upstream-error` (AD-5.2). Deliberately a
+ *   separate field from `status`, which reuses the Phase-4 enum unchanged — no new
+ *   status value is invented for the adapter (AD-5.5).
+ * - `degraded` — `true` on a degraded response: a served result that omitted a
+ *   failed `supplement`'s optional fields under `degraded` strictness (AD-5.3).
+ *   Distinguishable from a clean success (`status = success`, `degraded` absent)
+ *   and from a failure (`status = failure`) precisely because it is
+ *   `status = success` **with** this flag set — reusing the status enum rather
+ *   than coining a `degraded` status value.
+ *
+ * All three are **metadata only** — ids, an enum cause, a boolean — never a
+ * request/response payload value and never credential material (AD-5.4).
  */
 export const auditLogEntrySchema = z
   .object({
@@ -142,6 +172,11 @@ export const auditLogEntrySchema = z
     relatedCredentialId: z.string().optional(),
     traceId: z.string().optional(),
     spanId: z.string().optional(),
+    // ── AD-5 adapter-request fields (all optional for backward compatibility) ──
+    relatedBindingId: z.string().optional(),
+    relatedEndpointId: z.string().optional(),
+    cause: adapterRequestCauseSchema.optional(),
+    degraded: z.boolean().optional(),
   })
   .superRefine((entry, ctx) => {
     // A `mapping-decision` row leaves `status` unset (SD-4 criterion 1): the
@@ -153,6 +188,25 @@ export const auditLogEntrySchema = z
         message: "a mapping-decision audit row leaves status unset",
         path: ["status"],
       });
+    }
+    // `cause` and `degraded` describe an adapter request specifically (AD-5.2/3):
+    // unrepresentable on any other row type, so a sync-execution row can never
+    // carry a spurious adapter cause or degraded flag.
+    if (entry.type !== "adapter-request") {
+      if (entry.cause !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: "cause is an adapter-request field — absent on other audit row types",
+          path: ["cause"],
+        });
+      }
+      if (entry.degraded !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: "degraded is an adapter-request field — absent on other audit row types",
+          path: ["degraded"],
+        });
+      }
     }
   });
 export type AuditLogEntry = z.infer<typeof auditLogEntrySchema>;

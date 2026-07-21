@@ -131,3 +131,10 @@ export {
   type GraphEdgeInsert,
   type GraphEdgeRow,
 } from "./graph-edge.js";
+export {
+  mapAdapterWriteOutcomeRow,
+  mapAdapterWriteOutcomeMetadataRow,
+  toAdapterWriteOutcomeInsert,
+  type AdapterWriteOutcomeInsert,
+  type AdapterWriteOutcomeRow,
+} from "./adapter-write-outcome.js";

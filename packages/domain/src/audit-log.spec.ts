@@ -200,3 +200,103 @@ describe("AuditLogEntry schema — credential-access row (CD-3)", () => {
     }
   });
 });
+
+describe("AuditLogEntry schema — adapter-request row (AD-5)", () => {
+  function adapterRequestEntry(): AuditLogEntry {
+    return {
+      id: "audit-adapter-1",
+      type: "adapter-request",
+      actor: "adapter-runtime",
+      status: "success",
+      relatedEndpointId: "ae-1",
+      relatedBindingId: "ab-1",
+      idempotencyKey: "idem-abc",
+      payloadHash: "hash-xyz",
+      traceId: "trace-1",
+      spanId: "span-1",
+      timestamp: new Date("2026-07-20T00:00:00.000Z"),
+    };
+  }
+
+  it("accepts a clean-success adapter-request row (AD-5.1, AD-5.5)", () => {
+    const parsed = auditLogEntrySchema.parse(adapterRequestEntry());
+    // A clean success carries no cause and is not degraded.
+    expect(parsed).not.toHaveProperty("cause");
+    expect(parsed).not.toHaveProperty("degraded");
+  });
+
+  it("reuses the Phase-4 status enum, inventing no adapter status value (AD-5.5)", () => {
+    expect(
+      auditLogEntrySchema.safeParse({ ...adapterRequestEntry(), status: "failure" }).success,
+    ).toBe(true);
+    expect(
+      auditLogEntrySchema.safeParse({ ...adapterRequestEntry(), status: "not-yet-mapped" }).success,
+    ).toBe(false);
+  });
+
+  it("records each of the six named causes plus a generic upstream error, distinguishably (AD-5.2)", () => {
+    for (const cause of [
+      "not-yet-mapped",
+      "endpoint-disabled",
+      "mapping-stale",
+      "mapping-suspended",
+      "backend-disabled",
+      "mediator-transform-error",
+      "upstream-error",
+    ]) {
+      const result = auditLogEntrySchema.safeParse({
+        ...adapterRequestEntry(),
+        status: "failure",
+        cause,
+      });
+      expect(result.success, cause).toBe(true);
+    }
+  });
+
+  it("rejects a cause outside the named set", () => {
+    expect(
+      auditLogEntrySchema.safeParse({
+        ...adapterRequestEntry(),
+        status: "failure",
+        cause: "timeout",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("represents a degraded response, distinct from a clean success and a failure (AD-5.3)", () => {
+    const degraded = auditLogEntrySchema.parse({
+      ...adapterRequestEntry(),
+      status: "success",
+      degraded: true,
+    });
+    expect(degraded.status).toBe("success");
+    expect(degraded.degraded).toBe(true);
+    // A clean success is status=success with no degraded flag; a failure is
+    // status=failure — all three are mutually distinguishable.
+    const clean = auditLogEntrySchema.parse(adapterRequestEntry());
+    expect(clean).not.toHaveProperty("degraded");
+  });
+
+  it("forbids cause/degraded on a non-adapter row (AD-5.2/AD-5.3)", () => {
+    expect(
+      auditLogEntrySchema.safeParse({
+        id: "audit-x",
+        type: "sync-execution",
+        actor: "sync-engine",
+        status: "failure",
+        cause: "upstream-error",
+        timestamp: new Date("2026-07-20T00:00:00.000Z"),
+      }).success,
+    ).toBe(false);
+    expect(
+      auditLogEntrySchema.safeParse({
+        id: "audit-y",
+        type: "sync-execution",
+        actor: "sync-engine",
+        status: "success",
+        degraded: true,
+        timestamp: new Date("2026-07-20T00:00:00.000Z"),
+      }).success,
+    ).toBe(false);
+  });
+});

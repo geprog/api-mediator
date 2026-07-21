@@ -57,6 +57,10 @@ export {
   type SyncRuleConfigPatch,
   type SyncRuleEnableTransition,
 } from "./sync-rule.js";
+export {
+  AdapterWriteOutcomeRepository,
+  type AdapterWriteOutcomeOps,
+} from "./adapter-write-outcome.js";
 export { PollSnapshotRepository, type PollSnapshotRecord } from "./poll-snapshot.js";
 export {
   PollScopeStateRepository,

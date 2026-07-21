@@ -20,6 +20,10 @@ export {
   adapterBindingStatusEnum,
   adapterEndpoint,
   adapterEndpointStatusEnum,
+  adapterRequestCauseEnum,
+  adapterWriteOutcome,
+  adapterWriteOutcomeStatusEnum,
+  aggregationStrategyEnum,
   apiSpec,
   apiSpecRoleEnum,
   apiSpecStatusEnum,
@@ -35,6 +39,7 @@ export {
   credentialTypeEnum,
   deletePropagationEnum,
   detectionJobStatusEnum,
+  endpointStrictnessEnum,
   eventOutbox,
   fieldMapping,
   graphEdge,
@@ -88,6 +93,8 @@ export {
 export {
   mapAdapterBindingRow,
   mapAdapterEndpointRow,
+  mapAdapterWriteOutcomeMetadataRow,
+  mapAdapterWriteOutcomeRow,
   mapApiSpecRow,
   mapApprovedMappingRow,
   mapAuditLogRow,
@@ -107,6 +114,7 @@ export {
   mapSyncRuleRow,
   toAdapterBindingInsert,
   toAdapterEndpointInsert,
+  toAdapterWriteOutcomeInsert,
   toApiSpecInsert,
   toApprovedMappingInsert,
   toAuditLogInsert,
@@ -147,6 +155,7 @@ export {
 
 // Repositories.
 export {
+  AdapterWriteOutcomeRepository,
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
@@ -168,6 +177,7 @@ export {
   ScopeLinkRepository,
   SyncFieldStateRepository,
   SyncRuleRepository,
+  type AdapterWriteOutcomeOps,
   type ClaimedDetectionJob,
   type ClaimedQueueEntry,
   type ClaimParams,
