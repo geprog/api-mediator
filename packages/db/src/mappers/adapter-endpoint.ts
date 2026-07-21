@@ -22,7 +22,7 @@ function mapPostMergePaginationRow(row: PostMergePaginationRow): PostMergePagina
 }
 
 /** Domain → `jsonb` row form: the `Date` `confirmedAt` becomes an ISO-8601 string. */
-function toPostMergePaginationRow(pagination: PostMergePagination): PostMergePaginationRow {
+export function toPostMergePaginationRow(pagination: PostMergePagination): PostMergePaginationRow {
   return {
     convention: pagination.convention,
     confirmedBy: pagination.confirmedBy,

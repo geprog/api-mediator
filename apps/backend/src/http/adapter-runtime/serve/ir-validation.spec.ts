@@ -6,6 +6,7 @@ import {
   validateAgainstSchema,
   validateConsumerResponse,
   validateInboundRequest,
+  type UnionServeConfig,
 } from "./ir-validation.js";
 
 function param(
@@ -209,5 +210,135 @@ describe("validateConsumerResponse — AG-7", () => {
 
   it("accepts anything when the operation declares no response schema", () => {
     expect(validateConsumerResponse(operation(), { anything: true })).toEqual({ ok: true });
+  });
+});
+
+describe("validateInboundRequest — RP-2.2/2.3 union parameters (CO-3↔RP-2 contract)", () => {
+  // A collection-union list operation with a filter, a sort, and a pagination parameter.
+  const unionOp = operation({
+    operationId: "listTodos",
+    path: "/todos",
+    parameters: [
+      param({ name: "status", location: "query" }),
+      param({ name: "sort", location: "query" }),
+      param({ name: "page", location: "query" }),
+    ],
+  });
+
+  function unionConfig(overrides: Partial<UnionServeConfig> = {}): UnionServeConfig {
+    return {
+      pushdownEligibleParamNames: new Set<string>(),
+      postMergeFilterParamNames: new Set<string>(),
+      paginationParamNames: new Set<string>(),
+      sortConfigByParam: new Map(),
+      ...overrides,
+    };
+  }
+
+  it("rejects a supplied sort parameter with no configured postMergeSorts (distinct cause)", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { sort: "title" } }),
+      // `sort` IS mapped (so it is not an unmapped-consumer-input) — sort is still never
+      // pushed down, so without post-merge semantics it must reject.
+      new Set(["sort"]),
+      new Set(),
+      unionConfig(),
+    );
+    expect(result).toMatchObject({ ok: false, reason: "union-parameter-unconfigured" });
+  });
+
+  it("passes RP-2 for a sort parameter with a matching postMergeSorts value", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { sort: "title" } }),
+      new Set(["sort"]),
+      new Set(),
+      unionConfig({
+        sortConfigByParam: new Map([["sort", { fixed: false, values: new Set(["title"]) }]]),
+      }),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("rejects a sort value not among the configured accepted values", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { sort: "priority" } }),
+      new Set(["sort"]),
+      new Set(),
+      unionConfig({
+        sortConfigByParam: new Map([["sort", { fixed: false, values: new Set(["title"]) }]]),
+      }),
+    );
+    expect(result).toMatchObject({ ok: false, reason: "union-parameter-unconfigured" });
+  });
+
+  it("rejects a supplied pagination parameter with no confirmed postMergePagination", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { page: "2" } }),
+      new Set(["page"]),
+      new Set(),
+      unionConfig(),
+    );
+    expect(result).toMatchObject({ ok: false, reason: "union-parameter-unconfigured" });
+  });
+
+  it("passes RP-2 for a pagination parameter named by the confirmed convention", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { page: "2" } }),
+      new Set(["page"]),
+      new Set(),
+      unionConfig({ paginationParamNames: new Set(["page"]) }),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("rejects a filter mapped in some but not every binding (not pushdown-eligible, no postMergeFilters)", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { status: "open" } }),
+      // `status` is in the union of mapped params (mapped in SOME binding) so it is not
+      // unmapped-consumer-input; but not pushdown-eligible → union-parameter-unconfigured.
+      new Set(["status"]),
+      new Set(),
+      unionConfig(),
+    );
+    expect(result).toMatchObject({ ok: false, reason: "union-parameter-unconfigured" });
+  });
+
+  it("passes RP-2 for a pushdown-eligible filter (mapped in every binding)", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { status: "open" } }),
+      new Set(["status"]),
+      new Set(),
+      unionConfig({ pushdownEligibleParamNames: new Set(["status"]) }),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("passes RP-2 for a filter covered by a postMergeFilters entry", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { status: "open" } }),
+      new Set(["status"]),
+      new Set(),
+      unionConfig({ postMergeFilterParamNames: new Set(["status"]) }),
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("leaves a non-union endpoint entirely unaffected (no unionConfig → the sort passes)", () => {
+    const result = validateInboundRequest(
+      unionOp,
+      request({ query: { sort: "title" } }),
+      new Set(["sort"]),
+      new Set(),
+      // no unionConfig
+    );
+    expect(result).toEqual({ ok: true });
   });
 });

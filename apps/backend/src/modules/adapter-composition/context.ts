@@ -2,6 +2,7 @@ import {
   AdapterCompositionRepository,
   ApiSpecRepository,
   MappingArtifactsRepository,
+  ResourceBindingRepository,
   type Database,
 } from "@mediator/db";
 import type {
@@ -11,13 +12,15 @@ import type {
   FieldMapping,
   Ir,
   IrOperation,
+  IrParameter,
   OperationMapping,
   ParameterMapping,
 } from "@mediator/domain";
 
-import { fieldMappingsForResourcePair } from "../sync/resolution.js";
+import { fieldMappingsForResourcePair, isRefConfirmed } from "../sync/resolution.js";
 import { topLevelConsumerFieldName, type ConsumerInputUniverse } from "./analysis.js";
 import { bareParamName } from "./refs.js";
+import type { UnionBindingFacts } from "./union.js";
 import type { ComposableBindingFacts } from "./validate.js";
 
 /**
@@ -49,6 +52,16 @@ export interface CompositionContext {
    * authoritative (CO-4.4).
    */
   readonly requiredConsumerResponseFieldNames: ReadonlySet<string>;
+  /**
+   * CO-3 — one entry per composable binding: the backend resource's `ResourceBinding`
+   * ref-confirmation state (native id / collection read / pagination) and the consumer
+   * params it pushes down. Aligned with `bindingFacts` by `bindingId`.
+   */
+  readonly unionBindingFacts: readonly UnionBindingFacts[];
+  /** CO-3 — the consumer operation's declared parameters (union ref validity + classification). */
+  readonly consumerParameters: readonly IrParameter[];
+  /** CO-3 — **all** field names of the consumer response schema (bare, top-level). */
+  readonly consumerResponseFieldNames: ReadonlySet<string>;
 }
 
 export interface CompositionContextLoader {
@@ -178,14 +191,17 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
       return undefined;
     }
     const bindings = await compositions.listBindings(endpointId);
-    const bindingFacts = await Promise.all(
+    const perBinding = await Promise.all(
       bindings.map((binding) => this.#factsFor(binding, endpoint.consumerOperationId)),
     );
+    const bindingFacts = perBinding.map((entry) => entry.facts);
+    const unionBindingFacts = perBinding.map((entry) => entry.unionFacts);
 
     // Operation-level consumer facts: the CO-5 input universe (parameters + request body
-    // fields) and the CO-4 required consumer-response field names, both read from the
-    // consumer operation's own CONSUMER-spec IR — the same schema the runtime re-derives
-    // required-ness from at request time (CO-4.4), never a persisted snapshot.
+    // fields), the CO-4 required consumer-response field names, and the CO-3 consumer
+    // parameters + response fields — all read from the consumer operation's own
+    // CONSUMER-spec IR, the same schema the runtime re-derives required-ness from at
+    // request time (CO-4.4), never a persisted snapshot.
     const consumerSpecs = await new ApiSpecRepository(this.db).listByAppId(endpoint.consumerAppId);
     const consumerOperation = resolveOperation(
       consumerSpecs,
@@ -193,11 +209,11 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
       endpoint.consumerOperationId,
     );
     const consumerInputs = consumerInputUniverse(consumerOperation);
+    const responseFields = consumerOperation?.responseSchema?.fields ?? [];
     const requiredConsumerResponseFieldNames = new Set(
-      (consumerOperation?.responseSchema?.fields ?? [])
-        .filter((field) => field.required)
-        .map((field) => field.name),
+      responseFields.filter((field) => field.required).map((field) => field.name),
     );
+    const consumerResponseFieldNames = new Set(responseFields.map((field) => field.name));
 
     return {
       endpoint,
@@ -205,13 +221,16 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
       bindingFacts,
       consumerInputs,
       requiredConsumerResponseFieldNames,
+      unionBindingFacts,
+      consumerParameters: consumerOperation?.parameters ?? [],
+      consumerResponseFieldNames,
     };
   }
 
   async #factsFor(
     binding: AdapterBinding,
     consumerOperationId: string,
-  ): Promise<ComposableBindingFacts> {
+  ): Promise<{ facts: ComposableBindingFacts; unionFacts: UnionBindingFacts }> {
     const artifacts = new MappingArtifactsRepository(this.db);
     const [operationMappings, parameterMappings, fieldMappings] = await Promise.all([
       artifacts.listOperationMappings(binding.approvedMappingId),
@@ -230,7 +249,12 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
         : parameterMappings.filter((param) => param.operationMappingId === operationMapping.id);
 
     const backendSpecs = await new ApiSpecRepository(this.db).listByAppId(binding.backendAppId);
-    const backendOperation = resolveOperation(backendSpecs, "PROVIDER", binding.backendOperationId);
+    const resolvedBackend = resolveOperationWithSpec(
+      backendSpecs,
+      "PROVIDER",
+      binding.backendOperationId,
+    );
+    const backendOperation = resolvedBackend?.operation;
 
     const backendParameterNames = new Set<string>();
     const requiredBackendParameterNames = new Set<string>();
@@ -274,16 +298,67 @@ export class DbCompositionContextLoader implements CompositionContextLoader {
     const mappedConsumerParamNames = mappedConsumerParamNamesOf(scopedParameterMappings);
     const mappedConsumerBodyFieldNames = mappedConsumerBodyFieldNamesOf(scopedRequestPhase);
 
-    return {
+    // CO-3 — the backend resource's operational bindings, keyed by (backend spec,
+    // backend resource). Its confirmed refs decide link-based dedup (nativeIdRef) and
+    // union composability (collectionReadRef + paginationRef-where-paged). Absent =
+    // every ref unconfirmed, which fails those preconditions loud rather than silently.
+    const backendSpecId = resolvedBackend?.spec.id;
+    const backendResourceBinding =
+      backendSpecId === undefined
+        ? undefined
+        : (await new ResourceBindingRepository(this.db).listByApiSpecId(backendSpecId)).find(
+            (resource) => resource.resourceRef === backendResourceRef,
+          );
+    const unionFacts: UnionBindingFacts = {
       bindingId: binding.id,
-      isWriteOperation:
-        operationMapping !== undefined && WRITE_ACTIONS.has(operationMapping.action),
-      backendParameterNames,
-      requiredBackendParameterNames,
-      parameterMappedTargetNames,
-      consumerResponseFieldPaths,
-      mappedConsumerParamNames,
-      mappedConsumerBodyFieldNames,
+      backendResourceRef,
+      nativeIdRefConfirmed: isRefConfirmed(backendResourceBinding?.nativeIdRef),
+      collectionReadRefConfirmed: isRefConfirmed(backendResourceBinding?.collectionReadRef),
+      paginationRefPresent: backendResourceBinding?.paginationRef !== undefined,
+      paginationRefConfirmed: isRefConfirmed(backendResourceBinding?.paginationRef),
+      // Pushdown source = the consumer params a ParameterMapping reads (pair-scoped) —
+      // NOT the transform's additional inputs. A filter is pushed down only when every
+      // contributing binding maps it (CO-3.4).
+      pushdownConsumerParamNames: new Set(
+        scopedParameterMappings.map((param) => bareParamName(param.sourceParamRef)),
+      ),
+    };
+
+    return {
+      facts: {
+        bindingId: binding.id,
+        isWriteOperation:
+          operationMapping !== undefined && WRITE_ACTIONS.has(operationMapping.action),
+        backendParameterNames,
+        requiredBackendParameterNames,
+        parameterMappedTargetNames,
+        consumerResponseFieldPaths,
+        mappedConsumerParamNames,
+        mappedConsumerBodyFieldNames,
+      },
+      unionFacts,
     };
   }
+}
+
+/**
+ * Resolve an operation ref against the first active spec of `role` that declares it,
+ * returning both the operation and the owning spec — the spec id is what keys the
+ * resource's `ResourceBinding` (CO-3). A read-only sibling of {@link resolveOperation}.
+ */
+function resolveOperationWithSpec(
+  specs: readonly ApiSpec[],
+  role: ApiSpec["role"],
+  operationRef: string,
+): { readonly operation: IrOperation; readonly spec: ApiSpec } | undefined {
+  for (const spec of specs) {
+    if (spec.role !== role || spec.status !== "active") {
+      continue;
+    }
+    const operation = findOperationInIr(spec.parsedIR, operationRef);
+    if (operation !== undefined) {
+      return { operation, spec };
+    }
+  }
+  return undefined;
 }

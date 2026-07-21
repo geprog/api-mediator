@@ -6,6 +6,10 @@ import {
   aggregationStrategySchema,
   chainInputSchema,
   endpointStrictnessSchema,
+  postMergeDedupSchema,
+  postMergeFilterSchema,
+  postMergePaginationConventionValueSchema,
+  postMergeSortSchema,
 } from "@mediator/domain";
 import { z } from "zod";
 
@@ -37,10 +41,11 @@ export const composeBindingRequestSchema = z.object({
 export type ComposeBindingRequest = z.infer<typeof composeBindingRequestSchema>;
 
 /**
- * A composition submission for a `composition-required` endpoint (CO-2.1): the
- * `aggregationStrategy`, strict-vs-degraded mode, `cacheTtl` (absent = no caching), and
- * one entry per composable binding of the endpoint. `postMerge*` union configuration is
- * deliberately **not** here — that is CO-3.
+ * A composition submission for a `composition-required` endpoint (CO-2.1 + CO-3): the
+ * `aggregationStrategy`, strict-vs-degraded mode, `cacheTtl` (absent = no caching), one
+ * entry per composable binding of the endpoint, and — for a `collection-union` — the
+ * CO-3 `postMerge*` configuration. The union fields are rejected by validation on any
+ * other strategy (they are unrepresentable off a union), so they stay optional here.
  */
 export const composeAdapterEndpointRequestSchema = z.object({
   aggregationStrategy: aggregationStrategySchema,
@@ -54,6 +59,21 @@ export const composeAdapterEndpointRequestSchema = z.object({
    * request validation (RP-2.4), the fail-loud default.
    */
   acknowledgedIgnoredInputs: z.array(acknowledgedIgnoredInputSchema).optional(),
+  // ── CO-3 collection-union configuration ─────────────────────────────────────
+  /** How duplicate rows collapse (none / record-link / dedup-key) — a union must choose (CO-3.1). */
+  postMergeDedup: postMergeDedupSchema.optional(),
+  /** Post-merge semantics per non-pushdown filter parameter (CO-3.4). */
+  postMergeFilters: z.array(postMergeFilterSchema).optional(),
+  /** Post-merge semantics per accepted sort parameter value (CO-3.5). */
+  postMergeSorts: z.array(postMergeSortSchema).optional(),
+  /**
+   * The pagination **convention** the composer proposes (CO-3.5). Its confirmation is
+   * stamped server-side to the authenticated operator via {@link confirmPostMergePagination}
+   * — never a client-supplied `confirmedBy`, so an unconfirmed convention stays honest.
+   */
+  postMergePagination: postMergePaginationConventionValueSchema.optional(),
+  /** Whether the composer confirms the proposed pagination convention (CO-3.5 derive-then-confirm). */
+  confirmPostMergePagination: z.boolean().optional(),
 });
 export type ComposeAdapterEndpointRequest = z.infer<typeof composeAdapterEndpointRequestSchema>;
 
@@ -121,16 +141,38 @@ export const compositionValidationDtoSchema = z.discriminatedUnion("ok", [
 export type CompositionValidationDto = z.infer<typeof compositionValidationDtoSchema>;
 
 /**
- * The compose-preview response (CO-4 + CO-5). A **derivation** the composer reviews
+ * The CO-3 union derivations the composer confirms before activating (present only for a
+ * proposed `collection-union`): filters that would be unserviceable (CO-3.4), sort /
+ * pagination parameters still needing a decision (CO-3.5), the dedup conflict-precedence
+ * rule (CO-3.3), and the large-collection size flag naming `cacheTtl` as the mitigation
+ * (CO-3.8). None of it is applied — the composer must confirm.
+ */
+export const unionCompositionAnalysisDtoSchema = z.object({
+  unserviceableFilters: z.array(z.string()),
+  unconfiguredSortParameters: z.array(z.string()),
+  unconfiguredPaginationParameters: z.array(z.string()),
+  dedupConflictPrecedence: z.literal("executionOrder-then-bindingId"),
+  largeCollectionRisk: z.object({
+    flagged: z.literal(true),
+    mitigation: z.literal("cacheTtl"),
+    cacheTtlConfigured: z.boolean(),
+  }),
+});
+export type UnionCompositionAnalysisDto = z.infer<typeof unionCompositionAnalysisDtoSchema>;
+
+/**
+ * The compose-preview response (CO-3 + CO-4 + CO-5). A **derivation** the composer reviews
  * before confirming — nothing is activated or persisted (derive-then-confirm): the
- * load-bearing supplement analysis, the consumer-input coverage report, and whether the
- * proposed composition would validate.
+ * load-bearing supplement analysis, the consumer-input coverage report, the union
+ * derivations (union proposals only), and whether the proposed composition would validate.
  */
 export const composeAdapterEndpointPreviewResponseSchema = z.object({
   endpointId: z.string(),
   supplementAnalysis: supplementLoadBearingAnalysisDtoSchema,
   coverage: consumerInputCoverageDtoSchema,
   validation: compositionValidationDtoSchema,
+  /** CO-3 — present only for a proposed `collection-union`. */
+  union: unionCompositionAnalysisDtoSchema.optional(),
 });
 export type ComposeAdapterEndpointPreviewResponse = z.infer<
   typeof composeAdapterEndpointPreviewResponseSchema

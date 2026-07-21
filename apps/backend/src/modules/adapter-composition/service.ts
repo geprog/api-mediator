@@ -10,6 +10,7 @@ import {
   type AdapterBinding,
   type AdapterEndpoint,
   type AuditLogEntry,
+  type PostMergePagination,
 } from "@mediator/domain";
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
@@ -26,6 +27,11 @@ import {
   type CompositionContext,
   type CompositionContextLoader,
 } from "./context.js";
+import {
+  deriveUnionCompositionAnalysis,
+  type UnionCompositionAnalysis,
+  type UnionSubmission,
+} from "./union.js";
 import {
   formatCompositionRejection,
   validateComposition,
@@ -80,6 +86,13 @@ export interface CompositionPreview {
   readonly supplementAnalysis: SupplementLoadBearingAnalysis;
   readonly coverage: ConsumerInputCoverage;
   readonly validation: CompositionValidation;
+  /**
+   * CO-3 — the union derivations the composer confirms **before** activating (present
+   * only for a proposed `collection-union`): unserviceable filters, sort/pagination
+   * parameters still needing a decision, the dedup conflict-precedence rule, and the
+   * large-collection size flag. `undefined` for any non-union proposal.
+   */
+  readonly union?: UnionCompositionAnalysis;
 }
 
 export class AdapterCompositionService {
@@ -124,6 +137,9 @@ export class AdapterCompositionService {
       submission,
       bindingFacts: context.bindingFacts,
       consumerInputs: context.consumerInputs,
+      unionBindingFacts: context.unionBindingFacts,
+      consumerParameters: context.consumerParameters,
+      consumerResponseFieldNames: context.consumerResponseFieldNames,
     });
     if (!validation.ok) {
       // Fail loud, before any transaction: nothing is activated and the endpoint keeps
@@ -134,7 +150,7 @@ export class AdapterCompositionService {
       );
     }
 
-    const applyInput = toApplyCompositionInput(endpointId, submission);
+    const applyInput = toApplyCompositionInput(endpointId, submission, actor, this.#clock());
     const result = await tx(this.#db, async (txn) => {
       const compositions = new AdapterCompositionRepository(txn);
       const applied = await compositions.applyComposition(applyInput);
@@ -188,7 +204,21 @@ export class AdapterCompositionService {
         submission,
         bindingFacts: context.bindingFacts,
         consumerInputs: context.consumerInputs,
+        unionBindingFacts: context.unionBindingFacts,
+        consumerParameters: context.consumerParameters,
+        consumerResponseFieldNames: context.consumerResponseFieldNames,
       }),
+      // CO-3 — the union derivations, only for a proposed union (derive-then-confirm).
+      ...(submission.aggregationStrategy === "collection-union"
+        ? {
+            union: deriveUnionCompositionAnalysis({
+              unionBindingFacts: context.unionBindingFacts,
+              consumerParameters: context.consumerParameters,
+              submission: unionSubmissionSlice(submission),
+              cacheTtlConfigured: submission.cacheTtl !== undefined,
+            }),
+          }
+        : {}),
     };
   }
 
@@ -239,11 +269,59 @@ function supplementAnalysisBindings(
   }));
 }
 
-/** Map the validated submission to the repository's activation payload. */
+/** The union-config slice of a submission, for the CO-3 analysis derivation. */
+function unionSubmissionSlice(submission: CompositionSubmission): UnionSubmission {
+  return {
+    ...(submission.postMergeDedup !== undefined
+      ? { postMergeDedup: submission.postMergeDedup }
+      : {}),
+    ...(submission.postMergeFilters !== undefined
+      ? { postMergeFilters: submission.postMergeFilters }
+      : {}),
+    ...(submission.postMergeSorts !== undefined
+      ? { postMergeSorts: submission.postMergeSorts }
+      : {}),
+    ...(submission.postMergePagination !== undefined
+      ? { postMergePagination: submission.postMergePagination }
+      : {}),
+  };
+}
+
+/**
+ * Stamp the composer's proposed pagination convention with its confirmation state
+ * (CO-3.5 derive-then-confirm) — `confirmedBy`/`confirmedAt` set to the **authenticated
+ * operator** + the service clock when confirmed, both `null` while unconfirmed. The
+ * confirmation is never client-supplied, so an unconfirmed convention stays honestly
+ * distinguishable from a confirmed one (RP-2 rejects requests using it while unconfirmed).
+ */
+function stampPostMergePagination(
+  submission: CompositionSubmission,
+  actor: string,
+  now: Date,
+): PostMergePagination | null {
+  if (submission.postMergePagination === undefined) {
+    return null;
+  }
+  const confirmed = submission.confirmPostMergePagination === true;
+  return {
+    convention: submission.postMergePagination,
+    confirmedBy: confirmed ? actor : null,
+    confirmedAt: confirmed ? now : null,
+  };
+}
+
+/**
+ * Map the validated submission to the repository's activation payload. The CO-3 union
+ * post-merge config is persisted **only** for a `collection-union` (a full overwrite —
+ * `null` on every other strategy, so recomposing clears stale union config).
+ */
 function toApplyCompositionInput(
   endpointId: string,
   submission: CompositionSubmission,
+  actor: string,
+  now: Date,
 ): ApplyCompositionInput {
+  const isUnion = submission.aggregationStrategy === "collection-union";
   return {
     endpointId,
     endpoint: {
@@ -257,6 +335,11 @@ function toApplyCompositionInput(
         submission.acknowledgedIgnoredInputs === undefined
           ? null
           : [...submission.acknowledgedIgnoredInputs],
+      // CO-3 — union post-merge config; `null` for any non-union strategy.
+      postMergeDedup: isUnion ? (submission.postMergeDedup ?? null) : null,
+      postMergeFilters: isUnion ? (submission.postMergeFilters ?? null) : null,
+      postMergeSorts: isUnion ? (submission.postMergeSorts ?? null) : null,
+      postMergePagination: isUnion ? stampPostMergePagination(submission, actor, now) : null,
     },
     bindings: submission.bindings.map((binding) => ({
       bindingId: binding.bindingId,

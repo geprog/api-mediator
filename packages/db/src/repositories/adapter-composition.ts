@@ -6,12 +6,16 @@ import type {
   AggregationStrategy,
   ChainInput,
   EndpointStrictness,
+  PostMergeDedup,
+  PostMergeFilter,
+  PostMergePagination,
+  PostMergeSort,
 } from "@mediator/domain";
 import { and, eq } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAdapterBindingRow } from "../mappers/adapter-binding.js";
-import { mapAdapterEndpointRow } from "../mappers/adapter-endpoint.js";
+import { mapAdapterEndpointRow, toPostMergePaginationRow } from "../mappers/adapter-endpoint.js";
 import { adapterBinding, adapterEndpoint } from "../schema.js";
 
 /**
@@ -23,7 +27,7 @@ import { adapterBinding, adapterEndpoint } from "../schema.js";
  * endpoint's previous active configuration untouched and still serving.
  */
 
-/** The endpoint-level serving configuration a composition activates (CO-2.1). */
+/** The endpoint-level serving configuration a composition activates (CO-2.1 / CO-3). */
 export interface CompositionEndpointConfig {
   readonly aggregationStrategy: AggregationStrategy;
   readonly strictness: EndpointStrictness;
@@ -35,6 +39,17 @@ export interface CompositionEndpointConfig {
    * full overwrite of the column, like every other composition field.
    */
   readonly acknowledgedIgnoredInputs: readonly AcknowledgedIgnoredInput[] | null;
+  /**
+   * CO-3 `collection-union` post-merge configuration. `null` on every field for any
+   * non-union strategy — a full overwrite (never a partial patch), so recomposing a
+   * union into a non-union clears the stale union config (and vice versa). The domain
+   * refinement forbids these on a non-union endpoint, so the service passes `null`
+   * there; only a real union carries values.
+   */
+  readonly postMergeDedup: PostMergeDedup | null;
+  readonly postMergeFilters: readonly PostMergeFilter[] | null;
+  readonly postMergeSorts: readonly PostMergeSort[] | null;
+  readonly postMergePagination: PostMergePagination | null;
 }
 
 /**
@@ -114,6 +129,18 @@ export class AdapterCompositionRepository {
           input.endpoint.acknowledgedIgnoredInputs === null
             ? null
             : [...input.endpoint.acknowledgedIgnoredInputs],
+        // CO-3 — the union post-merge config, a full overwrite. `postMergePagination`'s
+        // `Date` `confirmedAt` is serialized to the ISO-8601 `jsonb` row form; the other
+        // three columns are JSON-safe. `null` clears the column (non-union endpoints).
+        postMergeDedup: input.endpoint.postMergeDedup,
+        postMergeFilters:
+          input.endpoint.postMergeFilters === null ? null : [...input.endpoint.postMergeFilters],
+        postMergeSorts:
+          input.endpoint.postMergeSorts === null ? null : [...input.endpoint.postMergeSorts],
+        postMergePagination:
+          input.endpoint.postMergePagination === null
+            ? null
+            : toPostMergePaginationRow(input.endpoint.postMergePagination),
       })
       .where(
         and(

@@ -28,8 +28,18 @@ export interface ServeInput {
  *   impossible; answering anyway would compute a result from an input silently
  *   dropped. The fix is finishing composition (README open question 7). These are
  *   two different fixes, so they are two distinct reasons (RP-2.6).
+ * - `union-parameter-unconfigured` — a `collection-union` request uses a **filter**
+ *   parameter that is neither pushed down (mapped in every contributing binding) nor
+ *   covered by a `postMergeFilters` entry, or a **sort** / **pagination** parameter
+ *   with no confirmed `postMergeSorts` / `postMergePagination` semantics (sort and
+ *   pagination are never pushed down). Answering anyway would return a silently
+ *   unfiltered, unsorted, or mispaged union, so the request is rejected before any
+ *   backend is called (RP-2.2/2.3 — the CO-3↔RP-2 contract). A composition fix, but a
+ *   distinct one from `unmapped-consumer-input`: the parameter *is* known/mapped, it
+ *   simply has no union serving semantics. Never produced for a non-union endpoint.
  */
-export type ServeRejectionReason = "invalid-request" | "unmapped-consumer-input";
+export type ServeRejectionReason =
+  "invalid-request" | "unmapped-consumer-input" | "union-parameter-unconfigured";
 
 /**
  * The protocol-neutral result of serving a resolved request. A discriminated
