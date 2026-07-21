@@ -18,6 +18,7 @@ import { resolveDatabaseUrl } from "./env.js";
 import { mapAdapterBindingRow, mapAdapterEndpointRow, mapAuditLogRow } from "./mappers/index.js";
 import { runMigrations } from "./migrate.js";
 import {
+  AdapterCompositionRepository,
   AdapterWriteOutcomeRepository,
   ApiSpecRepository,
   ApprovedMappingRepository,
@@ -626,5 +627,114 @@ suite("Phase-5 adapter-domain persistence integration (requires Postgres)", () =
     expect(failRow === undefined ? undefined : mapAuditLogRow(failRow).cause).toBe(
       "backend-disabled",
     );
+  });
+
+  it("lists every AdapterEndpoint for the AP-1 read surface (listEndpoints)", async () => {
+    const composedId = randomUUID();
+    const pendingId = randomUUID();
+    await db.insert(adapterEndpoint).values({
+      id: composedId,
+      consumerAppId: APP_CONSUMER,
+      consumerOperationId: "listEndpoints/composed",
+      status: "active",
+      aggregationStrategy: "single",
+      strictness: "degraded",
+    });
+    await db.insert(adapterEndpoint).values({
+      id: pendingId,
+      consumerAppId: APP_CONSUMER,
+      consumerOperationId: "listEndpoints/pending",
+      status: "composition-required",
+    });
+
+    const endpoints = await new AdapterCompositionRepository(db).listEndpoints();
+    const ids = endpoints.map((endpoint) => endpoint.id);
+    expect(ids).toContain(composedId);
+    expect(ids).toContain(pendingId);
+    // Composition columns round-trip through the mapper (the AP-1 DTO reads them).
+    expect(endpoints.find((endpoint) => endpoint.id === composedId)?.aggregationStrategy).toBe(
+      "single",
+    );
+    expect(
+      endpoints.find((endpoint) => endpoint.id === pendingId)?.aggregationStrategy,
+    ).toBeUndefined();
+  });
+
+  it("queries adapter-request rows by endpoint/binding/time/cause, most-recent-first, bounded (queryAdapterRequests)", async () => {
+    const endpointId = randomUUID();
+    const bindingId = randomUUID();
+    const otherEndpointId = randomUUID();
+    const early = new Date("2026-07-10T00:00:00.000Z");
+    const mid = new Date("2026-07-15T00:00:00.000Z");
+    const late = new Date("2026-07-20T00:00:00.000Z");
+    const audit = new AuditLogRepository(db);
+    await audit.insert({
+      id: randomUUID(),
+      type: "adapter-request",
+      actor: "adapter-runtime",
+      status: "success",
+      relatedEndpointId: endpointId,
+      relatedBindingId: bindingId,
+      timestamp: early,
+    });
+    await audit.insert({
+      id: randomUUID(),
+      type: "adapter-request",
+      actor: "adapter-runtime",
+      status: "failure",
+      cause: "mediator-transform-error",
+      relatedEndpointId: endpointId,
+      relatedBindingId: bindingId,
+      timestamp: mid,
+    });
+    await audit.insert({
+      id: randomUUID(),
+      type: "adapter-request",
+      actor: "adapter-runtime",
+      status: "success",
+      relatedEndpointId: otherEndpointId,
+      timestamp: late,
+    });
+    // A non-adapter row with the same endpoint id must be excluded by the type filter.
+    await audit.insert({
+      id: randomUUID(),
+      type: "sync-execution",
+      actor: "sync",
+      status: "success",
+      relatedEndpointId: endpointId,
+      timestamp: late,
+    });
+
+    const byEndpoint = await audit.queryAdapterRequests({
+      relatedEndpointId: endpointId,
+      limit: 100,
+    });
+    expect(byEndpoint).toHaveLength(2);
+    expect(byEndpoint.every((row) => row.type === "adapter-request")).toBe(true);
+    expect(byEndpoint.every((row) => row.relatedEndpointId === endpointId)).toBe(true);
+    // Most-recent-first (desc timestamp).
+    expect(byEndpoint[0]?.status).toBe("failure");
+    expect(byEndpoint[1]?.status).toBe("success");
+
+    // The `[since, until]` window excludes the early row.
+    const windowed = await audit.queryAdapterRequests({
+      relatedEndpointId: endpointId,
+      since: mid,
+      limit: 100,
+    });
+    expect(windowed.map((row) => row.status)).toStrictEqual(["failure"]);
+
+    // Filter by cause + binding.
+    const byCause = await audit.queryAdapterRequests({
+      relatedBindingId: bindingId,
+      cause: "mediator-transform-error",
+      limit: 100,
+    });
+    expect(byCause).toHaveLength(1);
+    expect(byCause[0]?.relatedBindingId).toBe(bindingId);
+
+    // `limit` bounds the scan.
+    const bounded = await audit.queryAdapterRequests({ relatedEndpointId: endpointId, limit: 1 });
+    expect(bounded).toHaveLength(1);
   });
 });

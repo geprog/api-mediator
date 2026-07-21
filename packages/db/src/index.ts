@@ -212,6 +212,7 @@ export {
   type RecordLinkSide,
   type RecordLinkSideRef,
   type RecordLinkStore,
+  type AdapterRequestQuery,
   type ScopeLinkSideRef,
   type ScopeLinkStore,
   type SyncEventQuery,

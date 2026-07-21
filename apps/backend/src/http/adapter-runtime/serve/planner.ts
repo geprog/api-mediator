@@ -81,8 +81,12 @@ export type PlanResult =
  * the live truth, re-review needed" cause — rather than served (a judgment call
  * noted for the reviewer). Mapping health is checked before backend health so an
  * invalid mapping is reported as itself even if the backend is also down.
+ *
+ * Exported so the AP-1.4 / AP-5.3 operator read surface derives per-binding health from the
+ * **same** RP-3 rule the planner enforces at request time — health is derived, never stored
+ * per binding (`docs/requirements/phase-5-adapter-api.md` AP-1.4).
  */
-function validateBindingHealth(input: BindingHealthInput): PlannerBindingCause | undefined {
+export function validateBindingHealth(input: BindingHealthInput): PlannerBindingCause | undefined {
   switch (input.mappingStatus) {
     case "suspended":
       return { cause: "mapping-suspended" };

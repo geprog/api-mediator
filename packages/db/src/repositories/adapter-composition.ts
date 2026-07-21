@@ -112,6 +112,17 @@ export class AdapterCompositionRepository {
     return row === undefined ? undefined : mapAdapterEndpointRow(row);
   }
 
+  /**
+   * Every `AdapterEndpoint`, most-recently-created first — the read side the AP-1
+   * operator "adapter state" surface lists (`docs/requirements/phase-5-adapter-api.md`
+   * AP-1.1). Read-only; ordered by `id` (a v4 UUID, so not chronological — but a stable,
+   * deterministic order for the list, since the table carries no created-at column).
+   */
+  public async listEndpoints(): Promise<AdapterEndpoint[]> {
+    const rows = await this.db.select().from(adapterEndpoint).orderBy(adapterEndpoint.id);
+    return rows.map(mapAdapterEndpointRow);
+  }
+
   /** Every `AdapterBinding` of an endpoint, in any status — the composable set (CO-2). */
   public async listBindings(endpointId: string): Promise<AdapterBinding[]> {
     const rows = await this.db

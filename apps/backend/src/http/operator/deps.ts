@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 import type { AdapterCompositionService } from "../../modules/adapter-composition/index.js";
+import type {
+  AdapterRequestHistoryReader,
+  AdapterStateReader,
+} from "../../modules/adapter-state.js";
 import type { ExclusionsReplacer } from "../../modules/analysis-exclusions.js";
 import type {
   ApprovalService,
@@ -56,6 +60,21 @@ export interface OperatorApiDeps {
    * real db/transaction, legitimately omits it and the route is simply not registered.
    */
   readonly adapterComposition?: AdapterCompositionService;
+  /**
+   * Phase-5 adapter **read** surface (AP-1 state, AP-5 health): the pooled reader over
+   * `AdapterEndpoint`/`AdapterBinding` + the per-binding mapping/backend status the
+   * read-time health derivation consults, plus the CONSUMER-operation enumeration behind
+   * `not-yet-mapped`. Optional for the same reason as `adapterComposition`: the real
+   * composition root always provides it; the in-memory unit harness omits it and the
+   * AP-1/AP-5 routes are simply not registered.
+   */
+  readonly adapterState?: AdapterStateReader;
+  /**
+   * Phase-5 adapter request history (AP-5.1): the read side of the `adapter-request`
+   * audit log, filtered by endpoint/binding/time. Optional for the same reason as
+   * `adapterState`; metadata only (no payload, no token).
+   */
+  readonly adapterRequestHistory?: AdapterRequestHistoryReader;
   // Phase-4 Sync HTTP API (SA-1..SA-3): configure/enable/disable a `SyncRule`, read
   // sync state, and manually link/unlink records. Optional: the sync operator
   // surface is only mounted when the Sync Engine runtime is wired in (the real

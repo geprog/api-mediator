@@ -38,6 +38,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AdapterCompositionService } from "./modules/adapter-composition/index.js";
 import { LocalAccountsAuthProvider, installAuthentication } from "./http/auth/index.js";
 import { registerErrorHandler } from "./http/errors.js";
+import { DbAdapterStateReader } from "./modules/adapter-state.js";
 import { registerAdapterEndpointRoutes } from "./http/operator/adapter-endpoints.routes.js";
 import {
   TEST_OPERATOR_ACCOUNTS,
@@ -381,7 +382,7 @@ suite("Phase-5 CO-2 endpoint composition integration (requires Postgres)", () =>
     const service = new AdapterCompositionService({ db, newId: randomUUID });
     void app.register((instance) => {
       installAuthentication(instance, new LocalAccountsAuthProvider(TEST_OPERATOR_ACCOUNTS));
-      registerAdapterEndpointRoutes(instance, service);
+      registerAdapterEndpointRoutes(instance, service, new DbAdapterStateReader(db));
       return Promise.resolve();
     });
     registerErrorHandler(app);
@@ -554,13 +555,17 @@ suite("Phase-5 CO-2 endpoint composition integration (requires Postgres)", () =>
     bindings: [{ bindingId: randomUUID(), role: "primary" }],
   };
 
-  it("state boundary: composing an active endpoint is 409 and writes nothing (recomposition is CO-6)", async () => {
+  it("AP-2 dispatch: a composition decision on an active endpoint recomposes (CO-6); an invalid body is 400 and writes nothing", async () => {
+    // The composition-decision route dispatches by status (AP-2): an `active` endpoint is
+    // recomposed, not rejected 409. `ENDPOINT_ACTIVE` has no bindings, so `anyValidBody`'s
+    // stray binding is a `submission-binding-mismatch` — the recompose is rejected 400 before
+    // any transaction (inert), so the prior active configuration keeps serving.
     const response = await injectAs(app, TEST_OPERATOR_ALICE, {
       method: "POST",
       url: `/api/adapter-endpoints/${ENDPOINT_ACTIVE}/compose`,
       payload: anyValidBody,
     });
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(400);
 
     const [endpointRow] = await db
       .select()

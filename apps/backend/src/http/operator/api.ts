@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { installAuthentication, type AuthProvider } from "../auth/index.js";
 import { registerAdapterEndpointRoutes } from "./adapter-endpoints.routes.js";
+import { registerAdapterRequestRoutes } from "./adapter-requests.routes.js";
 import { registerAdapterTokenRoutes } from "./adapter-token.routes.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
@@ -39,10 +40,17 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   if (deps.adapterTokens !== undefined) {
     registerAdapterTokenRoutes(app, deps.adapterTokens);
   }
-  // Phase-5 endpoint composition (CO-2). Mounted whenever the service is wired (the real
-  // composition root always provides it); the pre-Phase-5 in-memory unit harness omits it.
-  if (deps.adapterComposition !== undefined) {
-    registerAdapterEndpointRoutes(app, deps.adapterComposition);
+  // Phase-5 adapter endpoint operator surface: AP-1 read state, AP-2 compose/recompose, AP-3
+  // enable/disable. Mounted whenever both the composition service (mutations) and the state
+  // reader (reads) are wired — the real composition root always provides both; the pre-Phase-5
+  // in-memory unit harness omits them and the routes are simply not registered.
+  if (deps.adapterComposition !== undefined && deps.adapterState !== undefined) {
+    registerAdapterEndpointRoutes(app, deps.adapterComposition, deps.adapterState);
+  }
+  // Phase-5 adapter request history + endpoint health (AP-5). Mounted whenever the state
+  // reader and the request-history reader are wired; the in-memory unit harness omits them.
+  if (deps.adapterState !== undefined && deps.adapterRequestHistory !== undefined) {
+    registerAdapterRequestRoutes(app, deps.adapterState, deps.adapterRequestHistory);
   }
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
