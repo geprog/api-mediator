@@ -1282,11 +1282,10 @@ function backendResourceRefOf(operationRef: string): string {
 
 /**
  * The set of `(backendAppId, resourceRef)` an endpoint's active bindings back — captured on
- * a cache entry as **forward-wiring** for the CH-3/CH-4 coarse-invalidation slice (which
- * will drop entries by backend resource). Deduped, deterministic order. For a complete
+ * a cache entry so CH-3/CH-4 coarse invalidation can drop it by backend resource
+ * (`ResponseCache.dropByBackendResource`). Deduped, deterministic order. For a complete
  * cacheable response this is exactly the participating set (no binding was eliminated, else
- * the response would be degraded/failed and never cached). Nothing consumes it yet — this
- * slice builds no drop operation.
+ * the response would be degraded/failed and never cached).
  */
 function contributingBackendResources(context: ServeContext): ContributingBackendResource[] {
   const seen = new Set<string>();
