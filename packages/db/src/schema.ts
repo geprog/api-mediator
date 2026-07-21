@@ -1495,6 +1495,11 @@ export const adapterWriteOutcome = pgTable(
       .notNull()
       .references(() => adapterBinding.id, { onDelete: "cascade" }),
     outcome: adapterWriteOutcomeStatusEnum("outcome").notNull(),
+    // On a recorded FAILURE, the specific cause the original delivery failed with —
+    // so a deduplicated replay is answered with the same specific `AdapterRequestCause`
+    // (WR-3.4 / WR-5.1), never a generic one. NULL on a success row (a success has no
+    // cause). Reuses the `adapter_request_cause` enum the audit log already uses.
+    cause: adapterRequestCauseEnum("cause"),
     responseStatus: integer("response_status"),
     // The recorded response body — a live payload value, which is exactly why this
     // store is separate from the metadata-only audit log. `unknown` (the domain

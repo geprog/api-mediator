@@ -37,6 +37,9 @@ function mapResult(row: AdapterWriteOutcomeRow): AdapterWriteResult {
     outcome: "failure" as const,
     responseStatus: row.responseStatus ?? undefined,
     responseBody: row.responseBody ?? undefined,
+    // The specific cause the original delivery failed with, so a replay reports it
+    // verbatim (WR-3.4 / WR-5.1). Absent on a pre-write-serve-path row (NULL column).
+    cause: row.cause ?? undefined,
   });
 }
 
@@ -60,7 +63,20 @@ export function mapAdapterWriteOutcomeRow(row: AdapterWriteOutcomeRow): AdapterW
  * by never selecting/mapping the body, not by convention.
  */
 export function mapAdapterWriteOutcomeMetadataRow(
-  row: Omit<AdapterWriteOutcomeRow, "responseBody">,
+  // The exact projected columns (a `Pick`, not `Omit`) so this stays decoupled from
+  // any new store column — `response_body` is never selected (the no-payload-dump
+  // invariant), and the failure `cause` is a full-record concern, not metadata here.
+  row: Pick<
+    AdapterWriteOutcomeRow,
+    | "id"
+    | "idempotencyKey"
+    | "adapterEndpointId"
+    | "adapterBindingId"
+    | "outcome"
+    | "responseStatus"
+    | "executedAt"
+    | "expiresAt"
+  >,
 ): AdapterWriteOutcomeMetadata {
   return stripUndefined({
     id: row.id,
@@ -84,6 +100,8 @@ export function toAdapterWriteOutcomeInsert(
     adapterEndpointId: outcome.adapterEndpointId,
     adapterBindingId: outcome.adapterBindingId,
     outcome: outcome.result.outcome,
+    // Only a failure carries a cause; a success row's cause column stays NULL.
+    cause: outcome.result.outcome === "failure" ? (outcome.result.cause ?? null) : null,
     responseStatus: outcome.result.responseStatus ?? null,
     responseBody: outcome.result.responseBody ?? null,
     executedAt: outcome.executedAt,

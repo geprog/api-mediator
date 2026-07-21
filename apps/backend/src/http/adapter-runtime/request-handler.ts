@@ -212,6 +212,11 @@ export class AdapterRequestHandler {
               ...(served.degradedBackendAppIds !== undefined
                 ? { degradedBackendAppIds: served.degradedBackendAppIds }
                 : {}),
+              // WR-5.4 — write audit metadata (absent on a read), for the audit row only.
+              ...(served.idempotencyKey !== undefined
+                ? { idempotencyKey: served.idempotencyKey }
+                : {}),
+              ...(served.deduplicated === true ? { deduplicated: true } : {}),
             };
           }
           if (served.kind === "rejected") {
@@ -229,6 +234,11 @@ export class AdapterRequestHandler {
             endpointId: outcome.endpoint.id,
             bindingId,
             cause: served.cause,
+            // WR-5.4 — write audit metadata (absent on a read failure), for the audit row.
+            ...(served.idempotencyKey !== undefined
+              ? { idempotencyKey: served.idempotencyKey }
+              : {}),
+            ...(served.deduplicated === true ? { deduplicated: true } : {}),
           };
         } finally {
           span.end();

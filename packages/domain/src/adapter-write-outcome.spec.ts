@@ -52,6 +52,21 @@ describe("adapterWriteResultSchema (AD-4.1/AD-4.5)", () => {
     expect(parsed).toEqual({ outcome: "failure" });
   });
 
+  it("carries the specific failure cause so a replay reports it verbatim (WR-3.4/WR-5.1)", () => {
+    const parsed = adapterWriteResultSchema.parse({
+      outcome: "failure",
+      cause: "mediator-transform-error",
+    });
+    expect(parsed).toEqual({ outcome: "failure", cause: "mediator-transform-error" });
+    // A success carries no cause — the success variant declares none, so it is stripped.
+    const success = adapterWriteResultSchema.parse({
+      outcome: "success",
+      responseStatus: 201,
+      cause: "upstream-error",
+    });
+    expect(success).not.toHaveProperty("cause");
+  });
+
   it("distinguishes a failure from a success on the discriminant, not a nullable status", () => {
     const failure = adapterWriteResultSchema.parse({ outcome: "failure", responseStatus: 500 });
     expect(failure.outcome).toBe("failure");

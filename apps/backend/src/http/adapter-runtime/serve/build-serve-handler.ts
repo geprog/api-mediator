@@ -6,7 +6,7 @@ import {
   EnvKeyProvider,
   type CredentialStoreLogger,
 } from "@mediator/credentials";
-import { RecordLinkRepository, type Database } from "@mediator/db";
+import { AdapterWriteOutcomeRepository, RecordLinkRepository, type Database } from "@mediator/db";
 import {
   AppLoadGovernor,
   FetchRestProtocolClient,
@@ -21,6 +21,7 @@ import { AdapterBackendCaller } from "./backend-call.js";
 import { DbServeContextLoader } from "./serve-context.js";
 import { AdapterServeHandler } from "./serve-handler.js";
 import { RecordLinkUnionLinkResolver } from "./union-links.js";
+import { DbWriteOutcomeStore } from "./write-outcome-store.js";
 
 /**
  * Wire the concrete {@link ServeHandler} (RP/TE/AG) the Adapter Server Runtime injects
@@ -74,6 +75,10 @@ export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): Se
     // paged union reader (AG-5) defaults to one over `backendCaller` inside the handler, so
     // it needs no explicit wiring here.
     unionLinkResolver: new RecordLinkUnionLinkResolver(new RecordLinkRepository(deps.db)),
+    // WR-3 — the bounded write-outcome store the write serve path deduplicates against
+    // (default 24h dedup window, matching the Phase-4 OC-2 lookback). Read serving never
+    // consults it.
+    writeOutcomeStore: new DbWriteOutcomeStore(new AdapterWriteOutcomeRepository(deps.db)),
     ...(deps.unionRowCeiling !== undefined ? { unionRowCeiling: deps.unionRowCeiling } : {}),
     logger: {
       warn: (fields, message) => {

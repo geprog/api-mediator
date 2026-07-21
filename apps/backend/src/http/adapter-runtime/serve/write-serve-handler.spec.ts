@@ -1,0 +1,457 @@
+import type { ServeInput } from "@mediator/adapter-engine";
+import type {
+  AdapterBinding,
+  AdapterEndpoint,
+  AdapterWriteOutcome,
+  ApprovedMappingStatus,
+  FieldMapping,
+  IrOperation,
+  RegisteredAppStatus,
+} from "@mediator/domain";
+import { TtlRecentlyWrittenCache, type RecentWriteKey } from "@mediator/sync-engine";
+import { describe, expect, it } from "vitest";
+
+import type { BackendCallInput, BackendCallResult, BackendCaller } from "./backend-call.js";
+import { AdapterServeHandler, type ServeLogger } from "./serve-handler.js";
+import type { LoadedBinding, ServeContext } from "./serve-context.js";
+import type { RecordWriteOutcomeInput, WriteOutcomeStore } from "./write-outcome-store.js";
+
+// ── fixtures ─────────────────────────────────────────────────────────────────
+
+/** POST /todos → the create write. Response schema requires id/title/done. */
+const createTodo: IrOperation = {
+  operationId: "createTodo",
+  method: "post",
+  path: "/todos",
+  parameters: [],
+  requestSchema: { name: "NewTodo", fields: [{ name: "title", type: "string", required: true }] },
+  responseSchema: {
+    name: "Todo",
+    fields: [
+      { name: "id", type: "string", required: true },
+      { name: "title", type: "string", required: true },
+      { name: "done", type: "boolean", required: true },
+    ],
+  },
+};
+
+/** DELETE /todos/{todoId} → a write with NO response schema (empty-body tolerant). */
+const deleteTodo: IrOperation = {
+  operationId: "deleteTodo",
+  method: "delete",
+  path: "/todos/{todoId}",
+  parameters: [{ name: "todoId", location: "path", required: true }],
+};
+
+const backendCreateTask: IrOperation = {
+  operationId: "createTask",
+  method: "post",
+  path: "/tasks",
+  parameters: [],
+};
+
+const backendDeleteTask: IrOperation = {
+  operationId: "deleteTask",
+  method: "delete",
+  path: "/tasks/{taskId}",
+  parameters: [{ name: "taskId", location: "path", required: true }],
+};
+
+function rename(sourcePath: string, targetPath: string): FieldMapping {
+  return {
+    id: `fm-${targetPath}`,
+    mappingId: "mapping-1",
+    sourcePath,
+    targetPath,
+    transform: "rename",
+    phase: "response",
+  };
+}
+
+const createResponsePhase: readonly FieldMapping[] = [
+  rename("tasks/task_id", "todos/id"),
+  rename("tasks/task_title", "todos/title"),
+  rename("tasks/completed", "todos/done"),
+];
+
+function binding(overrides: Partial<AdapterBinding> = {}): AdapterBinding {
+  return {
+    id: "binding-1",
+    adapterEndpointId: "endpoint-1",
+    backendAppId: "backend-app",
+    backendOperationId: "tasks/createTask",
+    approvedMappingId: "mapping-1",
+    role: "primary",
+    status: "active",
+    ...overrides,
+  };
+}
+
+function endpoint(): AdapterEndpoint {
+  return {
+    id: "endpoint-1",
+    consumerAppId: "consumer-app",
+    consumerOperationId: "todos/createTodo",
+    status: "active",
+    aggregationStrategy: "single",
+  };
+}
+
+function createLoadedBinding(overrides: Partial<LoadedBinding> = {}): LoadedBinding {
+  return {
+    binding: binding(),
+    mappingId: "mapping-1",
+    mappingStatus: "active",
+    backendStatus: "active",
+    action: "create",
+    parameterMappings: [],
+    requestPhaseFieldMappings: [],
+    responsePhaseFieldMappings: createResponsePhase,
+    backendBaseUrl: "http://backend.example",
+    backendOperation: backendCreateTask,
+    ...overrides,
+  };
+}
+
+function createContext(loaded: LoadedBinding = createLoadedBinding()): ServeContext {
+  return { consumerOperation: createTodo, bindings: [loaded] };
+}
+
+function createInput(body: unknown = { title: "Ship it" }): ServeInput {
+  return {
+    request: {
+      consumerAppId: "consumer-app",
+      operationKey: "todos/createTodo",
+      pathParameters: {},
+      query: {},
+      headers: {},
+      body,
+    },
+    endpoint: endpoint(),
+    activeBindings: [binding()],
+  };
+}
+
+const createdTask: BackendCallResult = {
+  ok: true,
+  body: { task_id: "t-1", task_title: "Ship it", completed: false },
+};
+
+// ── fakes ────────────────────────────────────────────────────────────────────
+
+class FakeBackendCaller implements BackendCaller {
+  public calls = 0;
+  public readonly inputs: BackendCallInput[] = [];
+  public constructor(private readonly result: BackendCallResult) {}
+  public call(input: BackendCallInput): Promise<BackendCallResult> {
+    this.calls += 1;
+    this.inputs.push(input);
+    return Promise.resolve(this.result);
+  }
+}
+
+class RecordingLogger implements ServeLogger {
+  public readonly warnings: { fields: Record<string, unknown>; message: string }[] = [];
+  public warn(fields: Record<string, unknown>, message: string): void {
+    this.warnings.push({ fields, message });
+  }
+}
+
+/** A window-aware in-memory write-outcome store mirroring `DbWriteOutcomeStore` semantics. */
+class FakeWriteOutcomeStore implements WriteOutcomeStore {
+  public readonly rows = new Map<string, AdapterWriteOutcome>();
+  public recordCalls = 0;
+  readonly #now: () => Date;
+  readonly #windowMs: number;
+  public constructor(options: { now?: () => Date; windowMs?: number } = {}) {
+    this.#now = options.now ?? ((): Date => new Date());
+    this.#windowMs = options.windowMs ?? 60_000;
+  }
+  public lookup(endpointId: string, key: string): Promise<AdapterWriteOutcome | undefined> {
+    const row = this.rows.get(compositeKey(endpointId, key));
+    if (row === undefined) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(row.expiresAt.getTime() > this.#now().getTime() ? row : undefined);
+  }
+  public record(input: RecordWriteOutcomeInput): Promise<AdapterWriteOutcome> {
+    this.recordCalls += 1;
+    const ck = compositeKey(input.adapterEndpointId, input.idempotencyKey);
+    const now = this.#now();
+    const existing = this.rows.get(ck);
+    if (existing !== undefined && existing.expiresAt.getTime() > now.getTime()) {
+      return Promise.resolve(existing); // still-fresh duplicate — original wins (concurrency guard)
+    }
+    const outcome: AdapterWriteOutcome = {
+      id: `wo-${String(this.rows.size)}`,
+      idempotencyKey: input.idempotencyKey,
+      adapterEndpointId: input.adapterEndpointId,
+      adapterBindingId: input.adapterBindingId,
+      result: input.result,
+      executedAt: now,
+      expiresAt: new Date(now.getTime() + this.#windowMs),
+    };
+    this.rows.set(ck, outcome);
+    return Promise.resolve(outcome);
+  }
+}
+
+function compositeKey(endpointId: string, key: string): string {
+  return `${endpointId} ${key}`;
+}
+
+function handlerFor(
+  ctx: ServeContext,
+  caller: FakeBackendCaller,
+  store: WriteOutcomeStore,
+  logger: ServeLogger = new RecordingLogger(),
+): AdapterServeHandler {
+  return new AdapterServeHandler({
+    loader: { load: () => Promise.resolve(ctx) },
+    backendCaller: caller,
+    logger,
+    writeOutcomeStore: store,
+  });
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+describe("AdapterServeHandler — the write serve path (WR-2/WR-3/WR-5)", () => {
+  it("WR-2: serves a fresh create, transformed to consumer shape and schema-validated", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(createContext(), caller, store).serve(createInput());
+    expect(outcome.kind).toBe("served");
+    if (outcome.kind !== "served") {
+      throw new Error("expected served");
+    }
+    expect(outcome.body).toEqual({ id: "t-1", title: "Ship it", done: false });
+    expect(outcome.deduplicated).toBeUndefined(); // a fresh execution, not a replay
+    expect(outcome.idempotencyKey).toEqual(expect.any(String));
+    expect(caller.calls).toBe(1);
+    expect(store.recordCalls).toBe(1); // recorded after the call
+  });
+
+  it("WR-3.3: a duplicate delivery returns the RECORDED outcome and never re-executes", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const handler = handlerFor(createContext(), caller, store);
+
+    const first = await handler.serve(createInput());
+    const second = await handler.serve(createInput());
+
+    expect(caller.calls).toBe(1); // the fake backend was invoked exactly ONCE
+    expect(second.kind).toBe("served");
+    if (first.kind !== "served" || second.kind !== "served") {
+      throw new Error("expected served");
+    }
+    expect(second.body).toEqual(first.body); // the recorded response, replayed
+    expect(second.deduplicated).toBe(true); // distinguishable as a dedup delivery
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+  });
+
+  it("WR-3.4: a recorded FAILURE stays a failure on a duplicate delivery — no second call", async () => {
+    const caller = new FakeBackendCaller({
+      ok: false,
+      kind: "upstream-error",
+      detail: "HTTP 500",
+      reachedBackend: true,
+    });
+    const store = new FakeWriteOutcomeStore();
+    const handler = handlerFor(createContext(), caller, store);
+
+    const first = await handler.serve(createInput());
+    const second = await handler.serve(createInput());
+
+    expect(first).toMatchObject({ kind: "failed", cause: "upstream-error" });
+    expect(second).toMatchObject({ kind: "failed", cause: "upstream-error", deduplicated: true });
+    expect(caller.calls).toBe(1); // never upgraded, never re-executed
+  });
+
+  it("WR-3.2: a DIFFERENT body is a new delivery that executes again", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const handler = handlerFor(createContext(), caller, store);
+
+    await handler.serve(createInput({ title: "Ship it" }));
+    await handler.serve(createInput({ title: "Ship it LATER" }));
+
+    expect(caller.calls).toBe(2); // distinct derived keys ⇒ two deliveries
+  });
+
+  it("WR-3.5: an aged-out entry executes again as a genuinely new delivery", async () => {
+    let clock = 1_000_000;
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore({ now: () => new Date(clock), windowMs: 10_000 });
+    const handler = handlerFor(createContext(), caller, store);
+
+    await handler.serve(createInput());
+    expect(caller.calls).toBe(1);
+    // Advance the clock past the dedup window: the recorded row has aged out.
+    clock += 20_000;
+    await handler.serve(createInput());
+    expect(caller.calls).toBe(2);
+  });
+
+  it("WR-5.2: a stale binding fails as mapping-stale with NO call and NO stored outcome", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(
+      createContext(createLoadedBinding({ mappingStatus: "stale" as ApprovedMappingStatus })),
+      caller,
+      store,
+    ).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "mapping-stale" });
+    expect(caller.calls).toBe(0);
+    expect(store.rows.size).toBe(0); // a retry after re-review must re-evaluate
+  });
+
+  it("WR-5.2: a suspended binding fails as mapping-suspended with NO call and NO stored outcome", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(
+      createContext(createLoadedBinding({ mappingStatus: "suspended" as ApprovedMappingStatus })),
+      caller,
+      store,
+    ).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "mapping-suspended" });
+    expect(caller.calls).toBe(0);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it("WR-5.2: a disabled backend fails as backend-disabled with NO call and NO stored outcome", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(
+      createContext(createLoadedBinding({ backendStatus: "disabled" as RegisteredAppStatus })),
+      caller,
+      store,
+    ).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "backend-disabled" });
+    expect(caller.calls).toBe(0);
+    expect(store.rows.size).toBe(0);
+  });
+
+  it("WR-5.3: a load-ceiling denial (never reached the backend) is NOT recorded", async () => {
+    const caller = new FakeBackendCaller({
+      ok: false,
+      kind: "upstream-error",
+      detail: "load ceiling reached",
+      reachedBackend: false,
+    });
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(createContext(), caller, store).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "upstream-error" });
+    expect(store.rows.size).toBe(0); // no side effect → the keyed retry re-evaluates
+  });
+
+  it("WR-2.5/WR-5.3: an AG-7 failure fails as mediator-transform-error and IS recorded (post-call)", async () => {
+    // Response mappings omit `done` (required) → the served object fails AG-7.
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const loaded = createLoadedBinding({
+      responsePhaseFieldMappings: [
+        rename("tasks/task_id", "todos/id"),
+        rename("tasks/task_title", "todos/title"),
+      ],
+    });
+    const outcome = await handlerFor(createContext(loaded), caller, store).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "mediator-transform-error" });
+    expect(caller.calls).toBe(1);
+    expect(store.rows.size).toBe(1); // recorded — the backend applied the write
+  });
+
+  it("WR-2.3: a 204 with a body-required schema fails as mediator-transform-error (no fabrication)", async () => {
+    const caller = new FakeBackendCaller({ ok: true, body: undefined });
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(createContext(), caller, store).serve(createInput());
+    expect(outcome).toMatchObject({ kind: "failed", cause: "mediator-transform-error" });
+    expect(store.rows.size).toBe(1); // the write happened → recorded
+  });
+
+  it("WR-2.3: a 204 with an empty-tolerant schema serves an empty response", async () => {
+    const caller = new FakeBackendCaller({ ok: true, body: undefined });
+    const store = new FakeWriteOutcomeStore();
+    const loaded = createLoadedBinding({
+      binding: binding({ backendOperationId: "tasks/deleteTask" }),
+      action: "delete",
+      backendOperation: backendDeleteTask,
+      parameterMappings: [
+        {
+          id: "pm-del",
+          operationMappingId: "om-del",
+          sourceParamRef: "todos/deleteTodo#todoId",
+          targetParamRef: "tasks/deleteTask#taskId",
+        },
+      ],
+      responsePhaseFieldMappings: [],
+    });
+    const ctx: ServeContext = { consumerOperation: deleteTodo, bindings: [loaded] };
+    const input: ServeInput = {
+      request: {
+        consumerAppId: "consumer-app",
+        operationKey: "todos/deleteTodo",
+        pathParameters: { todoId: "42" },
+        query: {},
+        headers: {},
+        body: undefined,
+      },
+      endpoint: { ...endpoint(), consumerOperationId: "todos/deleteTodo" },
+      activeBindings: [loaded.binding],
+    };
+    const outcome = await handlerFor(ctx, caller, store).serve(input);
+    expect(outcome.kind).toBe("served");
+    if (outcome.kind !== "served") {
+      throw new Error("expected served");
+    }
+    expect(outcome.body).toBeNull();
+  });
+
+  it("WR-4.1: a successful write leaves the recently-written cache / SyncFieldState untouched", async () => {
+    // The write path holds no reference to the loop-prevention cache — a deliberate
+    // non-action so the Sync Engine's next poll picks the write up as a genuine change.
+    const recentlyWritten = new TtlRecentlyWrittenCache(60_000);
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const served = await handlerFor(createContext(), caller, store).serve(createInput());
+    expect(served.kind).toBe("served");
+    const probe: RecentWriteKey = { appId: "backend-app", resource: "tasks", nativeId: "t-1" };
+    expect(recentlyWritten.isRecentlyWritten(probe)).toBe(false);
+  });
+
+  it("WR: runtime single-only backstop — a write plan that is not single fails loud", async () => {
+    const caller = new FakeBackendCaller(createdTask);
+    const store = new FakeWriteOutcomeStore();
+    const twoBindings: ServeContext = {
+      consumerOperation: createTodo,
+      bindings: [
+        createLoadedBinding(),
+        createLoadedBinding({ binding: binding({ id: "binding-2" }) }),
+      ],
+    };
+    const input: ServeInput = {
+      ...createInput(),
+      endpoint: { ...endpoint(), aggregationStrategy: "fanout-merge" },
+      activeBindings: [binding(), binding({ id: "binding-2" })],
+    };
+    const outcome = await handlerFor(twoBindings, caller, store).serve(input);
+    expect(outcome).toMatchObject({ kind: "failed", cause: "mediator-transform-error" });
+    expect(caller.calls).toBe(0); // never fan out a write
+  });
+});
+
+describe("AdapterServeHandler — the read path is unaffected by the write branch", () => {
+  it("a non-write action never consults the write-outcome store", async () => {
+    // Same fixtures, but the operation's action is `read` → the read path, which must
+    // touch neither `lookup` nor `record` (the write branch is entered only for a write).
+    const store = new FakeWriteOutcomeStore();
+    const outcome = await handlerFor(
+      createContext(createLoadedBinding({ action: "read" })),
+      new FakeBackendCaller(createdTask),
+      store,
+    ).serve(createInput());
+    expect(outcome.kind).toBe("served");
+    expect(store.recordCalls).toBe(0);
+    expect(store.rows.size).toBe(0);
+  });
+});

@@ -41,10 +41,24 @@ export interface BackendCallInput {
  * A backend call's outcome: the response body on success, a live `upstream-error`
  * (naming the backend, RP-5.2), or a mediator-side `defect` (a non-servable backend
  * operation — a composition defect surfaced as `mediator-transform-error`).
+ *
+ * `reachedBackend` on an `upstream-error` records whether an HTTP attempt was actually
+ * dispatched to the backend: `false` when the call was refused *before* sending (a load
+ * ceiling denial, or a credential refresh that never produced a request), `true`/absent
+ * once a request was put on the wire (a transport failure that may have applied, or a
+ * non-2xx response). The write path reads it to honor the record-only-after-the-backend-call
+ * rule (WR-5.3): a not-reached failure is never recorded in the write-outcome store, so a
+ * keyed retry re-evaluates rather than being pinned to a transient pre-call condition. The
+ * read path never consults it, so its behavior is unchanged.
  */
 export type BackendCallResult =
   | { readonly ok: true; readonly body: JsonValue | undefined }
-  | { readonly ok: false; readonly kind: "upstream-error"; readonly detail: string }
+  | {
+      readonly ok: false;
+      readonly kind: "upstream-error";
+      readonly detail: string;
+      readonly reachedBackend?: boolean;
+    }
   | { readonly ok: false; readonly kind: "defect"; readonly detail: string };
 
 export interface AdapterBackendCallerOptions {
@@ -91,11 +105,14 @@ export class AdapterBackendCaller implements BackendCaller {
     const acquired = this.#governor.tryAcquire(input.targetAppId, limits);
     if (!acquired.granted) {
       // TE-2.6 — a live read is bounded, not parked: a ceiling denial fails the
-      // request (naming the backend) so the caller gets an answer.
+      // request (naming the backend) so the caller gets an answer. No request was
+      // dispatched, so a write refused here is never recorded (WR-5.3): the caller's
+      // keyed retry re-evaluates once the ceiling clears.
       return {
         ok: false,
         kind: "upstream-error",
         detail: `backend app ${input.targetAppId} load ceiling reached`,
+        reachedBackend: false,
       };
     }
     try {
@@ -114,33 +131,52 @@ export class AdapterBackendCaller implements BackendCaller {
     request: OutboundRequest,
   ): Promise<
     | { readonly ok: true; readonly value: OutboundResponse }
-    | { readonly ok: false; readonly kind: "upstream-error"; readonly detail: string }
+    | {
+        readonly ok: false;
+        readonly kind: "upstream-error";
+        readonly detail: string;
+        readonly reachedBackend: boolean;
+      }
   > {
+    // Tracks whether `protocol.send` was actually entered, so a throw is attributed
+    // correctly for WR-5.3: a transport failure *after* dispatch (the write's side
+    // effect may have applied) is recorded, but a throw from `withCredential`'s own
+    // pre-send work — a DB error loading the envelope, a decryption failure, an OAuth
+    // refresh throw, or a pre-send audit write failing — reached no backend, so a
+    // keyed retry must re-evaluate rather than replay a pinned transient failure.
+    let dispatched = false;
     try {
-      const credResult = await this.#credentials.withCredential(targetAppId, (credential) =>
-        this.#protocol.send({
+      const credResult = await this.#credentials.withCredential(targetAppId, (credential) => {
+        dispatched = true;
+        return this.#protocol.send({
           ...request,
           headers: this.#applyCredential(request.headers, credential.secret),
-        }),
-      );
+        });
+      });
       if (credResult.outcome === "invoked") {
         return { ok: true, value: credResult.value };
       }
       if (credResult.outcome === "no-credential") {
         // A valid public/no-auth backend: issue the call unauthenticated.
+        dispatched = true;
         return { ok: true, value: await this.#protocol.send(request) };
       }
+      // No request was dispatched — a credential refresh failed before sending.
       return {
         ok: false,
         kind: "upstream-error",
         detail: `backend app ${targetAppId} credential refresh failed`,
+        reachedBackend: false,
       };
     } catch (error) {
-      // No HTTP response — a transport failure (timeout/network/connection refused).
+      // A throw with no HTTP response. If `protocol.send` was entered it is a transport
+      // failure (timeout/network) and the write's side effect may have applied
+      // (`reachedBackend: true`); if it threw before dispatch, no backend was reached.
       return {
         ok: false,
         kind: "upstream-error",
-        detail: `backend app ${targetAppId} transport failure: ${describeError(error)}`,
+        detail: `backend app ${targetAppId} ${dispatched ? "transport failure" : "credential access failed before dispatch"}: ${describeError(error)}`,
+        reachedBackend: dispatched,
       };
     }
   }
@@ -151,10 +187,13 @@ function classifyResponse(targetAppId: string, response: OutboundResponse): Back
   if (response.status >= 200 && response.status < 300) {
     return { ok: true, body: response.body };
   }
+  // A non-2xx response means the backend received and processed the request, so a
+  // write's side effect may have applied — the failure IS recorded (WR-5.3).
   return {
     ok: false,
     kind: "upstream-error",
     detail: `backend app ${targetAppId} returned HTTP ${String(response.status)}`,
+    reachedBackend: true,
   };
 }
 

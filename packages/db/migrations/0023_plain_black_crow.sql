@@ -1,0 +1,1 @@
+ALTER TABLE "adapter_write_outcome" ADD COLUMN "cause" "adapter_request_cause";

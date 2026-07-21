@@ -52,12 +52,20 @@ export type AdapterResult =
       readonly contributingBackendAppIds: readonly string[];
       /** The failed backend(s) whose optional fields a degraded response omitted (AG-2.3). */
       readonly degradedBackendAppIds?: readonly string[];
+      /** WR-5.4 — a write's opaque idempotency key (absent on a read). */
+      readonly idempotencyKey?: string;
+      /** WR-5.4 — `true` when this write response was replayed from the write-outcome store. */
+      readonly deduplicated?: boolean;
     }
   | {
       readonly kind: "serve-failed";
       readonly endpointId: string;
       readonly bindingId: string | undefined;
       readonly cause: AdapterRequestCause;
+      /** WR-5.4 — a write's opaque idempotency key (absent on a read failure). */
+      readonly idempotencyKey?: string;
+      /** WR-5.4 — `true` when this write failure was replayed from the write-outcome store. */
+      readonly deduplicated?: boolean;
     }
   | {
       readonly kind: "serving-not-implemented";
@@ -207,6 +215,17 @@ export interface AdapterAuditFields {
   readonly endpointId?: string;
   readonly bindingId?: string;
   readonly details?: string;
+  /**
+   * WR-5.4 — a write delivery's opaque idempotency key, recorded on the audit row so a
+   * write outcome is attributable to its delivery. An opaque id, never a payload value.
+   */
+  readonly idempotencyKey?: string;
+  /**
+   * WR-5.4 — `true` when the write outcome was a **deduplicated** delivery (replayed from
+   * the write-outcome store), making it distinguishable from a fresh execution. Rendered
+   * onto the metadata-only audit row (never a response body).
+   */
+  readonly deduplicated?: boolean;
 }
 
 /**
@@ -232,6 +251,8 @@ export function auditFieldsFor(result: AdapterResult): AdapterAuditFields {
         endpointId: result.endpointId,
         ...(result.bindingId !== undefined ? { bindingId: result.bindingId } : {}),
         ...(result.degraded ? { degraded: true } : {}),
+        ...(result.idempotencyKey !== undefined ? { idempotencyKey: result.idempotencyKey } : {}),
+        ...(result.deduplicated ? { deduplicated: true } : {}),
       };
     case "serve-failed":
       return {
@@ -239,6 +260,8 @@ export function auditFieldsFor(result: AdapterResult): AdapterAuditFields {
         cause: result.cause,
         endpointId: result.endpointId,
         ...(result.bindingId !== undefined ? { bindingId: result.bindingId } : {}),
+        ...(result.idempotencyKey !== undefined ? { idempotencyKey: result.idempotencyKey } : {}),
+        ...(result.deduplicated ? { deduplicated: true } : {}),
       };
     case "serving-not-implemented":
       return {
