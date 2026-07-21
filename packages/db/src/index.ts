@@ -204,6 +204,7 @@ export {
   type PollSnapshotRecord,
   type ProcessedEventOps,
   type EstablishScopeLinkResult,
+  type RecordLinkSide,
   type RecordLinkSideRef,
   type RecordLinkStore,
   type ScopeLinkSideRef,

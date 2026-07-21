@@ -6,7 +6,12 @@ import type {
   TombstoneReason,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
-import type { RecordLinkSideRef, RecordLinkStore, SyncFieldStateStore } from "@mediator/db";
+import type {
+  RecordLinkSide,
+  RecordLinkSideRef,
+  RecordLinkStore,
+  SyncFieldStateStore,
+} from "@mediator/db";
 import { readPath, type JsonValue } from "@mediator/transform";
 
 import { valuesAgree } from "./hash.js";
@@ -119,6 +124,32 @@ export class FakeRecordLinkStore implements RecordLinkStore {
       link.scopeRef = scopeRef;
     }
     return Promise.resolve();
+  }
+
+  public setRecordAddress(id: string, side: RecordLinkSide, address: string): Promise<void> {
+    // Mirror the real `RecordLinkRepository.setRecordAddress` — a targeted UPDATE of the
+    // one side's `app_{a,b}_record_address` column; addressing only, never identity.
+    const link = this.#links.find((entry) => entry.id === id);
+    if (link !== undefined) {
+      if (side === "A") {
+        link.appARecordAddress = address;
+      } else {
+        link.appBRecordAddress = address;
+      }
+    }
+    return Promise.resolve();
+  }
+
+  public listActiveMissingRecordAddress(appId: string): Promise<RecordLink[]> {
+    // Mirror the real query: active links where `appId` is a side whose per-side
+    // container-relative address is absent (a NULL column ⇔ an absent domain key).
+    const found = this.#links.filter(
+      (link) =>
+        link.status === "active" &&
+        ((link.appAId === appId && link.appARecordAddress === undefined) ||
+          (link.appBId === appId && link.appBRecordAddress === undefined)),
+    );
+    return Promise.resolve(found.map(clone));
   }
 
   public getById(id: string): Promise<RecordLink | undefined> {

@@ -30,6 +30,7 @@ export { MappingArtifactsRepository, type MappingArtifacts } from "./mapping-art
 export { AuditLogRepository, type SyncEventQuery } from "./audit-log.js";
 export {
   RecordLinkRepository,
+  type RecordLinkSide,
   type RecordLinkSideRef,
   type RecordLinkStore,
 } from "./record-link.js";
