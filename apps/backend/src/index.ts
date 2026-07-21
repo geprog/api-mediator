@@ -11,7 +11,12 @@ import { createDb } from "@mediator/db";
 
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
-import { buildAdapterMountReactions, buildAdapterRuntime } from "./http/adapter-runtime/index.js";
+import {
+  buildAdapterMountReactions,
+  buildAdapterRuntime,
+  createTokenConsumerAppResolver,
+} from "./http/adapter-runtime/index.js";
+import { buildAdapterTokenValidator } from "./modules/adapter-token/index.js";
 import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
 import { buildScopeProposalReporter } from "./modules/artifact-instantiation/report-scope-proposal.js";
 import { buildDetectionBackground } from "./modules/detection/background.js";
@@ -54,7 +59,20 @@ const { app, shutdown: shutdownServer } = buildServer({ config, db, logger, sync
 // surface from persisted state; they register on the single shared dispatcher/sweep
 // below, exactly like the other backgrounds. Its listener is started after the
 // operator `listen` (with an initial `reconcile`) and closed before the db pool.
-const adapterRuntime = buildAdapterRuntime({ db, logger });
+// The Phase-5 Auth Gateway (AT-2..AT-4): the token-validating resolver that replaces
+// RT's header stand-in. It validates the caller's `Authorization: Bearer` adapter
+// token (constant-time salted-hash equality, still-valid bound, active consumer app)
+// in front of everything the runtime does — a missing/unrecognized/expired/foreign
+// token never reaches routing, planning, or a backend call (AT-2.1).
+const adapterTokenValidator = buildAdapterTokenValidator({
+  db,
+  rotationOverlapMs: config.adapterAuth.rotationOverlapMs,
+});
+const adapterRuntime = buildAdapterRuntime({
+  db,
+  logger,
+  resolveConsumerApp: createTokenConsumerAppResolver(adapterTokenValidator),
+});
 const adapterMountReactions = buildAdapterMountReactions(adapterRuntime.mountManager);
 
 // The Phase-3 artifact-instantiation reaction: the `MappingApproved` consumer that

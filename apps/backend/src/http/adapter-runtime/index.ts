@@ -19,7 +19,12 @@ export {
   headerConsumerAppResolver,
   CONSUMER_APP_HEADER,
   type ConsumerAppResolver,
+  type ResolvedConsumerApp,
 } from "./consumer-app-resolver.js";
+export {
+  createTokenConsumerAppResolver,
+  type AdapterTokenValidator,
+} from "./token-consumer-app-resolver.js";
 export { DbAdapterStore } from "./db-adapter-store.js";
 export { RestProtocolServer } from "./rest-protocol-server.js";
 export { deriveRestRoutes, matchRoute, type RestRoute, type RouteMatch } from "./rest-routes.js";

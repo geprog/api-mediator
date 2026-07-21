@@ -71,6 +71,7 @@ describe("loadConfig", () => {
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.http)).toBe(true);
     expect(Object.isFrozen(config.adapterHttp)).toBe(true);
+    expect(Object.isFrozen(config.adapterAuth)).toBe(true);
     expect(Object.isFrozen(config.database)).toBe(true);
     expect(Object.isFrozen(config.telemetry)).toBe(true);
     expect(Object.isFrozen(config.mappingLlm)).toBe(true);
@@ -194,6 +195,18 @@ describe("loadConfig", () => {
 
     it("coerces a provided ADAPTER_HTTP_PORT from its string value", () => {
       expect(loadConfig({ ...baseEnv(), ADAPTER_HTTP_PORT: "13900" }).adapterHttp.port).toBe(13900);
+    });
+
+    it("defaults the adapter-token rotation overlap window to 24 h (AT-4)", () => {
+      const env = baseEnv();
+      delete env.ADAPTER_TOKEN_ROTATION_OVERLAP_MS;
+
+      expect(loadConfig(env).adapterAuth).toEqual({ rotationOverlapMs: 86_400_000 });
+    });
+
+    it("coerces a provided ADAPTER_TOKEN_ROTATION_OVERLAP_MS from its string value", () => {
+      const config = loadConfig({ ...baseEnv(), ADAPTER_TOKEN_ROTATION_OVERLAP_MS: "60000" });
+      expect(config.adapterAuth.rotationOverlapMs).toBe(60_000);
     });
 
     it("rejects a non-integer or out-of-range ADAPTER_HTTP_PORT", () => {

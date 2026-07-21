@@ -88,6 +88,25 @@ export interface AdapterHttpConfig {
 }
 
 /**
+ * Inbound authentication for the Adapter Server Runtime (Phase-5 AT-1..AT-4). The
+ * Auth Gateway validates a consumer app's mediator-issued adapter token per request
+ * (`docs/architecture/security.md` *Inbound authentication to generated adapter
+ * servers*).
+ *
+ * `rotationOverlapMs` is the **rotation overlap window** (README Phase-5 open
+ * question 4): when an operator rotates a consumer's token, the superseded token
+ * stays valid for this many milliseconds (its `Credential.validUntil` is stamped to
+ * `now + rotationOverlapMs`) so live traffic is not broken mid-cutover — old and new
+ * both validate until the window elapses or the operator confirms cutover early
+ * (AT-4). The default of 24 h is a conservative hand-off window for a self-hosted
+ * single-tenant deployment; it is config-defined so an operator can shorten or
+ * lengthen it.
+ */
+export interface AdapterAuthConfig {
+  readonly rotationOverlapMs: number;
+}
+
+/**
  * App-registration defaults. `defaultPollInterval` (milliseconds) is the
  * conservative fallback stamped onto a `RegisteredApp.capabilities` when a
  * registration omits `capabilities` entirely (AR-1 criterion 2 / open question
@@ -163,6 +182,7 @@ export interface SyncConfig {
 export interface AppConfig {
   readonly http: HttpConfig;
   readonly adapterHttp: AdapterHttpConfig;
+  readonly adapterAuth: AdapterAuthConfig;
   readonly database: DatabaseConfig;
   readonly telemetry: TelemetryConfig;
   readonly mappingLlm: MappingLlmConfig;
@@ -330,6 +350,11 @@ const envSchema = z
     // it to their reserved `1<scenario>900` host port.
     ADAPTER_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3334),
 
+    // Adapter-token rotation overlap window (Phase-5 AT-4, README open question 4).
+    // Milliseconds a superseded adapter token stays valid after an operator rotates,
+    // so live consumer traffic is not broken mid-cutover. Default 86_400_000 ms (24 h).
+    ADAPTER_TOKEN_ROTATION_OVERLAP_MS: z.coerce.number().int().positive().default(86_400_000),
+
     // Database
     DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
 
@@ -443,6 +468,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
   return {
     http: { port: raw.HTTP_PORT },
     adapterHttp: { port: raw.ADAPTER_HTTP_PORT },
+    adapterAuth: { rotationOverlapMs: raw.ADAPTER_TOKEN_ROTATION_OVERLAP_MS },
     database: { url: raw.DATABASE_URL },
     telemetry: toTelemetryConfig(raw),
     mappingLlm: {
@@ -467,6 +493,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
 function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.http);
   Object.freeze(config.adapterHttp);
+  Object.freeze(config.adapterAuth);
   Object.freeze(config.database);
   Object.freeze(config.telemetry);
   Object.freeze(config.mappingLlm);

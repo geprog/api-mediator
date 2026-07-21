@@ -50,7 +50,7 @@ function buildApp(store: AdapterStore, auditWriter: AdapterAuditWriter): Fastify
   const handler = new AdapterRequestHandler({
     protocolServer,
     store,
-    resolveConsumerApp: () => CONSUMER,
+    resolveConsumerApp: () => Promise.resolve({ consumerAppId: CONSUMER }),
     auditWriter,
     telemetry: new AdapterTelemetry(),
     newId: () => "audit-id",

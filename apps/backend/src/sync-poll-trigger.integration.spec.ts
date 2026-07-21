@@ -300,6 +300,7 @@ function testConfig(url: string, testPollTrigger: boolean): AppConfig {
   return {
     http: { port: 0 },
     adapterHttp: { port: 0 },
+    adapterAuth: { rotationOverlapMs: 86_400_000 },
     database: { url },
     telemetry: { enabled: false },
     mappingLlm: {

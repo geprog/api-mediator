@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { installAuthentication, type AuthProvider } from "../auth/index.js";
+import { registerAdapterTokenRoutes } from "./adapter-token.routes.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
@@ -31,6 +32,12 @@ export type { OperatorApiDeps } from "./deps.js";
 export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps): void {
   registerSessionRoute(app);
   registerAppRoutes(app, deps);
+  // Phase-5 adapter-token control plane (AT-1/AT-4). Mounted whenever the service is
+  // wired (the real composition root always provides it); the pre-Phase-5 in-memory
+  // unit harness omits it, exactly like the sync surface below.
+  if (deps.adapterTokens !== undefined) {
+    registerAdapterTokenRoutes(app, deps.adapterTokens);
+  }
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
   registerMappingProposalRoutes(app, deps);

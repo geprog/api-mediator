@@ -30,6 +30,30 @@ export {
 // now, adapterToken in Phase 5).
 export { SECRET_HASH_SCHEME, hashSecret, isEncodedSecretHash, verifySecret } from "./hashing.js";
 
+// Adapter token (Phase-5 AT-1..AT-4): the consumer-app token lifecycle — issue
+// (shown once), rotate with an overlap window, cutover, per-request validation, and
+// the deregister-cascade deletion. Salted-hash storage, constant-time equality.
+export {
+  ADAPTER_TOKEN_SCHEME,
+  AdapterTokenStore,
+  formatAdapterToken,
+  generateAdapterTokenSecret,
+  parseAdapterToken,
+  type AdapterTokenPersistence,
+  type AdapterTokenRecord,
+  type AdapterTokenRejectionReason,
+  type AdapterTokenStoreOptions,
+  type ConsumerAppEligibility,
+  type ConsumerAppEligibilityReader,
+  type CutoverResult,
+  type IssuedAdapterToken,
+  type IssueTokenResult,
+  type NewAdapterTokenRecord,
+  type ParsedAdapterToken,
+  type ValidateTokenResult,
+} from "./adapter-token.js";
+export { DbAdapterTokenPersistence } from "./db-adapter-token.js";
+
 // Credential material (store input) + secret (encrypted payload) shapes.
 export {
   CredentialMaterialValidationError,

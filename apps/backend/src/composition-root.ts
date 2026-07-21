@@ -16,6 +16,7 @@ import { getActiveTraceContext, shutdownTelemetry } from "@mediator/telemetry";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { pino } from "pino";
 
+import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
 import {
   ApprovalService,
@@ -185,6 +186,14 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     proposalReadService,
     approvalService,
     escapeHatchService,
+    // Phase-5 Auth Gateway & adapter token (AT-1/AT-4): the operator control plane
+    // for a consumer app's inbound token (issue/rotate/cutover), attributing each
+    // action in the audit log. Per-request validation lives in the Adapter Server
+    // Runtime (wired in `index.ts`), not here.
+    adapterTokens: new AdapterTokenService({
+      db,
+      rotationOverlapMs: config.adapterAuth.rotationOverlapMs,
+    }),
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.
