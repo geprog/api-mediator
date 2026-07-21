@@ -3,6 +3,7 @@ import type {
   AdapterBinding,
   AdapterBindingRole,
   AdapterEndpoint,
+  AdapterEndpointStatus,
   AggregationStrategy,
   ChainInput,
   EndpointStrictness,
@@ -11,7 +12,7 @@ import type {
   PostMergePagination,
   PostMergeSort,
 } from "@mediator/domain";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAdapterBindingRow } from "../mappers/adapter-binding.js";
@@ -63,6 +64,13 @@ export interface CompositionBindingConfig {
   readonly executionOrder: number | null;
   readonly dependsOnBindingId: string | null;
   readonly chainInputs: readonly ChainInput[] | null;
+  /**
+   * The status this binding is left in (CO-6.2). `active` for a served binding, `disabled`
+   * for one the composer took out of service — its row is retained so a later
+   * recomposition can reactivate it, and the Resolution Planner skips it while disabled. A
+   * first `compose` sets every binding `active`.
+   */
+  readonly status: "active" | "disabled";
 }
 
 /** The full activation payload for one `composition-required` endpoint. */
@@ -70,6 +78,14 @@ export interface ApplyCompositionInput {
   readonly endpointId: string;
   readonly endpoint: CompositionEndpointConfig;
   readonly bindings: readonly CompositionBindingConfig[];
+  /**
+   * The endpoint statuses the activation UPDATE is guarded on (CO-6.1). A first `compose`
+   * passes `["composition-required"]` (its only legal source state); a recompose passes
+   * `["active", "composition-required"]` so it also applies to a live endpoint. The guard
+   * is what makes a concurrent transition out of these states a no-op (0 rows →
+   * `applied: false`) rather than a lost update.
+   */
+  readonly allowedFromStatuses: readonly AdapterEndpointStatus[];
 }
 
 /**
@@ -106,13 +122,15 @@ export class AdapterCompositionRepository {
   }
 
   /**
-   * Activate a validated composition atomically (CO-2.8). The endpoint UPDATE is guarded
-   * on `status = 'composition-required'` — the only state a first composition applies to
-   * — so a concurrent transition makes it a no-op (0 rows → `{ applied: false }`, no
-   * writes). Each binding is then set `active` with its composed role/order/chaining,
-   * scoped to this endpoint; a binding UPDATE that matches no row is an invariant
-   * violation (the caller validated coverage first) and **throws**, rolling the whole
-   * transaction back so activation is never half-applied.
+   * Activate a validated composition atomically (CO-2.8 / CO-6.1). The endpoint UPDATE is
+   * guarded on `status IN input.allowedFromStatuses` — `composition-required` for a first
+   * `compose`, plus `active` for a recompose — so a concurrent transition out of those
+   * states makes it a no-op (0 rows → `{ applied: false }`, no writes). Each binding is then
+   * set to its composed `status` (`active`, or `disabled` for a binding taken out of
+   * service, CO-6.2) with its composed role/order/chaining, scoped to this endpoint; a
+   * binding UPDATE that matches no row is an invariant violation (the caller validated
+   * coverage first) and **throws**, rolling the whole transaction back so activation is
+   * never half-applied.
    *
    * Bound to a transaction handle by the service, so the endpoint promotion, every
    * binding promotion, and the OA-3 audit insert commit together or not at all.
@@ -145,13 +163,14 @@ export class AdapterCompositionRepository {
       .where(
         and(
           eq(adapterEndpoint.id, input.endpointId),
-          eq(adapterEndpoint.status, "composition-required"),
+          inArray(adapterEndpoint.status, [...input.allowedFromStatuses]),
         ),
       )
       .returning();
     const [endpointRow] = updatedEndpoints;
     if (endpointRow === undefined) {
-      // Not composition-required at write time — nothing written, no live state disturbed.
+      // Not in an allowed source status at write time — nothing written, no live state
+      // disturbed (a concurrent transition, e.g. the endpoint was disabled meanwhile).
       return { applied: false };
     }
 
@@ -159,7 +178,7 @@ export class AdapterCompositionRepository {
       const updatedBindings = await this.db
         .update(adapterBinding)
         .set({
-          status: "active",
+          status: binding.status,
           role: binding.role,
           executionOrder: binding.executionOrder,
           dependsOnBindingId: binding.dependsOnBindingId,
@@ -181,5 +200,26 @@ export class AdapterCompositionRepository {
 
     const bindings = await this.listBindings(input.endpointId);
     return { applied: true, endpoint: mapAdapterEndpointRow(endpointRow), bindings };
+  }
+
+  /**
+   * Flip an endpoint's `status` (CO-6.3 enable/disable). Disabling sets `disabled` — the
+   * resolver then rejects requests with `endpoint-disabled` (RT-3.2) — while every config
+   * column and every binding row is **retained**, so re-enabling to `active` restores the
+   * stored configuration with nothing lost. Returns the updated `AdapterEndpoint`, or
+   * `undefined` when no row matched (an unknown/removed endpoint), so the service maps that
+   * to a `NotFound`/conflict without disturbing any state. Bound to a transaction handle by
+   * the service so the flip and its OA-3 audit insert commit together.
+   */
+  public async setEndpointStatus(
+    endpointId: string,
+    status: AdapterEndpointStatus,
+  ): Promise<AdapterEndpoint | undefined> {
+    const [row] = await this.db
+      .update(adapterEndpoint)
+      .set({ status })
+      .where(eq(adapterEndpoint.id, endpointId))
+      .returning();
+    return row === undefined ? undefined : mapAdapterEndpointRow(row);
   }
 }

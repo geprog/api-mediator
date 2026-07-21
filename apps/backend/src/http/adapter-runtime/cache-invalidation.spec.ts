@@ -47,8 +47,12 @@ const ruleReader = (ruleId: string): Promise<string | undefined> =>
 
 class SpyInvalidator implements CacheInvalidator {
   public readonly calls: { backendAppId: string; resourceRef: string }[] = [];
+  public readonly endpointCalls: string[] = [];
   public invalidateBackendResource(backendAppId: string, resourceRef: string): void {
     this.calls.push({ backendAppId, resourceRef });
+  }
+  public invalidateEndpoint(endpointId: string): void {
+    this.endpointCalls.push(endpointId);
   }
 }
 

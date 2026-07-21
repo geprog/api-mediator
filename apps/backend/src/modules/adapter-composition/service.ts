@@ -40,7 +40,7 @@ import {
 } from "./validate.js";
 
 /**
- * **CO-2 application service** — the seam between the thin operator route and the
+ * **CO-2/CO-6 application service** — the seam between the thin operator route and the
  * composition validator + atomic activation. It loads the endpoint's composition
  * context, runs {@link validateComposition}, and — **only** on a passing result and
  * **in one transaction** — activates the composition and attributes the action (OA-3).
@@ -53,6 +53,15 @@ import {
  * Composing is an `operator` mutation (CO-2.9): the route's role guard rejects a viewer
  * `403` before this service runs, and every activation is attributed to the authenticated
  * identity — metadata only, never credential material or a payload value.
+ *
+ * **CO-6 (recompose + enable/disable) + CH-5 (invalidate on commit):** {@link recompose}
+ * re-runs the exact same validation over an already-`active` endpoint and re-activates on
+ * success (inert on rejection, exactly like a first `compose`); {@link setEndpointEnabled}
+ * flips `AdapterEndpoint.status`; a binding may be marked `disabled` in a recompose
+ * submission and its row is retained. **Every committed operation** then drops all of that
+ * endpoint's cached entries through the SAME {@link EndpointCacheInvalidator} the adapter
+ * runtime serves from, so a change never takes up to `cacheTtl` to become visible (CH-5) —
+ * and a rejected recompose (thrown before any transaction) drops nothing.
  */
 export interface AdapterCompositionServiceDeps {
   readonly db: Database;
@@ -60,6 +69,25 @@ export interface AdapterCompositionServiceDeps {
   readonly clock?: () => Date;
   readonly newId: () => string;
   readonly readTraceContext?: () => ActiveTraceContext | null;
+  /**
+   * CH-5 — the by-endpoint cache-drop seam. The composition root wires the SAME
+   * {@link EndpointCacheInvalidator} instance the adapter runtime holds, so an operator's
+   * recompose/disable drops the very cache the runtime serves from. Optional: a service
+   * built without it (a Phase-1..3 test, a pure unit test) simply invalidates nothing.
+   */
+  readonly cacheInvalidator?: EndpointCacheInvalidator;
+}
+
+/**
+ * The narrow cache-invalidation capability the composition service needs (CH-5): drop one
+ * endpoint's cached responses when its serving configuration or a binding's status changes,
+ * or it is disabled/re-enabled (CO-6). Deliberately a **local** port — a domain service must
+ * not import the HTTP/serve layer — structurally satisfied by the shared
+ * `ResponseCacheInvalidator` the adapter runtime owns; the composition root wires that same
+ * instance in (CH-5.6: one mechanism, two key kinds).
+ */
+export interface EndpointCacheInvalidator {
+  invalidateEndpoint(endpointId: string): void;
 }
 
 /** The activated composition — the now-`active` endpoint and its `active` bindings. */
@@ -101,6 +129,7 @@ export class AdapterCompositionService {
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => ActiveTraceContext | null;
+  readonly #cacheInvalidator: EndpointCacheInvalidator;
 
   public constructor(deps: AdapterCompositionServiceDeps) {
     this.#db = deps.db;
@@ -108,65 +137,120 @@ export class AdapterCompositionService {
     this.#clock = deps.clock ?? ((): Date => new Date());
     this.#newId = deps.newId;
     this.#readTraceContext = deps.readTraceContext ?? getActiveTraceContext;
+    // No injected invalidator → invalidate nothing (a service wired without the shared cache,
+    // e.g. a pure unit test). The real composition root always injects the shared instance.
+    this.#cacheInvalidator = deps.cacheInvalidator ?? { invalidateEndpoint: (): void => {} };
   }
 
   /**
-   * Compose (validate + activate) a `composition-required` endpoint. Throws
+   * Compose (validate + activate) a `composition-required` endpoint (CO-2). Throws
    * `NotFoundError` (unknown endpoint), `ConflictError` (not `composition-required`), or
    * `BadRequestError` with the named rejection reasons as `issues` (invalid composition —
-   * nothing activated). On success returns the activated endpoint + bindings.
+   * nothing activated). On success returns the activated endpoint + bindings and drops the
+   * endpoint's cached entries (CH-5.2: `proposed → active`).
    */
   public async compose(
     endpointId: string,
     submission: CompositionSubmission,
     actor: string,
   ): Promise<ComposeResult> {
-    const context = await this.#loader.load(endpointId);
-    if (context === undefined) {
-      throw new NotFoundError(`Adapter endpoint ${endpointId} not found.`);
-    }
+    const context = await this.#loadOrThrow(endpointId);
     if (context.endpoint.status !== "composition-required") {
-      // CO-2 resolves `composition-required` endpoints; recomposing an `active` (or
-      // `disabled`) endpoint is CO-6, out of scope here.
+      // CO-2 resolves `composition-required` endpoints; changing an already-`active`
+      // endpoint's serving semantics is a recompose (CO-6) — use {@link recompose}.
       throw new ConflictError(
         `Adapter endpoint ${endpointId} is ${context.endpoint.status}; only a composition-required endpoint can be composed.`,
       );
     }
-
-    const validation = validateComposition({
+    return this.#validateAndActivate({
+      endpointId,
+      context,
       submission,
-      bindingFacts: context.bindingFacts,
-      consumerInputs: context.consumerInputs,
-      unionBindingFacts: context.unionBindingFacts,
-      consumerParameters: context.consumerParameters,
-      consumerResponseFieldNames: context.consumerResponseFieldNames,
+      actor,
+      allowedFromStatuses: ["composition-required"],
+      auditVerb: "composed",
     });
-    if (!validation.ok) {
-      // Fail loud, before any transaction: nothing is activated and the endpoint keeps
-      // serving its previous configuration (CO-2.8). Each reason names the offender.
-      throw new BadRequestError(
-        `Composition of adapter endpoint ${endpointId} is invalid.`,
-        validation.reasons.map(formatCompositionRejection),
+  }
+
+  /**
+   * **CO-6.1/6.5 — recompose an `active` endpoint.** Re-runs the **exact same** CO-2/CO-3
+   * validation as {@link compose} over the endpoint's current binding facts and, on success,
+   * re-activates with the submitted strategy/roles/order/chaining/`postMerge*`/dedup/
+   * strictness/`cacheTtl` — recomposition is the same action minus the triggering approval.
+   * A binding may be marked `disabled` in the submission (CO-6.2): it is validated as
+   * addressed-but-not-served and its row is retained `disabled` so a later recompose can
+   * reactivate it.
+   *
+   * On validation **failure** the recompose is inert — it throws `BadRequestError` before any
+   * transaction opens, so nothing is partially applied, the prior active configuration keeps
+   * serving, and the cache is **not** dropped (CH-5: a rejected recompose invalidates
+   * nothing). A recompose that would leave a **write** endpoint with >1 active binding or a
+   * role outside its strategy is rejected by that same validation (CO-6.5 / CO-2 crit 2/7-8).
+   *
+   * The guard accepts an `active` **or** `composition-required` endpoint (a recompose is
+   * robust to a concurrent second-binding attach); a `disabled` endpoint must be re-enabled
+   * first ({@link setEndpointEnabled}). Throws `NotFoundError` for an unknown endpoint.
+   */
+  public async recompose(
+    endpointId: string,
+    submission: CompositionSubmission,
+    actor: string,
+  ): Promise<ComposeResult> {
+    const context = await this.#loadOrThrow(endpointId);
+    if (
+      context.endpoint.status !== "active" &&
+      context.endpoint.status !== "composition-required"
+    ) {
+      throw new ConflictError(
+        `Adapter endpoint ${endpointId} is ${context.endpoint.status}; a disabled endpoint must be re-enabled before it can be recomposed.`,
       );
     }
+    return this.#validateAndActivate({
+      endpointId,
+      context,
+      submission,
+      actor,
+      allowedFromStatuses: ["active", "composition-required"],
+      auditVerb: "recomposed",
+    });
+  }
 
-    const applyInput = toApplyCompositionInput(endpointId, submission, actor, this.#clock());
-    const result = await tx(this.#db, async (txn) => {
+  /**
+   * **CO-6.3 — enable/disable an endpoint.** Flips `AdapterEndpoint.status` to `disabled`
+   * (the resolver then rejects requests with `endpoint-disabled`, RT-3.2) or back to `active`
+   * — **retaining every config column and binding row**, so re-enabling restores the stored
+   * configuration with nothing lost. Attributes the action (OA-3) and, on commit, drops the
+   * endpoint's cached entries (CH-5.5): disabling evicts what was cached under the old
+   * configuration, and re-enabling drops again so it serves **no** entry cached before it was
+   * disabled. Throws `NotFoundError` for an unknown endpoint.
+   */
+  public async setEndpointEnabled(
+    endpointId: string,
+    enabled: boolean,
+    actor: string,
+  ): Promise<AdapterEndpoint> {
+    // Existence check before any write (reusing the injectable loader), so an unknown
+    // endpoint is a clean `NotFound` rather than a silent no-op.
+    await this.#loadOrThrow(endpointId);
+    const targetStatus: AdapterEndpoint["status"] = enabled ? "active" : "disabled";
+    const endpoint = await tx(this.#db, async (txn) => {
       const compositions = new AdapterCompositionRepository(txn);
-      const applied = await compositions.applyComposition(applyInput);
-      if (!applied.applied) {
-        // A concurrent transition moved the endpoint out of `composition-required` after
-        // our pre-check — treat as a state conflict; the tx rolls back with no writes.
-        throw new ConflictError(
-          `Adapter endpoint ${endpointId} is no longer composition-required.`,
-        );
+      const updated = await compositions.setEndpointStatus(endpointId, targetStatus);
+      if (updated === undefined) {
+        // Removed between the existence check and the write — a state conflict; tx rolls back.
+        throw new ConflictError(`Adapter endpoint ${endpointId} no longer exists.`);
       }
       const audit = new AuditLogRepository(txn);
-      await audit.insert(this.#attribution(actor, endpointId, submission));
-      return applied;
+      await audit.insert(this.#statusAttribution(actor, endpointId, targetStatus));
+      // TODO(Phase 6 graph): once the materialized adapter-dependency GraphEdge projection
+      // lands (docs place it in Phase 6), recompute this endpoint's edges here so a disabled
+      // endpoint no longer projects a live dependency. The ensure-exists upsert used at
+      // instantiation (CO-1) cannot remove an edge, so there is nothing to invoke cheaply now.
+      return updated;
     });
-
-    return { endpoint: result.endpoint, bindings: result.bindings };
+    // CH-5.5 — drop on every commit (disable AND re-enable); always correctness-safe.
+    this.#cacheInvalidator.invalidateEndpoint(endpointId);
+    return endpoint;
   }
 
   /**
@@ -222,8 +306,86 @@ export class AdapterCompositionService {
     };
   }
 
+  /** Load the endpoint's composition context or throw `NotFoundError` (unknown endpoint). */
+  async #loadOrThrow(endpointId: string): Promise<CompositionContext> {
+    const context = await this.#loader.load(endpointId);
+    if (context === undefined) {
+      throw new NotFoundError(`Adapter endpoint ${endpointId} not found.`);
+    }
+    return context;
+  }
+
   /**
-   * The OA-3 attribution row for a completed composition. Recorded as an
+   * The shared validate → atomically activate → attribute → invalidate core (CO-2.8 /
+   * CO-6.1). Runs the **same** {@link validateComposition} for a first `compose` and a
+   * `recompose`; a rejection is thrown **before** any transaction opens, so nothing is
+   * activated, the endpoint keeps serving its previous configuration, and — critically for
+   * CH-5 — the cache is left untouched (a rejected recompose invalidates nothing). On a
+   * passing validation it activates the endpoint + every binding and writes the OA-3 audit
+   * row in **one** transaction, then drops the endpoint's cached entries (CH-5.1/5.2) so the
+   * committed change never takes up to `cacheTtl` to become visible.
+   */
+  async #validateAndActivate(params: {
+    readonly endpointId: string;
+    readonly context: CompositionContext;
+    readonly submission: CompositionSubmission;
+    readonly actor: string;
+    readonly allowedFromStatuses: readonly AdapterEndpoint["status"][];
+    readonly auditVerb: "composed" | "recomposed";
+  }): Promise<ComposeResult> {
+    const { endpointId, context, submission, actor, allowedFromStatuses, auditVerb } = params;
+    const validation = validateComposition({
+      submission,
+      bindingFacts: context.bindingFacts,
+      consumerInputs: context.consumerInputs,
+      unionBindingFacts: context.unionBindingFacts,
+      consumerParameters: context.consumerParameters,
+      consumerResponseFieldNames: context.consumerResponseFieldNames,
+    });
+    if (!validation.ok) {
+      // Fail loud, before any transaction: nothing is activated and the endpoint keeps
+      // serving its previous configuration (CO-2.8 / CO-6.5). Each reason names the offender.
+      throw new BadRequestError(
+        `Composition of adapter endpoint ${endpointId} is invalid.`,
+        validation.reasons.map(formatCompositionRejection),
+      );
+    }
+
+    const applyInput = toApplyCompositionInput(
+      endpointId,
+      submission,
+      actor,
+      this.#clock(),
+      allowedFromStatuses,
+    );
+    const result = await tx(this.#db, async (txn) => {
+      const compositions = new AdapterCompositionRepository(txn);
+      const applied = await compositions.applyComposition(applyInput);
+      if (!applied.applied) {
+        // A concurrent transition moved the endpoint out of an allowed source status after
+        // our pre-check (e.g. it was disabled) — a state conflict; the tx rolls back cleanly.
+        throw new ConflictError(
+          `Adapter endpoint ${endpointId} is no longer in a state that can be ${auditVerb}.`,
+        );
+      }
+      const audit = new AuditLogRepository(txn);
+      await audit.insert(this.#compositionAttribution(actor, endpointId, submission, auditVerb));
+      // TODO(Phase 6 graph): recompute this endpoint's adapter-dependency GraphEdge(s) here
+      // once the materialized graph projection lands (docs place it in Phase 6). The CO-1
+      // ensure-exists upsert cannot remove/rewrite an edge, so a disabled-binding set has
+      // nothing to invoke cheaply now — the incremental projection is deferred, not built.
+      return applied;
+    });
+
+    // CH-5.1/5.2 — the committed configuration/binding-status change drops all of this
+    // endpoint's cached entries, through the SAME seam CH-3/CH-4 use (CH-5.6). Correctness-
+    // safe and outside the tx: a spurious drop only ever costs a re-fetch.
+    this.#cacheInvalidator.invalidateEndpoint(endpointId);
+    return { endpoint: result.endpoint, bindings: result.bindings };
+  }
+
+  /**
+   * The OA-3 attribution row for a completed (re)composition. Recorded as an
    * `adapter-request` audit entry — the adapter family's row type, carrying
    * `relatedEndpointId` — because the concept coins no dedicated operator-action audit
    * type and no migration is in scope to add one (the same reuse the sync operator makes
@@ -231,17 +393,44 @@ export class AdapterCompositionService {
    * never credential material or a payload value; no served-request `status`/`cause`/
    * `degraded`, since a composition is not a request outcome.
    */
-  #attribution(
+  #compositionAttribution(
     actor: string,
     endpointId: string,
     submission: CompositionSubmission,
+    verb: "composed" | "recomposed",
+  ): AuditLogEntry {
+    const trace = this.#readTraceContext();
+    const activeCount = submission.bindings.filter((binding) => binding.disabled !== true).length;
+    const disabledCount = submission.bindings.length - activeCount;
+    const disabledNote = disabledCount > 0 ? `, ${String(disabledCount)} disabled` : "";
+    return stripUndefined({
+      id: this.#newId(),
+      type: "adapter-request" as const,
+      actor,
+      details: `adapter endpoint ${verb} (strategy=${submission.aggregationStrategy}, ${String(activeCount)} active binding(s)${disabledNote}, ${submission.strictness})`,
+      relatedEndpointId: endpointId,
+      traceId: trace?.traceId,
+      spanId: trace?.spanId,
+      timestamp: this.#clock(),
+    });
+  }
+
+  /**
+   * The OA-3 attribution row for an endpoint enable/disable (CO-6.3). Same
+   * `adapter-request` reuse and metadata-only discipline as {@link compositionAttribution}
+   * — actor + endpoint id + the new status, never any secret or payload value.
+   */
+  #statusAttribution(
+    actor: string,
+    endpointId: string,
+    status: AdapterEndpoint["status"],
   ): AuditLogEntry {
     const trace = this.#readTraceContext();
     return stripUndefined({
       id: this.#newId(),
       type: "adapter-request" as const,
       actor,
-      details: `adapter endpoint composed (strategy=${submission.aggregationStrategy}, ${String(submission.bindings.length)} binding(s), ${submission.strictness})`,
+      details: `adapter endpoint ${status === "disabled" ? "disabled" : "re-enabled"} (status=${status})`,
       relatedEndpointId: endpointId,
       traceId: trace?.traceId,
       spanId: trace?.spanId,
@@ -313,17 +502,23 @@ function stampPostMergePagination(
 /**
  * Map the validated submission to the repository's activation payload. The CO-3 union
  * post-merge config is persisted **only** for a `collection-union` (a full overwrite —
- * `null` on every other strategy, so recomposing clears stale union config).
+ * `null` on every other strategy, so recomposing clears stale union config). Each binding
+ * carries its target `status` (CO-6.2): `disabled` when the composer marked it out of
+ * service (row retained, planner skips it), `active` otherwise. `allowedFromStatuses` guards
+ * the endpoint UPDATE — `composition-required` for a first compose, plus `active` for a
+ * recompose.
  */
 function toApplyCompositionInput(
   endpointId: string,
   submission: CompositionSubmission,
   actor: string,
   now: Date,
+  allowedFromStatuses: readonly AdapterEndpoint["status"][],
 ): ApplyCompositionInput {
   const isUnion = submission.aggregationStrategy === "collection-union";
   return {
     endpointId,
+    allowedFromStatuses: [...allowedFromStatuses],
     endpoint: {
       aggregationStrategy: submission.aggregationStrategy,
       strictness: submission.strictness,
@@ -347,6 +542,9 @@ function toApplyCompositionInput(
       executionOrder: binding.executionOrder ?? null,
       dependsOnBindingId: binding.dependsOnBindingId ?? null,
       chainInputs: binding.chainInputs ?? null,
+      // CO-6.2 — a binding the composer marked `disabled` is persisted `disabled` (row
+      // retained, planner skips it); every other binding is activated.
+      status: binding.disabled === true ? "disabled" : "active",
     })),
   };
 }
