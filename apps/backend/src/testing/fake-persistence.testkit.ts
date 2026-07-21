@@ -10,6 +10,8 @@ import type {
 } from "@mediator/db";
 import type {
   ApiSpec,
+  ApiSpecRole,
+  ApiSpecStatus,
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
@@ -124,6 +126,20 @@ class FakeSpecRepo implements SpecReader, SpecTxRepo {
   }
   public listByAppId(appId: string): Promise<ApiSpec[]> {
     return Promise.resolve([...this.store.specs.values()].filter((spec) => spec.appId === appId));
+  }
+  public findActiveByAppAndRole(appId: string, role: ApiSpecRole): Promise<ApiSpec | undefined> {
+    return Promise.resolve(
+      [...this.store.specs.values()].find(
+        (spec) => spec.appId === appId && spec.role === role && spec.status === "active",
+      ),
+    );
+  }
+  public updateStatus(id: string, status: ApiSpecStatus): Promise<ApiSpec | undefined> {
+    const existing = this.store.specs.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    const updated: ApiSpec = { ...existing, status };
+    this.store.specs.set(id, updated);
+    return Promise.resolve(updated);
   }
   public updateAnalysisExclusions(
     id: string,
