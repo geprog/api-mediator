@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
 import { installAuthentication, type AuthProvider } from "../auth/index.js";
+import { registerAdapterEndpointRoutes } from "./adapter-endpoints.routes.js";
 import { registerAdapterTokenRoutes } from "./adapter-token.routes.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
@@ -37,6 +38,11 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   // unit harness omits it, exactly like the sync surface below.
   if (deps.adapterTokens !== undefined) {
     registerAdapterTokenRoutes(app, deps.adapterTokens);
+  }
+  // Phase-5 endpoint composition (CO-2). Mounted whenever the service is wired (the real
+  // composition root always provides it); the pre-Phase-5 in-memory unit harness omits it.
+  if (deps.adapterComposition !== undefined) {
+    registerAdapterEndpointRoutes(app, deps.adapterComposition);
   }
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);

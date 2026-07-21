@@ -52,6 +52,13 @@ export {
   type DownstreamArtifactOps,
 } from "./downstream-artifacts.js";
 export {
+  AdapterCompositionRepository,
+  type ApplyCompositionInput,
+  type ApplyCompositionResult,
+  type CompositionBindingConfig,
+  type CompositionEndpointConfig,
+} from "./adapter-composition.js";
+export {
   SyncRuleRepository,
   type PollCandidate,
   type SyncRuleAdvance,
