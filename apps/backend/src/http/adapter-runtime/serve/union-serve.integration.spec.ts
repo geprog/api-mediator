@@ -424,7 +424,12 @@ describe("adapter collection-union serve (AG-3/4/5) — requires Postgres", () =
           firstPageNumber: 1,
         },
         confirmPostMergePagination: true,
-        cacheTtl: 30_000,
+        // Deliberately no `cacheTtl`: these tests exercise union *serving semantics*
+        // (dropped-contributor, page stability, ceiling) and must execute fresh each time.
+        // The serve handler shares one in-process response cache across the whole file, so a
+        // `cacheTtl` here would let an earlier test's cached full response satisfy a later
+        // one (e.g. the AG-3.2 5xx-drop and page-2 stability tests reuse the same `{}` key).
+        // Union+cache interaction is covered by cache-serve / response-cache-serve specs.
       },
       ACTOR,
     );
