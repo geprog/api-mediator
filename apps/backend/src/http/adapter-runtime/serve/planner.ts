@@ -24,9 +24,12 @@ import type {
  * mappings; the caller loads them (`docs/architecture/adapter-engine.md` *Binding:
  * decided at composition time*).
  *
- * This slice serves the `single` (AG-1), `fanout-merge` (AG-2, with TE-3 chained
- * bindings), and `collection-union` (AG-3/4/5) strategies. `fanout-first-success` is out
- * of scope; the planner fails **loudly** on it rather than serving an approximation.
+ * This planner serves the `single` (AG-1), `fanout-merge` (AG-2, with TE-3 chained
+ * bindings), `collection-union` (AG-3/4/5), and `fanout-first-success` (AG-6, ordered
+ * fallback) strategies. For `fanout-first-success` it produces the same health-validated
+ * plan as the other parallel strategies (healthy bindings in groups, unhealthy eliminated
+ * with their causes); the *ordering* of the fallback chain and the lazy short-circuit walk
+ * are the handler's concern (`serveFanoutFirstSuccess`), not the planner's.
  */
 
 /** The safe defaults an auto-activated single-binding endpoint serves under (AG-1.4). */
@@ -173,10 +176,19 @@ export function planResolution(input: PlannerInput): PlanResult {
       return planParallelContributors(input, "fanout-merge", strictness);
     case "collection-union":
       return planParallelContributors(input, "collection-union", strictness);
+    case "fanout-first-success":
+      // AG-6 — health-validate every binding into groups/eliminated exactly like the other
+      // parallel strategies; the ordered fallback chain + lazy short-circuit are the handler's
+      // concern. Chaining is already fenced off by the TE-3.6 backstop above (a
+      // `fanout-first-success` binding with `dependsOnBindingId` fails loud there).
+      return planParallelContributors(input, "fanout-first-success", strictness);
     default:
+      // Every `AggregationStrategy` now has a case, so `strategy` narrows to `never` here —
+      // this stays as a fail-loud backstop for an out-of-union value from bad persisted data
+      // (String() keeps the template honest without asserting the type away).
       return {
         ok: false,
-        detail: `aggregation strategy '${strategy}' is not implemented`,
+        detail: `aggregation strategy '${String(strategy)}' is not implemented`,
       };
   }
 }
@@ -206,18 +218,19 @@ function planSingle(input: PlannerInput, strictness: EndpointStrictness): PlanRe
 }
 
 /**
- * Re-validate every binding of a **parallel** endpoint — `fanout-merge` (AG-2) or
- * `collection-union` (AG-3) — into its plan (RP-4). Healthy bindings become execution
- * groups by `executionOrder` (carrying their `dependsOnBindingId` / `chainInputs` for TE-3
- * under `fanout-merge`; a union never chains, guarded by the TE-3.6 backstop above); unhealthy
- * ones are eliminated with their planner cause. The planner does **not** enforce the role
- * table — that is the aggregator's execution-time defense-in-depth (AG-2.1 exactly-one-primary,
- * AG-3.1 all-supplement), evaluated over the full result set (an eliminated binding still
- * surfaces its role to that check as a not-called envelope).
+ * Re-validate every binding of a **multi-binding** endpoint — `fanout-merge` (AG-2),
+ * `collection-union` (AG-3), or `fanout-first-success` (AG-6) — into its plan (RP-4). Healthy
+ * bindings become execution groups by `executionOrder` (carrying their `dependsOnBindingId` /
+ * `chainInputs` for TE-3 under `fanout-merge`; neither a union nor a `fanout-first-success`
+ * chain ever chains, guarded by the TE-3.6 backstop above); unhealthy ones are eliminated with
+ * their planner cause. The planner does **not** enforce the role table — that is the
+ * execution-time defense-in-depth (AG-2.1 exactly-one-primary, AG-3.1 all-supplement, AG-6.1
+ * one-primary-no-supplement), evaluated over the full result set (an eliminated binding still
+ * surfaces its role to that check as a not-called / attempt envelope).
  */
 function planParallelContributors(
   input: PlannerInput,
-  strategy: "fanout-merge" | "collection-union",
+  strategy: "fanout-merge" | "collection-union" | "fanout-first-success",
   strictness: EndpointStrictness,
 ): PlanResult {
   const planned: PlannedBinding[] = [];

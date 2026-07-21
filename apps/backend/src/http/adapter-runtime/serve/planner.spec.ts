@@ -108,14 +108,57 @@ describe("planResolution — RP-3 re-validation + RP-4 plan", () => {
     expect(result.plan.groups[0]?.executionOrder).toBe(3);
   });
 
-  it("fails loudly for an unimplemented strategy (fanout-first-success is out of scope)", () => {
+  it("AG-6: plans a fanout-first-success, keeping a healthy primary + fallbacks as contributors", () => {
+    const result = planResolution({
+      endpoint: endpoint({ aggregationStrategy: "fanout-first-success", strictness: "degraded" }),
+      activeBindings: [
+        health({ binding: binding({ id: "p", role: "primary", executionOrder: 0 }) }),
+        health({ binding: binding({ id: "f1", role: "fallback", executionOrder: 1 }) }),
+        health({ binding: binding({ id: "f2", role: "fallback", executionOrder: 2 }) }),
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.aggregationStrategy).toBe("fanout-first-success");
+    expect(
+      result.plan.groups
+        .flatMap((g) => g.bindings)
+        .map((b) => b.bindingId)
+        .sort(),
+    ).toEqual(["f1", "f2", "p"]);
+    expect(result.plan.eliminated).toEqual([]);
+  });
+
+  it("AG-6.3: an unhealthy fallback is eliminated with its cause; the primary is kept", () => {
+    const result = planResolution({
+      endpoint: endpoint({ aggregationStrategy: "fanout-first-success", strictness: "degraded" }),
+      activeBindings: [
+        health({ binding: binding({ id: "p", role: "primary", executionOrder: 0 }) }),
+        health({
+          binding: binding({ id: "f1", role: "fallback", executionOrder: 1 }),
+          mappingStatus: "stale",
+        }),
+      ],
+    });
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.plan.groups.flatMap((g) => g.bindings).map((b) => b.bindingId)).toEqual(["p"]);
+    expect(result.plan.eliminated).toHaveLength(1);
+    expect(result.plan.eliminated[0]?.bindingId).toBe("f1");
+    expect(result.plan.eliminated[0]?.role).toBe("fallback");
+    expect(result.plan.eliminated[0]?.cause).toEqual({ cause: "mapping-stale" });
+  });
+
+  it("TE-3.6: dependsOnBindingId under fanout-first-success fails loud (chaining does not apply)", () => {
     const result = planResolution({
       endpoint: endpoint({ aggregationStrategy: "fanout-first-success" }),
-      activeBindings: [health()],
+      activeBindings: [
+        health({ binding: binding({ id: "p", role: "primary" }) }),
+        health({ binding: binding({ id: "f1", role: "fallback", dependsOnBindingId: "p" }) }),
+      ],
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.detail).toContain("not implemented");
+    expect(result.detail).toContain("fanout-merge only");
   });
 
   it("AG-3: plans a collection-union, keeping every healthy supplement as a contributor", () => {
