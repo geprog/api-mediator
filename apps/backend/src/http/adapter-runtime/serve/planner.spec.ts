@@ -108,16 +108,32 @@ describe("planResolution — RP-3 re-validation + RP-4 plan", () => {
     expect(result.plan.groups[0]?.executionOrder).toBe(3);
   });
 
-  it("fails loudly for an unimplemented strategy (out of this slice's scope)", () => {
-    for (const strategy of ["collection-union", "fanout-first-success"] as const) {
-      const result = planResolution({
-        endpoint: endpoint({ aggregationStrategy: strategy }),
-        activeBindings: [health()],
-      });
-      expect(result.ok).toBe(false);
-      if (result.ok) continue;
-      expect(result.detail).toContain("not implemented");
-    }
+  it("fails loudly for an unimplemented strategy (fanout-first-success is out of scope)", () => {
+    const result = planResolution({
+      endpoint: endpoint({ aggregationStrategy: "fanout-first-success" }),
+      activeBindings: [health()],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.detail).toContain("not implemented");
+  });
+
+  it("AG-3: plans a collection-union, keeping every healthy supplement as a contributor", () => {
+    const result = planResolution({
+      endpoint: endpoint({ aggregationStrategy: "collection-union", strictness: "degraded" }),
+      activeBindings: [
+        health({ binding: binding({ id: "a", role: "supplement", executionOrder: 0 }) }),
+        health({ binding: binding({ id: "b", role: "supplement", executionOrder: 1 }) }),
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.aggregationStrategy).toBe("collection-union");
+    expect(result.plan.groups.flatMap((g) => g.bindings).map((b) => b.bindingId)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(result.plan.eliminated).toEqual([]);
   });
 
   it("fails loudly for a single endpoint carrying more than one active binding", () => {

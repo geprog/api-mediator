@@ -1,0 +1,202 @@
+import type { RecordLink } from "@mediator/domain";
+
+import { canonicalResourcePairRef } from "../../../modules/artifact-instantiation/index.js";
+
+/**
+ * **AG-3.3 — link-based dedup identity resolution.** Turns the contributing union rows'
+ * `(backendAppId, nativeId)` provenance into a per-row **link-group key**: rows the
+ * mediator can *prove* are the same record — because an existing `RecordLink` pairs their
+ * backend-native ids — get the **same** key and collapse; every other row keeps a
+ * `undefined` key and is never merged (AG-3.5: identity is never guessed).
+ *
+ * The union only **reads** `RecordLink`s (Phase-4 RL-* owns establishing them). The
+ * grouping itself is a pure union-find ({@link buildLinkGroups}) so it is unit-testable
+ * without a database; {@link RecordLinkUnionLinkResolver} is the I/O half that fetches the
+ * edges over Postgres.
+ */
+
+/** One contributor's rows for link resolution: its backend identity + each row's native id. */
+export interface UnionLinkContributor {
+  readonly bindingId: string;
+  readonly backendAppId: string;
+  /** The backend resource ref of the binding's collection read (for the canonical pair ref). */
+  readonly backendResourceRef: string;
+  /** Each row's backend-native id (index-aligned with the fetched rows); `undefined` = no provenance. */
+  readonly nativeIds: readonly (string | undefined)[];
+}
+
+/**
+ * Resolves per-row link-group keys for a set of contributors — injected into the serve
+ * handler so link resolution is faked in unit tests and DB-backed in production. The
+ * returned map is keyed by binding id; each value is index-aligned with that contributor's
+ * `nativeIds` (a `undefined` entry = the row is unlinked, its own singleton).
+ */
+export interface UnionLinkResolver {
+  resolve(
+    contributors: readonly UnionLinkContributor[],
+  ): Promise<ReadonlyMap<string, readonly (string | undefined)[]>>;
+}
+
+/** One resolved `RecordLink` edge: the two `(app, native id)` sides it pairs. */
+export interface LinkEdge {
+  readonly a: RecordNode;
+  readonly b: RecordNode;
+}
+
+interface RecordNode {
+  readonly appId: string;
+  readonly nativeId: string;
+}
+
+function nodeKey(node: RecordNode): string {
+  // ` ` cannot appear in an app id (UUID) or a native id we stringify, so the join is
+  // unambiguous.
+  return `${node.appId} ${node.nativeId}`;
+}
+
+/**
+ * **Pure union-find over the resolved link edges.** Produces, per contributor binding id, a
+ * link-group key for each of its rows (index-aligned with `nativeIds`): a row whose
+ * `(app, native id)` participates in ≥1 edge gets its connected component's **canonical**
+ * key (the lexicographically-smallest node key in the component, so the key is stable
+ * regardless of edge order); every other row — no provenance, or provenance in no edge — is
+ * `undefined`.
+ */
+export function buildLinkGroups(
+  contributors: readonly UnionLinkContributor[],
+  edges: readonly LinkEdge[],
+): ReadonlyMap<string, readonly (string | undefined)[]> {
+  const parent = new Map<string, string>();
+  const find = (key: string): string => {
+    let root = key;
+    for (;;) {
+      const next = parent.get(root);
+      if (next === undefined || next === root) {
+        break;
+      }
+      root = next;
+    }
+    // Path-compress so repeated lookups stay near-constant.
+    let cursor = key;
+    while (cursor !== root) {
+      const next = parent.get(cursor) ?? root;
+      parent.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  };
+  const add = (key: string): void => {
+    if (!parent.has(key)) {
+      parent.set(key, key);
+    }
+  };
+  const union = (x: string, y: string): void => {
+    add(x);
+    add(y);
+    const rootX = find(x);
+    const rootY = find(y);
+    if (rootX === rootY) {
+      return;
+    }
+    // Attach the larger-keyed root under the smaller so the canonical root is the min key.
+    if (rootX < rootY) {
+      parent.set(rootY, rootX);
+    } else {
+      parent.set(rootX, rootY);
+    }
+  };
+
+  for (const edge of edges) {
+    union(nodeKey(edge.a), nodeKey(edge.b));
+  }
+
+  const groups = new Map<string, readonly (string | undefined)[]>();
+  for (const contributor of contributors) {
+    const keys = contributor.nativeIds.map((nativeId) => {
+      if (nativeId === undefined) {
+        return undefined; // no provenance → never guessed as a duplicate.
+      }
+      const key = nodeKey({ appId: contributor.backendAppId, nativeId });
+      return parent.has(key) ? find(key) : undefined;
+    });
+    groups.set(contributor.bindingId, keys);
+  }
+  return groups;
+}
+
+/** The narrow `RecordLink` read the DB resolver needs (the real `RecordLinkRepository` satisfies it). */
+export interface RecordLinkLookup {
+  findActiveByRecord(
+    resourcePairRef: string,
+    record: { readonly appId: string; readonly nativeId: string },
+  ): Promise<RecordLink | undefined>;
+}
+
+/**
+ * The DB-backed {@link UnionLinkResolver}: for every distinct-app pair of contributors it
+ * looks up each row's active `RecordLink` under the pair's **canonical, direction-agnostic**
+ * `resourcePairRef` (reusing {@link canonicalResourcePairRef}, the single definition), turns
+ * the matches into edges, and folds them through {@link buildLinkGroups}. Bounded by the row
+ * ceiling (AG-5) that already caps how many rows reach here.
+ */
+export class RecordLinkUnionLinkResolver implements UnionLinkResolver {
+  readonly #links: RecordLinkLookup;
+
+  public constructor(links: RecordLinkLookup) {
+    this.#links = links;
+  }
+
+  public async resolve(
+    contributors: readonly UnionLinkContributor[],
+  ): Promise<ReadonlyMap<string, readonly (string | undefined)[]>> {
+    const edges: LinkEdge[] = [];
+    for (let i = 0; i < contributors.length; i += 1) {
+      const left = contributors[i];
+      if (left === undefined) {
+        continue;
+      }
+      for (let j = i + 1; j < contributors.length; j += 1) {
+        const right = contributors[j];
+        // A `RecordLink` pairs two independently-owned apps; two bindings on the same
+        // backend app are never sync peers, so they never link.
+        if (right === undefined || right.backendAppId === left.backendAppId) {
+          continue;
+        }
+        const pairRef = canonicalResourcePairRef(
+          { appId: left.backendAppId, resourceRef: left.backendResourceRef },
+          { appId: right.backendAppId, resourceRef: right.backendResourceRef },
+        );
+        // One-directional lookup per pair suffices: if both rows were fetched, resolving
+        // the left row's link finds the pairing and unions both nodes.
+        for (const nativeId of left.nativeIds) {
+          if (nativeId === undefined) {
+            continue;
+          }
+          const link = await this.#links.findActiveByRecord(pairRef, {
+            appId: left.backendAppId,
+            nativeId,
+          });
+          if (link === undefined) {
+            continue;
+          }
+          const edge = edgeOf(link, left.backendAppId, nativeId);
+          if (edge !== undefined) {
+            edges.push(edge);
+          }
+        }
+      }
+    }
+    return buildLinkGroups(contributors, edges);
+  }
+}
+
+/** Turn a resolved link into the edge between the queried side and the record's other side. */
+function edgeOf(link: RecordLink, appId: string, nativeId: string): LinkEdge | undefined {
+  if (link.appAId === appId && link.appANativeId === nativeId) {
+    return { a: { appId, nativeId }, b: { appId: link.appBId, nativeId: link.appBNativeId } };
+  }
+  if (link.appBId === appId && link.appBNativeId === nativeId) {
+    return { a: { appId, nativeId }, b: { appId: link.appAId, nativeId: link.appANativeId } };
+  }
+  return undefined;
+}

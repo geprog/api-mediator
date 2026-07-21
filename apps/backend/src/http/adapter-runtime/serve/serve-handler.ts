@@ -43,6 +43,27 @@ import {
 } from "./request-mapping.js";
 import { mapBackendResponseToConsumer } from "./response-mapping.js";
 import type { ServeContext, ServeContextLoader } from "./serve-context.js";
+import {
+  aggregateCollectionUnion,
+  type CollectionUnionContext,
+  type UnionDedupPlan,
+} from "./union-aggregate.js";
+import {
+  confirmedNativeIdFieldPath,
+  deriveUnionPagination,
+  deriveUnionRecordsPath,
+} from "./union-binding.js";
+import {
+  DEFAULT_UNION_ROW_CEILING,
+  RestUnionCollectionReader,
+  type UnionCollectionReader,
+} from "./union-fetch.js";
+import type { UnionLinkContributor, UnionLinkResolver } from "./union-links.js";
+import {
+  resolvePostMergeFilters,
+  resolvePostMergePage,
+  resolvePostMergeSort,
+} from "./union-request.js";
 
 /** The consumer-shape response of an upstream binding, fed into a chained dependent (TE-3). */
 interface ChainSource {
@@ -86,10 +107,41 @@ export interface AdapterServeHandlerDeps {
   readonly loader: ServeContextLoader;
   readonly backendCaller: BackendCaller;
   readonly logger: ServeLogger;
+  /**
+   * AG-5 — the bounded paged union collection reader. Defaults to a
+   * {@link RestUnionCollectionReader} over the shared {@link BackendCaller} (the same
+   * governed/credentialed TE-2 path), so a union page competes for the one per-app ceiling.
+   */
+  readonly unionCollectionReader?: UnionCollectionReader;
+  /**
+   * AG-3.3 — resolves per-row link-group keys from `RecordLink`s for **record-link** dedup.
+   * Required only when a served union endpoint configures that mode; a union served without
+   * one under record-link dedup fails loud (a composition-root wiring gap).
+   */
+  readonly unionLinkResolver?: UnionLinkResolver;
+  /** AG-5.1 — the config-defined per-request row ceiling; default {@link DEFAULT_UNION_ROW_CEILING}. */
+  readonly unionRowCeiling?: number;
 }
 
+/** A union contributor's fetch outcome: a per-binding envelope, or a whole-request fail-loud. */
+type UnionContributorOutcome =
+  | { readonly kind: "result"; readonly result: BindingResult }
+  | {
+      readonly kind: "fail-loud";
+      readonly failure: BindingFailure;
+      /** Present when the fail-loud is the AG-5 row ceiling — its own telemetry signal (AG-5.5). */
+      readonly ceiling?: { readonly backendAppId: string };
+    };
+
 export class AdapterServeHandler implements ServeHandler {
-  public constructor(private readonly deps: AdapterServeHandlerDeps) {}
+  private readonly unionReader: UnionCollectionReader;
+  private readonly unionRowCeiling: number;
+
+  public constructor(private readonly deps: AdapterServeHandlerDeps) {
+    this.unionReader =
+      deps.unionCollectionReader ?? new RestUnionCollectionReader(deps.backendCaller);
+    this.unionRowCeiling = deps.unionRowCeiling ?? DEFAULT_UNION_ROW_CEILING;
+  }
 
   public async serve(input: ServeInput): Promise<ServeOutcome> {
     const context = await this.deps.loader.load(input);
@@ -130,11 +182,18 @@ export class AdapterServeHandler implements ServeHandler {
     }
     const plan = planResult.plan;
 
-    // TE-1..TE-5 — one envelope per binding, executed grouped by order with chaining.
-    const results = await this.executePlan(plan, context, consumerOperation, input.request);
-
-    // AG-1 / AG-2 — aggregate per the endpoint's strategy.
-    const aggregate = this.aggregate(plan, results, context, consumerOperation);
+    // AG-1/AG-2/AG-3 — execute + aggregate per the endpoint's strategy. `collection-union`
+    // (AG-3/4/5) runs its own bounded paged fetch + merge/dedup/filter/sort/paginate path;
+    // `single`/`fanout-merge` run the per-binding executor + their aggregators.
+    const aggregate =
+      plan.aggregationStrategy === "collection-union"
+        ? await this.serveCollectionUnion(plan, context, consumerOperation, input)
+        : this.aggregate(
+            plan,
+            await this.executePlan(plan, context, consumerOperation, input.request),
+            context,
+            consumerOperation,
+          );
     if (aggregate.kind === "failure") {
       return { kind: "failed", cause: bindingFailureCause(aggregate.failure) };
     }
@@ -208,6 +267,249 @@ export class AdapterServeHandler implements ServeHandler {
       }
     }
     return { bindingInfo, requiredConsumerResponseFieldNames };
+  }
+
+  /**
+   * **AG-3/AG-4/AG-5 — serve a `collection-union` endpoint.** Each contributor's collection
+   * is fetched through the bounded paged reader (AG-5), its rows mapped to consumer shape
+   * with per-row backend-native id provenance (TE-4), then merged / deduped / post-merge
+   * filtered / sorted / paginated by the pure aggregator. A row-ceiling breach or a
+   * mediator-side defect fails the whole request **loud** (never a truncated union); a live
+   * backend failure is a **droppable** contributor (AG-3.2, non-strict), named out of band.
+   */
+  private async serveCollectionUnion(
+    plan: ResolutionPlan,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    input: ServeInput,
+  ): Promise<AggregateOutcome> {
+    const results: BindingResult[] = plan.eliminated.map((eliminated) => ({
+      kind: "not-called",
+      bindingId: eliminated.bindingId,
+      role: eliminated.role,
+      executionOrder: eliminated.executionOrder,
+      cause: eliminated.cause,
+    }));
+
+    // All contributors run in parallel (a union never chains); each holds a slot on the
+    // shared per-app governor via the reader's TE-2 caller.
+    const planned = plan.groups.flatMap((group) => group.bindings);
+    const fetched = await Promise.all(
+      planned.map((binding) =>
+        this.fetchUnionContributor(binding, context, consumerOperation, input.request),
+      ),
+    );
+    for (const outcome of fetched) {
+      if (outcome.kind === "fail-loud") {
+        if (outcome.ceiling !== undefined) {
+          // AG-5.5 — the ceiling firing is its OWN telemetry signal, not folded into the
+          // generic upstream-error path, so an operator sees the endpoint outgrew its config.
+          this.deps.logger.warn(
+            {
+              endpointId: input.endpoint.id,
+              signal: "union-row-ceiling-exceeded",
+              backendAppId: outcome.ceiling.backendAppId,
+              rowCeiling: this.unionRowCeiling,
+              cause: "upstream-error",
+            },
+            "adapter serve: union row ceiling exceeded (AG-5)",
+          );
+        }
+        return { kind: "failure", failure: outcome.failure };
+      }
+      results.push(outcome.result);
+    }
+
+    const dedup = await this.resolveUnionDedup(input.endpoint, context, results);
+    if (!dedup.ok) {
+      return { kind: "failure", failure: dedup.failure };
+    }
+
+    const unionContext: CollectionUnionContext = {
+      backendAppIdByBinding: new Map(
+        context.bindings.map((loaded) => [loaded.binding.id, loaded.binding.backendAppId]),
+      ),
+      dedup: dedup.plan,
+      postMergeFilters: resolvePostMergeFilters(input.endpoint, input.request),
+      sort: resolvePostMergeSort(input.endpoint, input.request),
+      pagination: resolvePostMergePage(input.endpoint, input.request),
+    };
+    return aggregateCollectionUnion(plan, results, unionContext);
+  }
+
+  /**
+   * Fetch one union contributor (AG-5) and map its rows to consumer shape (TE-4). A live
+   * upstream failure becomes a droppable failure envelope; a ceiling breach or a
+   * mediator-side defect is a whole-request fail-loud.
+   */
+  private async fetchUnionContributor(
+    planned: PlannedBinding,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    request: AdapterRequest,
+  ): Promise<UnionContributorOutcome> {
+    const loaded = context.bindings.find((entry) => entry.binding.id === planned.bindingId);
+    if (loaded === undefined) {
+      return this.unionFailLoud(
+        planned.bindingId,
+        "binding context missing for a union contributor",
+      );
+    }
+    if (
+      loaded.backendOperation === undefined ||
+      loaded.backendBaseUrl === undefined ||
+      loaded.backendResourceBinding === undefined
+    ) {
+      return this.unionFailLoud(
+        planned.bindingId,
+        "backend operation, base URL, or ResourceBinding is unresolvable for the union contributor",
+      );
+    }
+
+    // TE-1 — consumer request → backend request (pushed-down filters, AG-4.1). No chaining.
+    const mapped = mapRequestToBackend({
+      mappingId: loaded.mappingId,
+      consumerOperation,
+      backendOperation: loaded.backendOperation,
+      parameterMappings: loaded.parameterMappings,
+      requestPhaseFieldMappings: loaded.requestPhaseFieldMappings,
+      request,
+    });
+    if (!mapped.ok) {
+      return this.unionFailLoud(planned.bindingId, mapped.detail);
+    }
+
+    const nativeIdFieldPath = confirmedNativeIdFieldPath(loaded.backendResourceBinding.nativeIdRef);
+    const pagination = deriveUnionPagination(
+      loaded.backendResourceBinding.paginationRef,
+      loaded.backendOperation,
+    );
+    if (pagination === "unresolved") {
+      // CO-3.7 blocks composing a paged read with an unconfirmed paginationRef; loud backstop.
+      return this.unionFailLoud(
+        planned.bindingId,
+        "backend paginationRef is present but unconfirmed (union not composable)",
+      );
+    }
+    const recordsPath = deriveUnionRecordsPath(loaded.backendOperation, nativeIdFieldPath);
+
+    const read = await this.unionReader.read({
+      backendAppId: loaded.binding.backendAppId,
+      baseUrl: loaded.backendBaseUrl,
+      operation: loaded.backendOperation,
+      baseRequest: mapped.request,
+      pagination,
+      recordsPath,
+      nativeIdFieldPath,
+      rowCeiling: this.unionRowCeiling,
+      ...(loaded.backendLimits !== undefined ? { limits: loaded.backendLimits } : {}),
+    });
+
+    if (!read.ok) {
+      if (read.kind === "upstream-error") {
+        // AG-3.2 — a live backend failure is a droppable contributor (dropped when non-strict).
+        return {
+          kind: "result",
+          result: this.failureEnvelope(planned, {
+            cause: "upstream-error",
+            backendAppId: loaded.binding.backendAppId,
+            detail: read.detail,
+          }),
+        };
+      }
+      if (read.kind === "ceiling-exceeded") {
+        // AG-5.2 — never truncate: the whole request fails, naming the backend + ceiling.
+        return {
+          kind: "fail-loud",
+          failure: {
+            cause: "upstream-error",
+            backendAppId: loaded.binding.backendAppId,
+            detail: read.detail,
+          },
+          ceiling: { backendAppId: loaded.binding.backendAppId },
+        };
+      }
+      return this.unionFailLoud(planned.bindingId, read.detail);
+    }
+
+    // TE-4 — map each raw row to consumer shape; native-id provenance stays index-aligned.
+    const shaped = mapBackendResponseToConsumer(loaded.responsePhaseFieldMappings, [...read.rows]);
+    if (!shaped.ok) {
+      return this.unionFailLoud(planned.bindingId, shaped.detail);
+    }
+    return {
+      kind: "result",
+      result: {
+        kind: "success",
+        bindingId: planned.bindingId,
+        role: planned.role,
+        executionOrder: planned.executionOrder,
+        backendAppId: loaded.binding.backendAppId,
+        payload: shaped.payload,
+        rowProvenance: read.nativeIds,
+      },
+    };
+  }
+
+  /**
+   * AG-3.3/3.4/3.5 — the executed dedup plan for a union. `record-link` resolves per-row
+   * link-group keys from `RecordLink`s over the successful contributors' native-id provenance
+   * (the union only READS links). `dedup-key` binds a consumer field; `none` is the honest
+   * default. A record-link union served without a link resolver wired is a fail-loud defect.
+   */
+  private async resolveUnionDedup(
+    endpoint: AdapterEndpoint,
+    context: ServeContext,
+    results: readonly BindingResult[],
+  ): Promise<
+    | { readonly ok: true; readonly plan: UnionDedupPlan }
+    | { readonly ok: false; readonly failure: BindingFailure }
+  > {
+    const dedup = endpoint.postMergeDedup ?? { mode: "none" };
+    if (dedup.mode === "dedup-key") {
+      return {
+        ok: true,
+        plan: { mode: "dedup-key", fieldName: topLevelConsumerFieldName(dedup.dedupKeyFieldPath) },
+      };
+    }
+    if (dedup.mode !== "record-link") {
+      return { ok: true, plan: { mode: "none" } };
+    }
+    const resolver = this.deps.unionLinkResolver;
+    if (resolver === undefined) {
+      const detail = "record-link dedup requires a union link resolver, which is not wired";
+      this.deps.logger.warn(
+        { endpointId: endpoint.id, cause: "mediator-transform-error", detail },
+        "adapter serve: mediator-side union defect",
+      );
+      return { ok: false, failure: { cause: "mediator-transform-error", detail } };
+    }
+    const loadedById = new Map(context.bindings.map((loaded) => [loaded.binding.id, loaded]));
+    const contributors: UnionLinkContributor[] = [];
+    for (const result of results) {
+      if (result.kind !== "success") {
+        continue;
+      }
+      const loaded = loadedById.get(result.bindingId);
+      contributors.push({
+        bindingId: result.bindingId,
+        backendAppId: result.backendAppId,
+        backendResourceRef:
+          loaded === undefined ? "" : backendResourceRefOf(loaded.binding.backendOperationId),
+        nativeIds: result.rowProvenance ?? [],
+      });
+    }
+    const linkGroupKeyByBinding = await resolver.resolve(contributors);
+    return { ok: true, plan: { mode: "record-link", linkGroupKeyByBinding } };
+  }
+
+  /** A whole-request fail-loud (mediator-side union defect), logged as its own signal (AG-7.4). */
+  private unionFailLoud(bindingId: string, detail: string): UnionContributorOutcome {
+    this.deps.logger.warn(
+      { bindingId, cause: "mediator-transform-error", detail },
+      "adapter serve: mediator-side union defect",
+    );
+    return { kind: "fail-loud", failure: { cause: "mediator-transform-error", detail } };
   }
 
   /**
@@ -467,6 +769,12 @@ export class AdapterServeHandler implements ServeHandler {
     );
     return { kind: "failed", cause: "mediator-transform-error" };
   }
+}
+
+/** The backend resource ref (leading segment) of a `resourceRef/operationId` operation ref. */
+function backendResourceRefOf(operationRef: string): string {
+  const slash = operationRef.indexOf("/");
+  return slash <= 0 ? operationRef : operationRef.slice(0, slash);
 }
 
 /** The union of consumer parameter names any active binding maps (for RP-2.4). */
