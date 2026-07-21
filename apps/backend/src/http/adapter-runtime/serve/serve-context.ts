@@ -196,6 +196,20 @@ export class DbServeContextLoader implements ServeContextLoader {
         )
       : undefined;
 
+    // Request-phase `FieldMapping`s populate the backend REQUEST BODY, which only a
+    // create/update carries. They are scoped by resource pair (above), not by operation,
+    // so a read — or a delete — served through a pair that ALSO has a co-located
+    // create/update would otherwise inherit that write's body field mappings and 500 in
+    // `buildBackendBody` (a `rename` throws `missing-input` on the absent source). A read
+    // builds no body, and a delete addresses its target by parameter with no field-mapped
+    // body, so both must contribute NO request-phase field mappings. Gate on the approved
+    // `OperationMapping.action`: only `create`/`update` carry a request body. An unresolved
+    // OperationMapping (`action === undefined`, a config defect) is treated as a non-write
+    // read by the serve handler, so an empty list is correct and consistent there too. The
+    // response phase is unaffected — every action maps its response back to the consumer.
+    const action = operationMapping?.action;
+    const carriesRequestBody = action === "create" || action === "update";
+
     return {
       binding,
       mappingId: binding.approvedMappingId,
@@ -206,12 +220,10 @@ export class DbServeContextLoader implements ServeContextLoader {
       backendStatus: backendApp?.status ?? "disabled",
       parameterMappings: scopedParameterMappings,
       // The write signal (WR-1/WR-2), read from the pair's approved OperationMapping.
-      ...(operationMapping !== undefined ? { action: operationMapping.action } : {}),
-      requestPhaseFieldMappings: fieldMappingsForResourcePair(
-        requestPhase,
-        consumerResourceRef,
-        backendResourceRef,
-      ),
+      ...(action !== undefined ? { action } : {}),
+      requestPhaseFieldMappings: carriesRequestBody
+        ? fieldMappingsForResourcePair(requestPhase, consumerResourceRef, backendResourceRef)
+        : [],
       responsePhaseFieldMappings: fieldMappingsForResourcePair(
         responsePhase,
         backendResourceRef,

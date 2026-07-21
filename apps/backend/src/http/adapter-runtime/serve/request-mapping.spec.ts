@@ -209,6 +209,147 @@ describe("mapRequestToBackend — TE-1", () => {
     expect(result.request.body).toEqual({ task_title: "Buy milk" });
   });
 
+  const consumerCreate: IrOperation = {
+    operationId: "createTodo",
+    method: "post",
+    path: "/todos",
+    parameters: [],
+  };
+  const backendCreate: IrOperation = {
+    operationId: "createTask",
+    method: "post",
+    path: "/tasks",
+    parameters: [],
+  };
+  function requestBodyRename(id: string, source: string, target: string): FieldMapping {
+    return {
+      id,
+      mappingId: "mapping-1",
+      sourcePath: source,
+      targetPath: target,
+      transform: "rename",
+      phase: "request",
+    };
+  }
+
+  it("Bug 1: a read gated to no request-phase field mappings builds NO backend body (bodyless)", () => {
+    // serve-context empties `requestPhaseFieldMappings` for a read (Bug 1), so a bodyless
+    // GET never inherits a co-located write's body mappings. At the request-mapping boundary
+    // the gate's output (`[]`) then yields NO body — `undefined`, a truly bodyless call.
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerGetTodo,
+      backendOperation: backendGetTask,
+      parameterMappings: [paramMapping()],
+      requestPhaseFieldMappings: [],
+      request: request({ pathParameters: { todoId: "42" } }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.body).toBeUndefined();
+  });
+
+  it("Bug 1: why the gate is needed — a co-located write's body mappings on a bodyless read build {} not undefined", () => {
+    // An UNGATED read would inherit the write's request-phase field mappings. Post-Bug-2
+    // that no longer 500s (missing-input is tolerated), but it would still produce an EMPTY
+    // OBJECT `{}` — not a bodyless call — which is wrong for a GET. This pins exactly why
+    // Bug 1 must empty the list at the serve-context seam so the read stays `undefined`.
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerGetTodo,
+      backendOperation: backendGetTask,
+      parameterMappings: [paramMapping()],
+      requestPhaseFieldMappings: [requestBodyRename("fm-write", "todos/title", "tasks/task_title")],
+      request: request({ pathParameters: { todoId: "42" } }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.body).toEqual({});
+  });
+
+  it("Bug 2: a write omitting an OPTIONAL consumer body field omits that backend field and succeeds", () => {
+    // The consumer supplies only `title`; `description` is an OPTIONAL field it omitted
+    // (RP-2 already rejected a missing REQUIRED field before this point). The absent source
+    // must OMIT its backend field, never fail the whole build.
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerCreate,
+      backendOperation: backendCreate,
+      parameterMappings: [],
+      requestPhaseFieldMappings: [
+        requestBodyRename("fm-title", "todos/title", "tasks/task_title"),
+        requestBodyRename("fm-desc", "todos/description", "tasks/task_description"),
+      ],
+      request: request({ body: { title: "Buy milk" } }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.body).toEqual({ task_title: "Buy milk" });
+  });
+
+  it("Bug 2 regression: a full-body write still maps EVERY field", () => {
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerCreate,
+      backendOperation: backendCreate,
+      parameterMappings: [],
+      requestPhaseFieldMappings: [
+        requestBodyRename("fm-title", "todos/title", "tasks/task_title"),
+        requestBodyRename("fm-desc", "todos/description", "tasks/task_description"),
+      ],
+      request: request({ body: { title: "Buy milk", description: "2 percent" } }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.body).toEqual({
+      task_title: "Buy milk",
+      task_description: "2 percent",
+    });
+  });
+
+  it("Bug 2: a write whose consumer body omits every optional field builds an empty object (still not a 500)", () => {
+    // Every mapped source is absent (all optional) — the build succeeds with an empty
+    // object body (a real create with no fields), distinct from a bodyless `undefined`.
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerCreate,
+      backendOperation: backendCreate,
+      parameterMappings: [],
+      requestPhaseFieldMappings: [requestBodyRename("fm-title", "todos/title", "tasks/task_title")],
+      request: request({ body: {} }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.request.body).toEqual({});
+  });
+
+  it("Bug 2 regression: a genuine (non-missing-input) transform error still fails loud as a transform error", () => {
+    // The source IS present (not missing-input) but is not coercible to a number →
+    // impossible-coercion, which must refuse the whole build, never a partial body.
+    const result = mapRequestToBackend({
+      mappingId: "mapping-1",
+      consumerOperation: consumerCreate,
+      backendOperation: backendCreate,
+      parameterMappings: [],
+      requestPhaseFieldMappings: [
+        {
+          id: "fm-coerce",
+          mappingId: "mapping-1",
+          sourcePath: "todos/count",
+          targetPath: "tasks/count",
+          transform: "coerce",
+          transformConfig: { coerce: { to: "number", from: "string" } },
+          phase: "request",
+        },
+      ],
+      request: request({ body: { count: "not-a-number" } }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.detail).toContain("request body transform");
+    expect(result.detail).toContain("impossible-coercion");
+  });
+
   it("TE-3: a chained parameter fills a required backend parameter no ParameterMapping covers", () => {
     const backendGetWorkspace: IrOperation = {
       operationId: "getWorkspace",
