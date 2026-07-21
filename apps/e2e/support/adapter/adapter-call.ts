@@ -51,7 +51,7 @@ export async function callAdapter(
     ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
   });
   const text = await response.text();
-  let json: unknown = undefined;
+  let json: unknown;
   try {
     json = text === "" ? undefined : JSON.parse(text);
   } catch {
