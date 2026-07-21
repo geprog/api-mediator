@@ -108,6 +108,18 @@ function toPreviewResponse(preview: CompositionPreview): ComposeAdapterEndpointP
     validation: preview.validation.ok
       ? { ok: true }
       : { ok: false, issues: preview.validation.reasons.map(formatCompositionRejection) },
+    // CO-3 — present only for a proposed collection-union (derive-then-confirm).
+    ...(preview.union !== undefined
+      ? {
+          union: {
+            unserviceableFilters: [...preview.union.unserviceableFilters],
+            unconfiguredSortParameters: [...preview.union.unconfiguredSortParameters],
+            unconfiguredPaginationParameters: [...preview.union.unconfiguredPaginationParameters],
+            dedupConflictPrecedence: preview.union.dedupConflictPrecedence,
+            largeCollectionRisk: { ...preview.union.largeCollectionRisk },
+          },
+        }
+      : {}),
   };
 }
 
@@ -124,6 +136,17 @@ function toCompositionSubmission(body: ComposeAdapterEndpointRequest): Compositi
     ...(body.cacheTtl !== undefined ? { cacheTtl: body.cacheTtl } : {}),
     ...(body.acknowledgedIgnoredInputs !== undefined
       ? { acknowledgedIgnoredInputs: body.acknowledgedIgnoredInputs }
+      : {}),
+    // CO-3 union config — presence-preserving (exactOptionalPropertyTypes), so the
+    // validator/persistence see "not supplied" rather than a null on a non-union submit.
+    ...(body.postMergeDedup !== undefined ? { postMergeDedup: body.postMergeDedup } : {}),
+    ...(body.postMergeFilters !== undefined ? { postMergeFilters: body.postMergeFilters } : {}),
+    ...(body.postMergeSorts !== undefined ? { postMergeSorts: body.postMergeSorts } : {}),
+    ...(body.postMergePagination !== undefined
+      ? { postMergePagination: body.postMergePagination }
+      : {}),
+    ...(body.confirmPostMergePagination !== undefined
+      ? { confirmPostMergePagination: body.confirmPostMergePagination }
       : {}),
     bindings: body.bindings.map((binding) => ({
       bindingId: binding.bindingId,

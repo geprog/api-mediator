@@ -105,6 +105,8 @@ function messageFor(cause: CauseToken): string {
       return "The request is invalid against the consumer operation's own contract.";
     case "unmapped-consumer-input":
       return "The request uses a consumer input that has no configured mapping here.";
+    case "union-parameter-unconfigured":
+      return "The request uses a union filter, sort, or pagination parameter with no configured post-merge semantics here.";
   }
 }
 

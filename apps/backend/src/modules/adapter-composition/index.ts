@@ -37,3 +37,16 @@ export {
   type SupplementLoadBearingAnalysis,
   type UnmappedConsumerInput,
 } from "./analysis.js";
+export {
+  classifyUnionParameter,
+  deriveUnionCompositionAnalysis,
+  formatUnionRejection,
+  paginationConventionParamRefs,
+  pushdownEligibleParamNames,
+  validateUnionConfiguration,
+  type UnionBindingFacts,
+  type UnionCompositionAnalysis,
+  type UnionParameterKind,
+  type UnionRejectionReason,
+  type UnionSubmission,
+} from "./union.js";

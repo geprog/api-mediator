@@ -9,6 +9,10 @@ import type { JsonValue } from "@mediator/transform";
 
 import { topLevelConsumerFieldName } from "../../../modules/adapter-composition/analysis.js";
 import {
+  paginationConventionParamRefs,
+  pushdownEligibleParamNames,
+} from "../../../modules/adapter-composition/union.js";
+import {
   aggregateFanoutMerge,
   aggregateSingle,
   type AggregateOutcome,
@@ -16,7 +20,11 @@ import {
   type FanoutMergeContext,
 } from "./aggregator.js";
 import type { BackendCaller } from "./backend-call.js";
-import { validateConsumerResponse, validateInboundRequest } from "./ir-validation.js";
+import {
+  validateConsumerResponse,
+  validateInboundRequest,
+  type UnionServeConfig,
+} from "./ir-validation.js";
 import { planResolution, type BindingHealthInput } from "./planner.js";
 import {
   bindingFailureCause,
@@ -30,6 +38,7 @@ import {
 import {
   mapRequestToBackend,
   mappedConsumerParamNames,
+  paramRefBareName,
   resolveChainInputs,
 } from "./request-mapping.js";
 import { mapBackendResponseToConsumer } from "./response-mapping.js";
@@ -99,6 +108,9 @@ export class AdapterServeHandler implements ServeHandler {
       input.request,
       collectMappedConsumerParams(context),
       collectAcknowledgedIgnoredParams(input.endpoint),
+      // RP-2.2/2.3 — union serving semantics, only for a collection-union (undefined
+      // otherwise, so a non-union endpoint's inbound validation is unchanged).
+      buildUnionServeConfig(input.endpoint, context),
     );
     if (!inbound.ok) {
       return { kind: "rejected", reason: inbound.reason, detail: inbound.detail };
@@ -483,4 +495,66 @@ function collectAcknowledgedIgnoredParams(endpoint: AdapterEndpoint): ReadonlySe
     }
   }
   return names;
+}
+
+/**
+ * The RP-2.2/2.3 union serving config, built from the endpoint's persisted `postMerge*`
+ * state plus the active bindings' `ParameterMapping`s — or `undefined` for any non-union
+ * endpoint (so its inbound validation is entirely unaffected, RP-2 criterion). A filter is
+ * pushdown-eligible only when mapped in **every** contributing binding; pagination is only
+ * honored when its convention is **confirmed** (an unconfirmed convention counts as
+ * unconfigured — derive-then-confirm, so requests using it still reject).
+ */
+function buildUnionServeConfig(
+  endpoint: AdapterEndpoint,
+  context: ServeContext,
+): UnionServeConfig | undefined {
+  if (endpoint.aggregationStrategy !== "collection-union") {
+    return undefined;
+  }
+
+  // Pushdown-eligible = the consumer params (a ParameterMapping's source) mapped in EVERY
+  // active binding. Reuses the SHARED `pushdownEligibleParamNames` (unit-tested in
+  // `union.spec.ts`) over the same bare-name basis the composition side uses, so RP-2 and
+  // CO-3 can never drift on what "pushed down" means (the CO-3↔RP-2 contract).
+  const pushdownEligible = pushdownEligibleParamNames(
+    context.bindings.map((loaded) => ({
+      pushdownConsumerParamNames: new Set(
+        loaded.parameterMappings.map((param) => paramRefBareName(param.sourceParamRef)),
+      ),
+    })),
+  );
+
+  const postMergeFilterParamNames = new Set(
+    (endpoint.postMergeFilters ?? []).map((filter) => paramRefBareName(filter.consumerParamRef)),
+  );
+
+  // A pagination convention is honored only once confirmed (both stamps set).
+  const pagination = endpoint.postMergePagination;
+  const paginationConfirmed =
+    pagination !== undefined && pagination.confirmedBy !== null && pagination.confirmedAt !== null;
+  const paginationParamNames = new Set(
+    paginationConfirmed
+      ? paginationConventionParamRefs(pagination.convention).map(paramRefBareName)
+      : [],
+  );
+
+  const sortConfigByParam = new Map<string, { fixed: boolean; values: Set<string> }>();
+  for (const sort of endpoint.postMergeSorts ?? []) {
+    const name = paramRefBareName(sort.consumerParamRef);
+    const entry = sortConfigByParam.get(name) ?? { fixed: false, values: new Set<string>() };
+    if (sort.paramValue === undefined) {
+      entry.fixed = true;
+    } else {
+      entry.values.add(sort.paramValue);
+    }
+    sortConfigByParam.set(name, entry);
+  }
+
+  return {
+    pushdownEligibleParamNames: pushdownEligible,
+    postMergeFilterParamNames,
+    paginationParamNames,
+    sortConfigByParam,
+  };
 }

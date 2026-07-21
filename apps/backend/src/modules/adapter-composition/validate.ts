@@ -5,6 +5,11 @@ import {
   type AggregationStrategy,
   type ChainInput,
   type EndpointStrictness,
+  type IrParameter,
+  type PostMergeDedup,
+  type PostMergeFilter,
+  type PostMergePaginationConventionValue,
+  type PostMergeSort,
 } from "@mediator/domain";
 
 import {
@@ -14,6 +19,12 @@ import {
   type ConsumerInputUniverse,
 } from "./analysis.js";
 import { bareParamName } from "./refs.js";
+import {
+  formatUnionRejection,
+  validateUnionConfiguration,
+  type UnionBindingFacts,
+  type UnionRejectionReason,
+} from "./union.js";
 
 /**
  * **CO-2 — the composition decision and its validation.** The pure validator that
@@ -91,6 +102,26 @@ export interface CompositionSubmission {
    * (every unmapped input then rejects at request validation — the fail-loud default).
    */
   readonly acknowledgedIgnoredInputs?: readonly AcknowledgedIgnoredInput[];
+  // ── CO-3 collection-union configuration (union endpoints only) ──────────────
+  /**
+   * How duplicate rows are collapsed (CO-3.1). A **union must supply one** (none /
+   * record-link / dedup-key) — "none" is an explicit choice, never an unset default;
+   * present on any other strategy is rejected. `record-link` needs every contributing
+   * resource's confirmed `nativeIdRef` (CO-3.2).
+   */
+  readonly postMergeDedup?: PostMergeDedup;
+  /** Post-merge semantics per non-pushdown filter parameter (CO-3.4). */
+  readonly postMergeFilters?: readonly PostMergeFilter[];
+  /** Post-merge semantics per accepted sort parameter value (CO-3.5); presence = configured. */
+  readonly postMergeSorts?: readonly PostMergeSort[];
+  /**
+   * The pagination convention the composer proposes (CO-3.5) — its confirmation is
+   * stamped server-side (never client-supplied) via {@link confirmPostMergePagination},
+   * so an unconfirmed convention stays distinguishable from a confirmed one (RP-2).
+   */
+  readonly postMergePagination?: PostMergePaginationConventionValue;
+  /** Whether the composer **confirms** the proposed pagination convention (CO-3.5 derive-then-confirm). */
+  readonly confirmPostMergePagination?: boolean;
 }
 
 /**
@@ -151,6 +182,17 @@ export interface CompositionValidationInput {
    * would fail RP-2 at request time anyway).
    */
   readonly consumerInputs: ConsumerInputUniverse;
+  /**
+   * CO-3 — the per-contributing-resource union facts (each backend resource's confirmed
+   * `nativeIdRef`/`collectionReadRef`/`paginationRef` state and pushed-down consumer
+   * params). Only consulted for a `collection-union`; absent/empty for every other
+   * strategy (and for the pure CO-2 unit cases that do not exercise unions).
+   */
+  readonly unionBindingFacts?: readonly UnionBindingFacts[];
+  /** CO-3 — the consumer operation's declared parameters (union ref validity + classification). */
+  readonly consumerParameters?: readonly IrParameter[];
+  /** CO-3 — the consumer operation's response-schema field names (bare, top-level). */
+  readonly consumerResponseFieldNames?: ReadonlySet<string>;
 }
 
 // ── Named rejection reasons + result ─────────────────────────────────────────
@@ -236,7 +278,10 @@ export type CompositionRejectionReason =
       readonly code: "acknowledged-input-not-unmapped";
       readonly inputKind: "parameter" | "body-field";
       readonly inputName: string;
-    };
+    }
+  // CO-3 — the union-specific rejections (dedup / composability / post-merge ref
+  // validity), folded in so a union that fails any of them activates nothing (CO-2.8).
+  | UnionRejectionReason;
 
 /** The validation outcome: `ok`, or `rejected` with the full list of named reasons. */
 export type CompositionValidation =
@@ -521,6 +566,32 @@ export function validateComposition(input: CompositionValidationInput): Composit
     }
   }
 
+  // CO-3 — union composition (dedup / composability preconditions / post-merge ref
+  // validity), folded into the one atomic decision. On a non-union strategy this only
+  // rejects stray union config; the union-specific rules apply solely to a real union.
+  reasons.push(
+    ...validateUnionConfiguration({
+      strategy,
+      submission: {
+        ...(submission.postMergeDedup !== undefined
+          ? { postMergeDedup: submission.postMergeDedup }
+          : {}),
+        ...(submission.postMergeFilters !== undefined
+          ? { postMergeFilters: submission.postMergeFilters }
+          : {}),
+        ...(submission.postMergeSorts !== undefined
+          ? { postMergeSorts: submission.postMergeSorts }
+          : {}),
+        ...(submission.postMergePagination !== undefined
+          ? { postMergePagination: submission.postMergePagination }
+          : {}),
+      },
+      unionBindingFacts: input.unionBindingFacts ?? [],
+      consumerParameters: input.consumerParameters ?? [],
+      consumerResponseFieldNames: input.consumerResponseFieldNames ?? new Set<string>(),
+    }),
+  );
+
   return reasons.length === 0 ? { ok: true } : { ok: false, reasons };
 }
 
@@ -699,5 +770,9 @@ export function formatCompositionRejection(reason: CompositionRejectionReason): 
         path: "acknowledgedIgnoredInputs",
         message: `Acknowledged-ignored consumer ${reason.inputKind === "parameter" ? "parameter" : "body field"} '${reason.inputName}' is not an unmapped consumer input of this endpoint — only an input that reaches no backend can be acknowledged.`,
       };
+    default:
+      // CO-3 union reasons — `reason` is narrowed to `UnionRejectionReason` here (every
+      // CO-2 code is handled above), so this delegation is exhaustive and type-safe.
+      return formatUnionRejection(reason);
   }
 }
