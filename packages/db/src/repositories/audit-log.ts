@@ -1,5 +1,5 @@
 import type { AuditLogEntry, AuditLogStatus, AuditLogType } from "@mediator/domain";
-import { and, desc, eq, gte, inArray, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAuditLogRow, toAuditLogInsert } from "../mappers/audit-log.js";
@@ -24,7 +24,39 @@ export interface SyncEventQuery {
   readonly recordLinkId?: string;
   readonly sourceNativeId?: string;
   readonly status?: AuditLogStatus;
+  /**
+   * SS-16 — narrow to rows whose `details` begins with this literal prefix, pushed
+   * down to SQL as a `LIKE '<prefix>%'` with the prefix's own `%`/`_`/`\` escaped, so
+   * the prefix is matched **literally** and a metacharacter inside it can never widen
+   * the match (the same defensive discipline as
+   * `ScopeCorrespondenceRepository.listByResourceSide`).
+   *
+   * Load-bearing rather than cosmetic: the `details`-encoded families (the
+   * ambiguous-container park, the ambiguous-identity match) are read through a
+   * **bounded** scan, so without pushing their discriminator into the query the bound
+   * is spent on *every* `failure` row of every family and the family being read gets
+   * crowded out of its own response. Filtering at the database makes `limit` a bound on
+   * the rows the caller actually wants.
+   */
+  readonly detailsPrefix?: string;
+  /**
+   * SS-16 — skip this many matching rows before collecting `limit` (most-recent-first,
+   * so the paging order is stable). Lets a caller walk a bounded window in pages when a
+   * page can contain entries it must discard, without ever widening `limit` itself into
+   * an unbounded read.
+   */
+  readonly offset?: number;
   readonly limit: number;
+}
+
+/**
+ * Escape a literal string for use as a SQL `LIKE` **prefix** pattern: `\` first (so it
+ * cannot double-escape a metacharacter escaped after it), then `%` and `_`. Paired with
+ * the explicit `ESCAPE '\'` clause below, which Postgres defaults to but which is stated
+ * so the pattern's meaning does not depend on a server default.
+ */
+function escapeLikePrefix(prefix: string): string {
+  return prefix.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 /**
@@ -86,12 +118,20 @@ export class AuditLogRepository {
     if (query.status !== undefined) {
       conditions.push(eq(auditLog.status, query.status));
     }
+    if (query.detailsPrefix !== undefined) {
+      // SS-16 — push the `details` family discriminator down to SQL so `limit` bounds
+      // the rows the caller wants rather than every `failure` row of every family.
+      conditions.push(
+        sql`${auditLog.details} like ${`${escapeLikePrefix(query.detailsPrefix)}%`} escape '\\'`,
+      );
+    }
     const rows = await this.db
       .select()
       .from(auditLog)
       .where(and(...conditions))
       .orderBy(desc(auditLog.timestamp))
-      .limit(query.limit);
+      .limit(query.limit)
+      .offset(query.offset ?? 0);
     return rows.map(mapAuditLogRow);
   }
 

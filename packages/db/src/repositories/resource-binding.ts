@@ -180,6 +180,76 @@ export class ResourceBindingRepository {
     return this.getById(id);
   }
 
+  /**
+   * **SS-16 — persist a re-validated binding whole.** Overwrites the parent's
+   * `scope_path_bindings` / `source_scope_ref` `jsonb` columns and **replaces** the
+   * binding's `resource_binding_ref` child rows to match the given binding exactly.
+   * Unlike {@link update} (a per-ref operator confirm/correct), re-validation may return
+   * *several* refs to unconfirmed, add a scope path binding, or drop a `sourceScopeRef`
+   * confirmation in one pass, so it writes the binding as a unit rather than diffing.
+   *
+   * The `id`/`apiSpecId`/`resourceRef` are the row's identity and are **not** changed —
+   * this re-validates an existing binding in place, so every `SyncRule` referencing it
+   * keeps referencing it. A ref that is **absent** on the given binding has its child row
+   * deleted (an absent ref must not linger as a stale row); a present ref is upserted with
+   * its current value + confirmation, so a ref returned to unconfirmed is stored
+   * `confirmed_by = NULL`. Caller-supplied re-validation output is trusted to already be
+   * schema-valid (it comes from `revalidateResourceBinding`). Returns the stored binding,
+   * or `undefined` when no binding with `binding.id` exists.
+   *
+   * NB: not a full re-derivation entry point — it takes a fully-formed binding and stores
+   * it. It never invents a binding id, so it cannot be used to create one.
+   */
+  public async replaceRevalidated(binding: ResourceBinding): Promise<ResourceBinding | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(resourceBinding)
+      .where(eq(resourceBinding.id, binding.id));
+    if (row === undefined) {
+      return undefined;
+    }
+    // The parent's jsonb columns (scope path bindings + source scope ref) as a unit.
+    const insert = toResourceBindingInsert({ ...binding, id: row.id });
+    await this.db
+      .update(resourceBinding)
+      .set({
+        scopePathBindings: insert.scopePathBindings,
+        sourceScopeRef: insert.sourceScopeRef,
+      })
+      .where(eq(resourceBinding.id, row.id));
+
+    // Replace the normalized ref child rows: delete the ones no longer present, upsert the
+    // rest. A delete-all-then-insert would momentarily drop present rows; the explicit
+    // present-set keeps the write minimal and the absent-set exact.
+    const desired = toResourceBindingRefInserts({ ...binding, id: row.id });
+    const presentKinds = new Set(desired.map((refInsert) => refInsert.refKind));
+    const toDelete = RESOURCE_BINDING_REF_KINDS.filter((kind) => !presentKinds.has(kind));
+    if (toDelete.length > 0) {
+      await this.db
+        .delete(resourceBindingRef)
+        .where(
+          and(
+            eq(resourceBindingRef.resourceBindingId, row.id),
+            inArray(resourceBindingRef.refKind, toDelete),
+          ),
+        );
+    }
+    for (const refInsert of desired) {
+      await this.db
+        .insert(resourceBindingRef)
+        .values(refInsert)
+        .onConflictDoUpdate({
+          target: [resourceBindingRef.resourceBindingId, resourceBindingRef.refKind],
+          set: {
+            value: refInsert.value,
+            confirmedBy: refInsert.confirmedBy,
+            confirmedAt: refInsert.confirmedAt,
+          },
+        });
+    }
+    return this.getById(row.id);
+  }
+
   /** Read a specific set of bindings by id, preserving the given id order. */
   private async readByIds(ids: string[]): Promise<ResourceBinding[]> {
     if (ids.length === 0) {

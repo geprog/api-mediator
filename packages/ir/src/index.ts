@@ -19,3 +19,23 @@ export { buildIr } from "./build-ir.js";
 export { deriveResourceBindings } from "./resource-bindings.js";
 export { computeContentHash } from "./content-hash.js";
 export { IrError, SpecParseError, UnsupportedSpecVersionError } from "./errors.js";
+export {
+  pausesDependentRules,
+  revalidateResourceBinding,
+  revalidateScopeCorrespondence,
+} from "./scope-revalidation.js";
+export type {
+  BindingRefInvalidatedFinding,
+  ContainerResourceRemovedFinding,
+  ResourceBindingRevalidation,
+  RevalidatableRefName,
+  ScopeCorrespondenceRevalidation,
+  ScopeCorrespondenceRevalidationInput,
+  ScopeCorrespondenceSide,
+  ScopeIdentityKeyInvalidatedFinding,
+  ScopeLinkArchiveScope,
+  ScopeParameterAddedFinding,
+  ScopeParameterRemovedFinding,
+  ScopeRevalidationFinding,
+  SourceScopeRefInvalidatedFinding,
+} from "./scope-revalidation.js";
