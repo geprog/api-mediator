@@ -8,7 +8,10 @@ import type { AdapterEndpoint, ChainInput, IrOperation } from "@mediator/domain"
 import type { JsonValue } from "@mediator/transform";
 
 import { topLevelConsumerFieldName } from "../../../modules/adapter-composition/analysis.js";
-import { paginationConventionParamRefs } from "../../../modules/adapter-composition/union.js";
+import {
+  paginationConventionParamRefs,
+  pushdownEligibleParamNames,
+} from "../../../modules/adapter-composition/union.js";
 import {
   aggregateFanoutMerge,
   aggregateSingle,
@@ -511,23 +514,16 @@ function buildUnionServeConfig(
   }
 
   // Pushdown-eligible = the consumer params (a ParameterMapping's source) mapped in EVERY
-  // active binding — the intersection. Same bare-name basis the composition side uses.
-  const perBinding = context.bindings.map(
-    (loaded) =>
-      new Set(loaded.parameterMappings.map((param) => paramRefBareName(param.sourceParamRef))),
+  // active binding. Reuses the SHARED `pushdownEligibleParamNames` (unit-tested in
+  // `union.spec.ts`) over the same bare-name basis the composition side uses, so RP-2 and
+  // CO-3 can never drift on what "pushed down" means (the CO-3↔RP-2 contract).
+  const pushdownEligible = pushdownEligibleParamNames(
+    context.bindings.map((loaded) => ({
+      pushdownConsumerParamNames: new Set(
+        loaded.parameterMappings.map((param) => paramRefBareName(param.sourceParamRef)),
+      ),
+    })),
   );
-  const [firstBinding, ...restBindings] = perBinding;
-  const pushdownEligibleParamNames = new Set(firstBinding ?? []);
-  for (const names of restBindings) {
-    for (const name of pushdownEligibleParamNames) {
-      if (!names.has(name)) {
-        pushdownEligibleParamNames.delete(name);
-      }
-    }
-  }
-  if (perBinding.length === 0) {
-    pushdownEligibleParamNames.clear();
-  }
 
   const postMergeFilterParamNames = new Set(
     (endpoint.postMergeFilters ?? []).map((filter) => paramRefBareName(filter.consumerParamRef)),
@@ -556,7 +552,7 @@ function buildUnionServeConfig(
   }
 
   return {
-    pushdownEligibleParamNames,
+    pushdownEligibleParamNames: pushdownEligible,
     postMergeFilterParamNames,
     paginationParamNames,
     sortConfigByParam,

@@ -45,14 +45,23 @@ import { bareParamName } from "./refs.js";
  * - `filter` — everything else: pushed down when mapped in *every* contributing
  *   binding, otherwise honorable only via a `postMergeFilters` entry.
  *
- * The classification is a **conservative** name heuristic, exactly the derive-then-confirm
- * spirit of `ResourceBinding.paginationRef`: only unambiguous, well-known
- * pagination/sort spellings are pulled out of the default `filter` bucket, because the
- * authoritative honoring is always the composer's `postMerge*` config — a filter mis-read
- * as a sort is still served the moment the composer configures it (the runtime consults
- * the config before the heuristic). It is deliberately shared by composition (this module)
- * and request validation (`serve/ir-validation.ts`) so the two never disagree on what a
- * parameter *is* — the recurring "two sides classify differently" bug class.
+ * The classification is a **conservative** name heuristic: only unambiguous, well-known
+ * pagination/sort spellings are pulled out of the default `filter` bucket. It is
+ * deliberately shared by composition (this module) and request validation
+ * (`serve/ir-validation.ts`) so the two never disagree on what a parameter *is* — the
+ * recurring "two sides classify differently" bug class.
+ *
+ * Classification is **name-first, not config-first**: at request time
+ * {@link import("../../http/adapter-runtime/serve/ir-validation.js")} reads a parameter's
+ * kind from its name and then consults **only that kind's** config bucket. So a filter
+ * whose *name* reads as sort/pagination (`order`, `size`, `count`, `start`, …) can **not**
+ * be served as a filter even with a `postMergeFilters` entry or pushdown — the name shadows
+ * it. To stop that from activating a green-but-dead composition, `validateUnionConfiguration`
+ * runs this **same** classifier over every configured/pushed-down filter and rejects a
+ * name-shadowed one at compose time (`union-filter-name-shadowed-by-sort-or-pagination`), so
+ * the operator is told up front rather than discovering every request 400s. (The deeper fix
+ * — a persisted per-parameter kind so a filter legitimately named like a sort can be served
+ * — is a concept decision beyond CO-3.)
  *
  * Applies to **query** parameters only; a path parameter is a record/scope input and a
  * header/cookie is not a list parameter, so the caller restricts classification to
@@ -194,7 +203,16 @@ export type UnionRejectionReason =
       readonly consumerParamRef: string;
       readonly consumerFieldPath: string;
     }
-  | { readonly code: "union-pagination-unknown-param"; readonly consumerParamRef: string };
+  | { readonly code: "union-pagination-unknown-param"; readonly consumerParamRef: string }
+  | {
+      // A filter the composer intends to serve (via a postMergeFilters entry or pushdown in
+      // every binding) but whose NAME the shared classifier reads as sort/pagination: RP-2
+      // classifies name-first and would reject every request using it, so it is refused at
+      // compose time instead of activating green-but-dead.
+      readonly code: "union-filter-name-shadowed-by-sort-or-pagination";
+      readonly consumerParamName: string;
+      readonly shadowingKind: "sort" | "pagination";
+    };
 
 // ── the validator ────────────────────────────────────────────────────────────
 
@@ -317,6 +335,36 @@ export function validateUnionConfiguration(input: UnionValidationInput): UnionRe
     }
   }
 
+  // Name-shadow cross-check: a filter the composer intends to serve — via a
+  // `postMergeFilters` entry or by being pushed down in every binding — but whose NAME the
+  // shared classifier reads as sort/pagination is dead on arrival at RP-2 (which classifies
+  // name-first and then consults only that kind's bucket). Refuse it at compose time — the
+  // same classifier both sides use — so the operator is told up front rather than
+  // activating green and 400-ing every request that uses it.
+  const paramByName = new Map(
+    input.consumerParameters
+      .filter((parameter) => parameter.location === "query")
+      .map((parameter) => [parameter.name, parameter] as const),
+  );
+  const filterIntentNames = new Set<string>(pushdownEligibleParamNames(input.unionBindingFacts));
+  for (const filter of submission.postMergeFilters ?? []) {
+    filterIntentNames.add(bareParamName(filter.consumerParamRef));
+  }
+  for (const name of filterIntentNames) {
+    const parameter = paramByName.get(name);
+    if (parameter === undefined) {
+      continue; // not a declared query parameter — its own unknown-param reason covers it
+    }
+    const kind = classifyUnionParameter(parameter);
+    if (kind !== "filter") {
+      reasons.push({
+        code: "union-filter-name-shadowed-by-sort-or-pagination",
+        consumerParamName: name,
+        shadowingKind: kind,
+      });
+    }
+  }
+
   return reasons;
 }
 
@@ -422,11 +470,17 @@ export function deriveUnionCompositionAnalysis(
   };
 }
 
-/** The consumer parameter names pushed down over the union — those mapped in **every** binding. */
+/**
+ * The consumer parameter names pushed down over the union — those mapped in **every**
+ * binding (the intersection of the per-binding pushdown sets). Structurally typed on just
+ * `pushdownConsumerParamNames`, so the request-time serve handler can reuse the exact same
+ * intersection over its `LoadedBinding`s rather than re-implementing it — the two sides
+ * must never drift on what "pushed down" means (the CO-3↔RP-2 contract).
+ */
 export function pushdownEligibleParamNames(
-  unionBindingFacts: readonly UnionBindingFacts[],
+  bindings: readonly Pick<UnionBindingFacts, "pushdownConsumerParamNames">[],
 ): ReadonlySet<string> {
-  const [first, ...rest] = unionBindingFacts;
+  const [first, ...rest] = bindings;
   if (first === undefined) {
     return new Set<string>();
   }
@@ -504,6 +558,11 @@ export function formatUnionRejection(reason: UnionRejectionReason): {
       return {
         path: "postMergePagination",
         message: `postMergePagination references consumer parameter '${reason.consumerParamRef}', which the consumer operation does not declare.`,
+      };
+    case "union-filter-name-shadowed-by-sort-or-pagination":
+      return {
+        path: "postMergeFilters",
+        message: `Consumer parameter '${reason.consumerParamName}' is configured/pushed-down as a filter, but its name is classified as a ${reason.shadowingKind} parameter — request validation would reject every request using it. Rename it, or serve it via ${reason.shadowingKind === "sort" ? "postMergeSorts" : "postMergePagination"} instead.`,
       };
   }
 }

@@ -416,3 +416,71 @@ describe("pushdownEligibleParamNames / paginationConventionParamRefs", () => {
     expect(paginationConventionParamRefs(undefined)).toEqual([]);
   });
 });
+
+describe("validateUnionConfiguration — name-shadow cross-check (configured-but-dead trap)", () => {
+  it("rejects a postMergeFilters entry for a param whose name classifies as sort", () => {
+    const reasons = validateUnionConfiguration({
+      strategy: "collection-union",
+      submission: {
+        postMergeDedup: NONE_DEDUP,
+        postMergeFilters: [
+          {
+            consumerParamRef: "todos/list#order",
+            consumerFieldPath: "todos/state",
+            operator: "eq",
+          },
+        ],
+      },
+      unionBindingFacts: [facts({ bindingId: "b1" })],
+      consumerParameters: [queryParam("order")],
+      consumerResponseFieldNames: new Set(["state"]),
+    });
+    const shadow = reasons.filter(
+      (reason) => reason.code === "union-filter-name-shadowed-by-sort-or-pagination",
+    );
+    expect(shadow).toHaveLength(1);
+    expect(shadow[0]).toMatchObject({ consumerParamName: "order", shadowingKind: "sort" });
+  });
+
+  it("rejects a pushdown-eligible filter whose name classifies as pagination", () => {
+    const reasons = validateUnionConfiguration({
+      strategy: "collection-union",
+      submission: { postMergeDedup: NONE_DEDUP },
+      unionBindingFacts: [
+        facts({ bindingId: "b1", pushdownConsumerParamNames: new Set(["size"]) }),
+        facts({ bindingId: "b2", pushdownConsumerParamNames: new Set(["size"]) }),
+      ],
+      consumerParameters: [queryParam("size")],
+      consumerResponseFieldNames: new Set(),
+    });
+    const shadow = reasons.filter(
+      (reason) => reason.code === "union-filter-name-shadowed-by-sort-or-pagination",
+    );
+    expect(shadow).toHaveLength(1);
+    expect(shadow[0]).toMatchObject({ consumerParamName: "size", shadowingKind: "pagination" });
+  });
+
+  it("accepts a normally-named filter (status) — not shadowed", () => {
+    const reasons = validateUnionConfiguration({
+      strategy: "collection-union",
+      submission: {
+        postMergeDedup: NONE_DEDUP,
+        postMergeFilters: [
+          {
+            consumerParamRef: "todos/list#status",
+            consumerFieldPath: "todos/state",
+            operator: "eq",
+          },
+        ],
+      },
+      unionBindingFacts: [
+        facts({ bindingId: "b1", pushdownConsumerParamNames: new Set(["status"]) }),
+      ],
+      consumerParameters: [queryParam("status")],
+      consumerResponseFieldNames: new Set(["state"]),
+    });
+    expect(
+      reasons.some((reason) => reason.code === "union-filter-name-shadowed-by-sort-or-pagination"),
+    ).toBe(false);
+  });
+});
