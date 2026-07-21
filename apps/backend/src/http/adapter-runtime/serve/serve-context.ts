@@ -19,6 +19,8 @@ import type {
   RegisteredAppStatus,
 } from "@mediator/domain";
 
+import { fieldMappingsForResourcePair } from "../../../modules/sync/resolution.js";
+
 /**
  * Loads the persisted per-request serving state the {@link AdapterServeHandler} needs:
  * the consumer operation's IR (for RP-2 / AG-7 validation), and per active binding —
@@ -145,6 +147,22 @@ export class DbServeContextLoader implements ServeContextLoader {
     const backendSpecs = await new ApiSpecRepository(this.db).listByAppId(binding.backendAppId);
     const backendOperation = resolveOperation(backendSpecs, "PROVIDER", binding.backendOperationId);
 
+    // A consumer-provider `ApprovedMapping` covering ≥2 resource pairs (the normal shape
+    // of mapping two real specs) yields one `AdapterEndpoint` per consumer operation, each
+    // sharing this same `approvedMappingId`. Its `FieldMapping`s must therefore be scoped
+    // to THIS binding's resource pair — filtering by `phase` alone would apply a foreign
+    // pair's field mappings, either failing the transform (a foreign source is absent →
+    // `missing-input`) or, under a field-name collision, writing silently-wrong consumer
+    // data. This mirrors the Sync Engine's `fieldMappingsForResourcePair` scoping exactly
+    // (and the `operationMappingId` scoping already applied to `parameterMappings` above).
+    // The pair is (consumer resource, backend resource); request phase runs consumer →
+    // backend, response phase backend → consumer, so the source/target refs swap by phase.
+    // An unparseable ref fails closed (empty string over-filters rather than leaks).
+    const consumerResourceRef = parseOperationRef(consumerOperationId)?.resourceRef ?? "";
+    const backendResourceRef = parseOperationRef(binding.backendOperationId)?.resourceRef ?? "";
+    const requestPhase = fieldMappings.filter((field) => field.phase === "request");
+    const responsePhase = fieldMappings.filter((field) => field.phase === "response");
+
     return {
       binding,
       mappingId: binding.approvedMappingId,
@@ -154,8 +172,16 @@ export class DbServeContextLoader implements ServeContextLoader {
       mappingStatus: mapping?.status ?? "archived",
       backendStatus: backendApp?.status ?? "disabled",
       parameterMappings: scopedParameterMappings,
-      requestPhaseFieldMappings: fieldMappings.filter((field) => field.phase === "request"),
-      responsePhaseFieldMappings: fieldMappings.filter((field) => field.phase === "response"),
+      requestPhaseFieldMappings: fieldMappingsForResourcePair(
+        requestPhase,
+        consumerResourceRef,
+        backendResourceRef,
+      ),
+      responsePhaseFieldMappings: fieldMappingsForResourcePair(
+        responsePhase,
+        backendResourceRef,
+        consumerResourceRef,
+      ),
       backendBaseUrl: backendApp?.baseUrl,
       ...(backendApp?.outboundLimits !== undefined
         ? { backendLimits: backendApp.outboundLimits }

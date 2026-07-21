@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from "node:crypto";
 
 import { loadConfig, type AppConfig } from "@mediator/config";
+import { CredentialStore, DbCredentialPersistence, EnvKeyProvider } from "@mediator/credentials";
 import {
   adapterBinding,
   adapterEndpoint,
@@ -10,6 +11,7 @@ import {
   auditLog,
   closeDb,
   createDb,
+  credential,
   fieldMapping,
   operationMapping,
   parameterMapping,
@@ -81,21 +83,41 @@ function integrationConfig(): AppConfig {
   });
 }
 
-/** A recording stub for the backend `GET /tasks/{taskId}`. */
+/** A recorded inbound call to the stub backend (method, url, and the auth header it saw). */
+interface StubRequest {
+  readonly method: string;
+  readonly url: string;
+  readonly authorization: string | undefined;
+}
+
+/** A recording stub for the backend `GET /tasks/{taskId}` and `GET /workspaces/{workspaceId}`. */
 class StubBackend {
   #server: Server | undefined;
-  public readonly requests: { readonly method: string; readonly url: string }[] = [];
+  public readonly requests: StubRequest[] = [];
 
   public async start(): Promise<void> {
     this.#server = createServer((request: IncomingMessage, response: ServerResponse) => {
-      this.requests.push({ method: request.method ?? "", url: request.url ?? "" });
-      const match = /^\/tasks\/([^/?]+)/.exec(request.url ?? "");
-      if (request.method === "GET" && match) {
-        const taskId = decodeURIComponent(match[1] ?? "");
+      const authorization = request.headers.authorization;
+      this.requests.push({
+        method: request.method ?? "",
+        url: request.url ?? "",
+        authorization: typeof authorization === "string" ? authorization : undefined,
+      });
+      const url = request.url ?? "";
+      const taskMatch = /^\/tasks\/([^/?]+)/.exec(url);
+      if (request.method === "GET" && taskMatch) {
+        const taskId = decodeURIComponent(taskMatch[1] ?? "");
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
           JSON.stringify({ task_id: taskId, task_title: `Task ${taskId}`, completed: true }),
         );
+        return;
+      }
+      const workspaceMatch = /^\/workspaces\/([^/?]+)/.exec(url);
+      if (request.method === "GET" && workspaceMatch) {
+        const workspaceId = decodeURIComponent(workspaceMatch[1] ?? "");
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ws_id: workspaceId, ws_name: `Workspace ${workspaceId}` }));
         return;
       }
       response.writeHead(404, { "content-type": "application/json" });
@@ -185,7 +207,50 @@ const backendIr: Ir = [
     schemas: [],
     crossResourceRefs: [],
   },
+  {
+    resourceRef: "workspaces",
+    name: "workspaces",
+    operations: [
+      {
+        operationId: "getWorkspace",
+        method: "get",
+        path: "/workspaces/{workspaceId}",
+        parameters: [{ name: "workspaceId", location: "path", required: true, type: "string" }],
+      },
+    ],
+    schemas: [],
+    crossResourceRefs: [],
+  },
 ];
+
+/** A consumer spec covering TWO resource pairs under one mapping (the multi-pair leak case). */
+const multiPairConsumerIr: Ir = [
+  ...consumerIr,
+  {
+    resourceRef: "projects",
+    name: "projects",
+    operations: [
+      {
+        operationId: "getProject",
+        method: "get",
+        path: "/projects/{projectId}",
+        parameters: [{ name: "projectId", location: "path", required: true, type: "string" }],
+        responseSchema: {
+          name: "Project",
+          fields: [
+            { name: "id", type: "string", required: true },
+            { name: "name", type: "string", required: true },
+          ],
+        },
+      },
+    ],
+    schemas: [],
+    crossResourceRefs: [],
+  },
+];
+
+/** A fixed seeded backend credential (never a live secret) for the credential-apply test. */
+const CRED_TOKEN = "stub-secret-token-1234567890";
 
 function specRow(appId: string, role: ApiSpec["role"], ir: Ir): ApiSpec {
   return {
@@ -227,16 +292,25 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
   let brokenAppId: string;
   let happyMappingId: string;
   let backendAppId: string;
+  let backendSpecId: string;
+  let availabilityAppId: string;
+  let leakAppId: string;
+  let credConsumerAppId: string;
 
   const adapterApp = (): FastifyInstance => adapter.app;
 
+  interface BackendRef {
+    readonly appId: string;
+    readonly specId: string;
+  }
+
+  /** Seed a single-pair `todos↔tasks` consumer scenario against the given backend. */
   async function seedConsumer(
     name: string,
     includeDone: boolean,
-  ): Promise<{
-    appId: string;
-    mappingId: string;
-  }> {
+    backend?: BackendRef,
+  ): Promise<{ appId: string; mappingId: string }> {
+    const target = backend ?? { appId: backendAppId, specId: backendSpecId };
     const consumerApp = activeApp(name);
     createdAppIds.push(consumerApp.id);
     await new RegisteredAppRepository(db).create(consumerApp);
@@ -250,9 +324,9 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     await db.insert(approvedMapping).values({
       id: mappingId,
       sourceSpecId: consumerSpec.id,
-      targetSpecId: backendSpecId,
+      targetSpecId: target.specId,
       sourceAppId: consumerApp.id,
-      targetAppId: backendAppId,
+      targetAppId: target.appId,
       variant: "consumer-provider",
       approvedBy: "integration-test",
       approvedAt: new Date(),
@@ -295,7 +369,7 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     const binding: AdapterBinding = {
       id: randomUUID(),
       adapterEndpointId: endpoint.id,
-      backendAppId,
+      backendAppId: target.appId,
       backendOperationId: "tasks/getTask",
       approvedMappingId: mappingId,
       role: "primary",
@@ -306,7 +380,113 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     return { appId: consumerApp.id, mappingId };
   }
 
-  let backendSpecId: string;
+  /**
+   * Seed a consumer whose **single** `ApprovedMapping` covers TWO resource pairs
+   * (`todos↔tasks` and `projects↔workspaces`), both endpoints auto-activated — the
+   * shape that a mapping between two real specs produces. `pair2` chooses whether the
+   * second pair's field mappings source fields that are **absent** in the served
+   * `tasks` response (the availability shape — a foreign source is `missing-input`)
+   * or **present** (the leak shape — a foreign field is written into the `todos` body).
+   */
+  async function seedMultiPair(
+    name: string,
+    pair2: "absent-source" | "present-source",
+  ): Promise<string> {
+    const consumerApp = activeApp(name);
+    createdAppIds.push(consumerApp.id);
+    await new RegisteredAppRepository(db).create(consumerApp);
+    const consumerSpec = specRow(consumerApp.id, "CONSUMER", multiPairConsumerIr);
+    createdSpecIds.push(consumerSpec.id);
+    await new ApiSpecRepository(db).create(consumerSpec);
+
+    const mappingId = randomUUID();
+    createdMappingIds.push(mappingId);
+    await db.insert(approvedMapping).values({
+      id: mappingId,
+      sourceSpecId: consumerSpec.id,
+      targetSpecId: backendSpecId,
+      sourceAppId: consumerApp.id,
+      targetAppId: backendAppId,
+      variant: "consumer-provider",
+      approvedBy: "integration-test",
+      approvedAt: new Date(),
+      status: "active",
+    });
+
+    const todosOp: OperationMapping = {
+      id: randomUUID(),
+      mappingId,
+      sourceOperationRef: "todos/getTodo",
+      targetOperationRef: "tasks/getTask",
+      action: "read",
+    };
+    const projectsOp: OperationMapping = {
+      id: randomUUID(),
+      mappingId,
+      sourceOperationRef: "projects/getProject",
+      targetOperationRef: "workspaces/getWorkspace",
+      action: "read",
+    };
+    const parameterMappings: ParameterMapping[] = [
+      {
+        id: randomUUID(),
+        operationMappingId: todosOp.id,
+        sourceParamRef: "todos/getTodo#todoId",
+        targetParamRef: "tasks/getTask#taskId",
+      },
+      {
+        id: randomUUID(),
+        operationMappingId: projectsOp.id,
+        sourceParamRef: "projects/getProject#projectId",
+        targetParamRef: "workspaces/getWorkspace#workspaceId",
+      },
+    ];
+    // Pair 2's response mappings — foreign to the todos serve. Under `absent-source`
+    // they read `ws_*` (absent in the tasks response → missing-input); under
+    // `present-source` they read `completed` (present) and write an extra `leaked` field.
+    const pair2Fields: FieldMapping[] =
+      pair2 === "absent-source"
+        ? [
+            renameField(mappingId, "workspaces/ws_id", "projects/id"),
+            renameField(mappingId, "workspaces/ws_name", "projects/name"),
+          ]
+        : [renameField(mappingId, "workspaces/completed", "projects/leaked")];
+    await new MappingArtifactsRepository(db).replaceChildren(mappingId, {
+      fieldMappings: [
+        renameField(mappingId, "tasks/task_id", "todos/id"),
+        renameField(mappingId, "tasks/task_title", "todos/title"),
+        renameField(mappingId, "tasks/completed", "todos/done"),
+        ...pair2Fields,
+      ],
+      operationMappings: [todosOp, projectsOp],
+      parameterMappings,
+    });
+
+    const artifacts = new DownstreamArtifactRepository(db);
+    for (const pair of [
+      { op: "todos/getTodo", backendOp: "tasks/getTask" },
+      { op: "projects/getProject", backendOp: "workspaces/getWorkspace" },
+    ]) {
+      const endpoint: AdapterEndpoint = {
+        id: randomUUID(),
+        consumerAppId: consumerApp.id,
+        consumerOperationId: pair.op,
+        status: "active",
+        aggregationStrategy: "single",
+      };
+      await artifacts.ensureAdapterEndpoint(endpoint);
+      await artifacts.insertAdapterBindingIfAbsent({
+        id: randomUUID(),
+        adapterEndpointId: endpoint.id,
+        backendAppId,
+        backendOperationId: pair.backendOp,
+        approvedMappingId: mappingId,
+        role: "primary",
+        status: "active",
+      });
+    }
+    return consumerApp.id;
+  }
 
   beforeAll(async () => {
     config = integrationConfig();
@@ -328,6 +508,28 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     happyMappingId = happy.mappingId;
     const broken = await seedConsumer("todo-widget-broken", false);
     brokenAppId = broken.appId;
+
+    // Multi-pair consumers: one mapping over two resource pairs, both endpoints active.
+    availabilityAppId = await seedMultiPair("todo-widget-multipair-availability", "absent-source");
+    leakAppId = await seedMultiPair("todo-widget-multipair-leak", "present-source");
+
+    // A separate backend WITH a seeded credential, exercising the credential-apply path.
+    const credBackendApp = activeApp("vikunja-backend-cred", stub.url());
+    createdAppIds.push(credBackendApp.id);
+    await new RegisteredAppRepository(db).create(credBackendApp);
+    const credBackendSpec = specRow(credBackendApp.id, "PROVIDER", backendIr);
+    createdSpecIds.push(credBackendSpec.id);
+    await new ApiSpecRepository(db).create(credBackendSpec);
+    await new CredentialStore(
+      new DbCredentialPersistence(db),
+      new EnvKeyProvider(config.credentials.masterKey),
+      { info: () => undefined },
+    ).store(credBackendApp.id, { secret: { type: "apiKey", apiKey: CRED_TOKEN } });
+    const credConsumer = await seedConsumer("todo-widget-cred", true, {
+      appId: credBackendApp.id,
+      specId: credBackendSpec.id,
+    });
+    credConsumerAppId = credConsumer.appId;
 
     const serveHandler = buildAdapterServeHandler({
       db,
@@ -379,6 +581,7 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
         createdAppIds.map((id) => `consumer-app:${id}`),
       ),
     );
+    await db.delete(credential).where(inArray(credential.appId, createdAppIds));
     await db.delete(apiSpec).where(inArray(apiSpec.id, createdSpecIds));
     await db.delete(registeredApp).where(inArray(registeredApp.id, createdAppIds));
     await closeDb(db);
@@ -399,7 +602,7 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     expect(response.json()).toEqual({ id: "42", title: "Task 42", done: true });
     // The real backend was called at its mapped path.
     expect(stub.requests.length).toBe(before + 1);
-    expect(stub.requests.at(-1)).toEqual({ method: "GET", url: "/tasks/42" });
+    expect(stub.requests.at(-1)).toMatchObject({ method: "GET", url: "/tasks/42" });
   });
 
   it("a stale mapping fails as mapping-stale with NO backend call", async () => {
@@ -455,5 +658,43 @@ describe("adapter serve pipeline integration (requires Postgres)", () => {
     // The raw backend representation never leaks into the failure body.
     expect(response.body).not.toContain("task_title");
     expect(response.body).not.toContain("Task 42");
+  });
+
+  it("multi-pair (availability): serving one pair applies ONLY that pair's field mappings", async () => {
+    // Without the resource-pair scoping, the foreign pair's `workspaces/ws_*` mappings
+    // read fields absent in the tasks response → missing-input → the endpoint could
+    // NEVER serve. With scoping, only the todos↔tasks pair applies.
+    const response = await get(availabilityAppId);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ id: "42", title: "Task 42", done: true });
+  });
+
+  it("multi-pair (wrong data): a foreign pair's field never leaks into the served body", async () => {
+    // Without scoping, the foreign `workspaces/completed → projects/leaked` mapping reads
+    // the (present) `completed` field and writes an extra `leaked` key that AG-7 permits —
+    // silently-wrong consumer data. With scoping, the body is exactly the todos pair.
+    const response = await get(leakAppId);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ id: "42", title: "Task 42", done: true });
+    expect(response.body).not.toContain("leaked");
+  });
+
+  it("credential-apply: the seeded token reaches the backend request and never leaks", async () => {
+    const response = await get(credConsumerAppId);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ id: "42", title: "Task 42", done: true });
+    // (a) the credential-derived Authorization header was applied inside withCredential.
+    const last = stub.requests.at(-1);
+    expect(last?.url).toBe("/tasks/42");
+    expect(last?.authorization).toBe(`Bearer ${CRED_TOKEN}`);
+    // (b) the token never appears in the consumer response body...
+    expect(response.body).not.toContain(CRED_TOKEN);
+    // ...nor in any audit row for this request (metadata only — RT-5.5).
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.actor, `consumer-app:${credConsumerAppId}`));
+    expect(rows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(rows)).not.toContain(CRED_TOKEN);
   });
 });
