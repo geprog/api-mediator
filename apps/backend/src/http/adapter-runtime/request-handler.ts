@@ -208,6 +208,10 @@ export class AdapterRequestHandler {
               body: served.body,
               degraded: served.degraded,
               contributingBackendAppIds: served.contributingBackendAppIds,
+              // AG-2.3 — carry the failed backend(s) out of band for the degraded header.
+              ...(served.degradedBackendAppIds !== undefined
+                ? { degradedBackendAppIds: served.degradedBackendAppIds }
+                : {}),
             };
           }
           if (served.kind === "rejected") {

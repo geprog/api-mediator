@@ -36,6 +36,7 @@ export {
   CAUSE_HEADER,
   DEGRADED_HEADER,
   CONTRIBUTING_BACKENDS_HEADER,
+  DEGRADED_BACKENDS_HEADER,
   renderHttpResponse,
   auditFieldsFor,
   causeTokenOf,

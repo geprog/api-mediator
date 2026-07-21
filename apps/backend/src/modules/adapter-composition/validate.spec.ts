@@ -285,6 +285,61 @@ describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
     });
     expect(result.ok).toBe(true);
   });
+
+  it("CO-2.3: rejects a chained dependent ordered STRICTLY BEFORE its upstream", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { executionOrder: 1 }),
+          submitted("b2", {
+            role: "supplement",
+            executionOrder: 0,
+            dependsOnBindingId: "b1",
+          }),
+        ],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(result.ok).toBe(false);
+    expect(codesOf(result)).toContain("chain-dependent-ordered-before-upstream");
+  });
+
+  it("CO-2.3: accepts a dependent ordered AFTER its upstream", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { executionOrder: 0 }),
+          submitted("b2", {
+            role: "supplement",
+            executionOrder: 1,
+            dependsOnBindingId: "b1",
+          }),
+        ],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(codesOf(result)).not.toContain("chain-dependent-ordered-before-upstream");
+  });
+
+  it("CO-2.3: accepts a dependent ordered EQUAL to its upstream (same group; runtime awaits it)", () => {
+    const result = validate({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { executionOrder: 2 }),
+          submitted("b2", {
+            role: "supplement",
+            executionOrder: 2,
+            dependsOnBindingId: "b1",
+          }),
+        ],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(codesOf(result)).not.toContain("chain-dependent-ordered-before-upstream");
+  });
 });
 
 describe("validateComposition — executionOrder under fanout-first-success (CO-2.4)", () => {

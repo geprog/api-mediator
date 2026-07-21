@@ -269,3 +269,309 @@ describe("AdapterServeHandler — the single-binding serve pipeline", () => {
     expect(caller.calls).toBe(0);
   });
 });
+
+// ── fanout-merge (AG-2) + chaining (TE-3) orchestration ──────────────────────
+
+/** The consumer operation aggregated from two backends; `plan` is OPTIONAL (degradable). */
+function consumerGetProfile(planRequired: boolean): IrOperation {
+  return {
+    operationId: "getProfile",
+    method: "get",
+    path: "/profiles/{userId}",
+    parameters: [param({ name: "userId", location: "path", required: true })],
+    responseSchema: {
+      name: "Profile",
+      fields: [
+        { name: "id", type: "string", required: true },
+        { name: "name", type: "string", required: true },
+        { name: "plan", type: "string", required: planRequired },
+      ],
+    },
+  };
+}
+
+const backendGetUser: IrOperation = {
+  operationId: "getUser",
+  method: "get",
+  path: "/users/{userId}",
+  parameters: [param({ name: "userId", location: "path", required: true })],
+};
+const backendGetEntitlement: IrOperation = {
+  operationId: "getEntitlement",
+  method: "get",
+  path: "/entitlements/{userId}",
+  parameters: [param({ name: "userId", location: "path", required: true })],
+};
+
+const userIdToUser: ParameterMapping = {
+  id: "pm-user",
+  operationMappingId: "om-user",
+  sourceParamRef: "profiles/getProfile#userId",
+  targetParamRef: "users/getUser#userId",
+};
+const userIdToEntitlement: ParameterMapping = {
+  id: "pm-ent",
+  operationMappingId: "om-ent",
+  sourceParamRef: "profiles/getProfile#userId",
+  targetParamRef: "entitlements/getEntitlement#userId",
+};
+
+/** Route backend calls + record order/inputs per backend app so orchestration is assertable. */
+class MultiBackendCaller implements BackendCaller {
+  public readonly order: string[] = [];
+  public readonly inputsByApp = new Map<string, BackendCallInput[]>();
+  public constructor(private readonly results: Map<string, BackendCallResult>) {}
+  public call(input: BackendCallInput): Promise<BackendCallResult> {
+    this.order.push(input.targetAppId);
+    const list = this.inputsByApp.get(input.targetAppId) ?? [];
+    list.push(input);
+    this.inputsByApp.set(input.targetAppId, list);
+    return Promise.resolve(
+      this.results.get(input.targetAppId) ?? {
+        ok: false,
+        kind: "upstream-error",
+        detail: `no stub for ${input.targetAppId}`,
+      },
+    );
+  }
+}
+
+function primaryBinding(): AdapterBinding {
+  return {
+    id: "p",
+    adapterEndpointId: "endpoint-1",
+    backendAppId: "crm",
+    backendOperationId: "users/getUser",
+    approvedMappingId: "mapping-1",
+    role: "primary",
+    status: "active",
+    executionOrder: 0,
+  };
+}
+function supplementBinding(chained: boolean): AdapterBinding {
+  return {
+    id: "s",
+    adapterEndpointId: "endpoint-1",
+    backendAppId: "billing",
+    backendOperationId: "entitlements/getEntitlement",
+    approvedMappingId: "mapping-1",
+    role: "supplement",
+    status: "active",
+    executionOrder: 1,
+    ...(chained
+      ? {
+          dependsOnBindingId: "p",
+          chainInputs: [
+            { upstreamFieldPath: "id", targetParamRef: "entitlements/getEntitlement#userId" },
+          ],
+        }
+      : {}),
+  };
+}
+
+function loadedPrimary(): LoadedBinding {
+  return {
+    binding: primaryBinding(),
+    mappingId: "mapping-1",
+    mappingStatus: "active",
+    backendStatus: "active",
+    parameterMappings: [userIdToUser],
+    requestPhaseFieldMappings: [],
+    responsePhaseFieldMappings: [
+      rename("fm-uid", "users/user_id", "profiles/id"),
+      rename("fm-uname", "users/user_name", "profiles/name"),
+    ],
+    backendBaseUrl: "http://crm.example",
+    backendOperation: backendGetUser,
+  };
+}
+function loadedSupplement(chained: boolean): LoadedBinding {
+  return {
+    binding: supplementBinding(chained),
+    mappingId: "mapping-1",
+    mappingStatus: "active",
+    backendStatus: "active",
+    // A chained supplement fills `userId` from the upstream response, not a ParameterMapping.
+    parameterMappings: chained ? [] : [userIdToEntitlement],
+    requestPhaseFieldMappings: [],
+    responsePhaseFieldMappings: [rename("fm-plan", "entitlements/tier", "profiles/plan")],
+    backendBaseUrl: "http://billing.example",
+    backendOperation: backendGetEntitlement,
+  };
+}
+
+function fanoutContext(planRequired: boolean, chained: boolean): ServeContext {
+  return {
+    consumerOperation: consumerGetProfile(planRequired),
+    bindings: [loadedPrimary(), loadedSupplement(chained)],
+  };
+}
+
+function fanoutEndpoint(strictness: "strict" | "degraded" = "degraded"): AdapterEndpoint {
+  return {
+    id: "endpoint-1",
+    consumerAppId: "consumer-app",
+    consumerOperationId: "profiles/getProfile",
+    status: "active",
+    aggregationStrategy: "fanout-merge",
+    strictness,
+  };
+}
+
+function fanoutInput(chained: boolean, strictness: "strict" | "degraded" = "degraded"): ServeInput {
+  return {
+    request: {
+      consumerAppId: "consumer-app",
+      operationKey: "profiles/getProfile",
+      pathParameters: { userId: "u-9" },
+      query: {},
+      headers: {},
+      body: undefined,
+    },
+    endpoint: fanoutEndpoint(strictness),
+    activeBindings: [primaryBinding(), supplementBinding(chained)],
+  };
+}
+
+const userOk: BackendCallResult = { ok: true, body: { user_id: "u-9", user_name: "Ada" } };
+const entitlementOk: BackendCallResult = { ok: true, body: { tier: "pro" } };
+
+function multiHandler(ctx: ServeContext, caller: MultiBackendCaller): AdapterServeHandler {
+  return new AdapterServeHandler({
+    loader: fakeLoader(ctx),
+    backendCaller: caller,
+    logger: new RecordingLogger(),
+  });
+}
+
+describe("AdapterServeHandler — fanout-merge (AG-2)", () => {
+  it("AG-2.1/2.6: assembles the primary base + supplement fields, both backends called", async () => {
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["crm", userOk],
+        ["billing", entitlementOk],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, false), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "u-9", name: "Ada", plan: "pro" },
+      degraded: false,
+      contributingBackendAppIds: ["crm", "billing"],
+    });
+    expect(caller.order.sort()).toEqual(["billing", "crm"]);
+  });
+
+  it("AG-2.3: a failed supplement whose field is OPTIONAL degrades — field omitted, backend named", async () => {
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", userOk],
+        ["billing", { ok: false, kind: "upstream-error", detail: "HTTP 503" }],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, false), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "u-9", name: "Ada" },
+      degraded: true,
+      contributingBackendAppIds: ["crm"],
+      degradedBackendAppIds: ["billing"],
+    });
+  });
+
+  it("AG-2.4: a failed supplement whose field is REQUIRED fails the whole request even non-strict", async () => {
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", userOk],
+        ["billing", { ok: false, kind: "upstream-error", detail: "HTTP 503" }],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(true, false), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "upstream-error" });
+  });
+
+  it("AG-2.5: strict mode fails the whole request on a supplement failure (optional field notwithstanding)", async () => {
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", userOk],
+        ["billing", { ok: false, kind: "upstream-error", detail: "HTTP 503" }],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, false), caller).serve(
+      fanoutInput(false, "strict"),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "upstream-error" });
+  });
+
+  it("AG-2.2: a failed primary fails the whole request (no degradation)", async () => {
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", { ok: false, kind: "upstream-error", detail: "HTTP 500" }],
+        ["billing", entitlementOk],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, false), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "upstream-error" });
+  });
+});
+
+describe("AdapterServeHandler — chained bindings (TE-3)", () => {
+  it("TE-3.1/3.2: the chained supplement is called with a param filled from the upstream consumer shape", async () => {
+    const caller = new MultiBackendCaller(
+      new Map([
+        ["crm", userOk],
+        ["billing", entitlementOk],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, true), caller).serve(fanoutInput(true));
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "u-9", name: "Ada", plan: "pro" },
+      degraded: false,
+      contributingBackendAppIds: ["crm", "billing"],
+    });
+    // TE-3.1 — the upstream (crm) was called before the dependent (billing).
+    expect(caller.order).toEqual(["crm", "billing"]);
+    // TE-3.2/3.3 — billing's userId was filled from the upstream's consumer-shape `id` (u-9),
+    // never a native backend field or the raw request.
+    const billing = caller.inputsByApp.get("billing")?.[0];
+    expect(billing?.mapped.pathParams).toEqual({ userId: "u-9" });
+  });
+
+  it("TE-3.4: a null upstream chain value fails the dependent (named), the upstream having SUCCEEDED", async () => {
+    // The upstream SUCCEEDS but its consumer-shape `id` is null (value-preserving rename),
+    // so the chain input is absent → the dependent is refused, never dispatched (TE-3.4).
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", { ok: true, body: { user_id: null, user_name: "Ada" } }],
+        ["billing", entitlementOk],
+      ]),
+    );
+    // `plan` is required here so the dependent's failure surfaces as a whole-request failure.
+    const outcome = await multiHandler(fanoutContext(true, true), caller).serve(fanoutInput(true));
+    expect(outcome).toEqual({ kind: "failed", cause: "mediator-transform-error" });
+    // The dependent backend was never called with a hole.
+    expect(caller.inputsByApp.has("billing")).toBe(false);
+  });
+
+  it("TE-3.5: when the upstream fails, the dependent is not called (dependent failure)", async () => {
+    const caller = new MultiBackendCaller(
+      new Map<string, BackendCallResult>([
+        ["crm", { ok: false, kind: "upstream-error", detail: "HTTP 500" }],
+        ["billing", entitlementOk],
+      ]),
+    );
+    const outcome = await multiHandler(fanoutContext(false, true), caller).serve(fanoutInput(true));
+    // The primary failed → whole request fails; the dependent supplement was never called.
+    expect(outcome).toEqual({ kind: "failed", cause: "upstream-error" });
+    expect(caller.inputsByApp.has("billing")).toBe(false);
+  });
+});

@@ -1,9 +1,17 @@
 import type { AdapterRequest } from "@mediator/adapter-engine";
-import type { FieldMapping, IrOperation, IrParameter, ParameterMapping } from "@mediator/domain";
+import {
+  recordRelativePath,
+  type ChainInput,
+  type FieldMapping,
+  type IrOperation,
+  type IrParameter,
+  type ParameterMapping,
+} from "@mediator/domain";
 import {
   applyFieldMapping,
   applyFieldMappings,
   isTransformError,
+  readPath,
   type JsonRecord,
   type JsonValue,
 } from "@mediator/transform";
@@ -139,6 +147,14 @@ interface MappingContext {
   readonly parameterMappings: readonly ParameterMapping[];
   readonly requestPhaseFieldMappings: readonly FieldMapping[];
   readonly request: AdapterRequest;
+  /**
+   * TE-3 — backend parameters already filled from an upstream binding's consumer-shape
+   * response (keyed by **bare** target parameter name), resolved by
+   * {@link resolveChainInputs} before this call. They fill their `targetParamRef` exactly
+   * like a `ParameterMapping` and satisfy the required-parameter check (CO-2.6 treats a
+   * `chainInput` as filling a required parameter). Absent for a non-chained binding.
+   */
+  readonly chainedParams?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -183,6 +199,14 @@ export function mapRequestToBackend(context: MappingContext): RequestMappingResu
       continue;
     }
     backendParams.set(targetName, wire);
+  }
+
+  // TE-3 — chained inputs fill their target parameters (resolved from the upstream's
+  // consumer-shape response). They are applied after the ParameterMappings so a chain
+  // wins a (composition-forbidden) overlap deterministically; normally the two sets are
+  // disjoint. A chained parameter counts toward the required-parameter check below.
+  for (const [name, value] of context.chainedParams ?? new Map<string, string>()) {
+    backendParams.set(name, value);
   }
 
   const placement = placeBackendParams(context.backendOperation, backendParams);
@@ -299,4 +323,97 @@ function buildBackendBody(
     }
     throw error;
   }
+}
+
+// ── TE-3: chained-binding input resolution ───────────────────────────────────
+
+/**
+ * TE-3 outcome: the chained backend parameters, or a loud failure that refuses the call.
+ * `missing-chain-input` is the upstream-value-absent refusal (TE-3.4); `defect` is a
+ * transform failure or an untranslatable value — both surfaced as `mediator-transform-error`
+ * by the executor, never a call issued with an unfilled or guessed parameter.
+ */
+export type ChainInputResolution =
+  | { readonly ok: true; readonly params: ReadonlyMap<string, string> }
+  | { readonly ok: false; readonly kind: "missing-chain-input"; readonly detail: string }
+  | { readonly ok: false; readonly kind: "defect"; readonly detail: string };
+
+/**
+ * **TE-3 — resolve a chained binding's `chainInputs` against the upstream binding's
+ * consumer-shape response.** Each input reads `upstreamFieldPath` from that **already
+ * response-phase-transformed** payload (TE-3.2) — never the upstream backend's native
+ * shape — and fills exactly its named `targetParamRef` (TE-3.3), applying its optional
+ * transform in the **same sandbox** the request phase uses (reusing {@link applyFieldMapping}).
+ *
+ * A value **absent or null** in the upstream response refuses the call as a
+ * `missing-chain-input` naming the input (TE-3.4), never dispatched with the parameter
+ * unfilled or guessed — the same discipline as TE-1.3. A transform failure, or a value
+ * that cannot become a scalar wire parameter, is a mediator-side `defect`. The detail is
+ * payload-free: it names the field path/ref only, never the value read.
+ */
+export function resolveChainInputs(
+  mappingId: string,
+  chainInputs: readonly ChainInput[],
+  upstreamConsumerShape: JsonValue,
+): ChainInputResolution {
+  const params = new Map<string, string>();
+  for (const chainInput of chainInputs) {
+    const relativeSource = recordRelativePath(chainInput.upstreamFieldPath);
+    const read = readPath(upstreamConsumerShape, relativeSource);
+    if (!read.present || read.value === null) {
+      return {
+        ok: false,
+        kind: "missing-chain-input",
+        detail: `chain input '${chainInput.upstreamFieldPath}' is absent or null in the upstream consumer-shape response`,
+      };
+    }
+    const leaf = leafSegment(relativeSource);
+    if (leaf === undefined) {
+      return {
+        ok: false,
+        kind: "defect",
+        detail: `chain input source path '${chainInput.upstreamFieldPath}' is empty`,
+      };
+    }
+    const targetName = paramRefBareName(chainInput.targetParamRef);
+    const synthetic: FieldMapping = {
+      id: `chain:${targetName}`,
+      mappingId,
+      sourcePath: leaf,
+      targetPath: targetName,
+      transform: chainInput.transform ?? "rename",
+      ...(chainInput.transformConfig !== undefined
+        ? { transformConfig: chainInput.transformConfig }
+        : {}),
+    };
+    let produced: JsonValue;
+    try {
+      produced = applyFieldMapping(synthetic, { [leaf]: read.value }).value;
+    } catch (error) {
+      if (isTransformError(error)) {
+        return {
+          ok: false,
+          kind: "defect",
+          detail: `chain input '${chainInput.targetParamRef}': ${error.kind}`,
+        };
+      }
+      throw error;
+    }
+    const wire = toWireString(produced);
+    if (wire === undefined) {
+      return {
+        ok: false,
+        kind: "defect",
+        detail: `chain input '${chainInput.targetParamRef}' did not produce a scalar parameter value`,
+      };
+    }
+    params.set(targetName, wire);
+  }
+  return { ok: true, params };
+}
+
+/** The last dot-separated segment of a record-relative path — the sandbox binding name. */
+function leafSegment(recordRelative: string): string | undefined {
+  const segments = recordRelative.split(".").filter((segment) => segment.length > 0);
+  return segments[segments.length - 1];
 }

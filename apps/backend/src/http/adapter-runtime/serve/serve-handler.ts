@@ -4,29 +4,57 @@ import type {
   ServeInput,
   ServeOutcome,
 } from "@mediator/adapter-engine";
-import type { AdapterEndpoint, IrOperation } from "@mediator/domain";
+import type { AdapterEndpoint, ChainInput, IrOperation } from "@mediator/domain";
+import type { JsonValue } from "@mediator/transform";
 
-import { aggregateSingle } from "./aggregator.js";
+import { topLevelConsumerFieldName } from "../../../modules/adapter-composition/analysis.js";
+import {
+  aggregateFanoutMerge,
+  aggregateSingle,
+  type AggregateOutcome,
+  type FanoutMergeBindingInfo,
+  type FanoutMergeContext,
+} from "./aggregator.js";
 import type { BackendCaller } from "./backend-call.js";
 import { validateConsumerResponse, validateInboundRequest } from "./ir-validation.js";
 import { planResolution, type BindingHealthInput } from "./planner.js";
 import {
   bindingFailureCause,
+  resultFailureCause,
   type BindingFailure,
   type BindingResult,
+  type PlanExecutionGroup,
   type PlannedBinding,
+  type ResolutionPlan,
 } from "./pipeline-types.js";
-import { mapRequestToBackend, mappedConsumerParamNames } from "./request-mapping.js";
+import {
+  mapRequestToBackend,
+  mappedConsumerParamNames,
+  resolveChainInputs,
+} from "./request-mapping.js";
 import { mapBackendResponseToConsumer } from "./response-mapping.js";
 import type { ServeContext, ServeContextLoader } from "./serve-context.js";
 
+/** The consumer-shape response of an upstream binding, fed into a chained dependent (TE-3). */
+interface ChainSource {
+  readonly chainInputs: readonly ChainInput[];
+  readonly upstreamConsumerShape: JsonValue;
+}
+
 /**
  * **The real `ServeHandler` (RP/TE/AG) injected behind the RT Protocol-Server seam.**
- * It runs the single-binding serve pipeline the RT slice left as a 501 placeholder:
+ * It runs the serve pipeline for the `single` (AG-1) and `fanout-merge` (AG-2, with TE-3
+ * chained bindings) strategies:
  *
- *   load context → RP-2 validate inbound → RP-3/RP-4 plan → TE-1 map request →
- *   TE-2 call backend → TE-4 map response → TE-5 envelope → AG-1 aggregate →
- *   AG-7 validate response → {@link ServeOutcome}.
+ *   load context → RP-2 validate inbound → RP-3/RP-4 plan → per binding
+ *   (TE-1 map request, TE-3 fill chained inputs, TE-2 call backend, TE-4 map response) →
+ *   TE-5 envelopes → AG-1/AG-2 aggregate → AG-7 validate response → {@link ServeOutcome}.
+ *
+ * Bindings run **grouped by `executionOrder`** — a group in parallel, groups in ascending
+ * order — and a **chained** binding (`dependsOnBindingId`) waits for its upstream's
+ * consumer-shape response regardless of order (TE-3.1); all backend calls hold slots on
+ * the **shared** `AppLoadGovernor` (via the injected caller), so adapter fan-out competes
+ * with sync for the one per-app ceiling.
  *
  * Everything the pipeline decides is an explicit value passed between pure stages;
  * only the loader (persistence) and the backend caller (the governed/credentialed
@@ -90,29 +118,18 @@ export class AdapterServeHandler implements ServeHandler {
     }
     const plan = planResult.plan;
 
-    // TE-1..TE-5 — assemble one envelope per binding: eliminated bindings become
-    // `not-called` (their planner cause), executed bindings run the transform pipeline.
-    const results: BindingResult[] = plan.eliminated.map((eliminated) => ({
-      kind: "not-called",
-      bindingId: eliminated.bindingId,
-      role: eliminated.role,
-      executionOrder: eliminated.executionOrder,
-      cause: eliminated.cause,
-    }));
-    for (const group of plan.groups) {
-      for (const planned of group.bindings) {
-        results.push(await this.executeBinding(planned, context, consumerOperation, input.request));
-      }
-    }
+    // TE-1..TE-5 — one envelope per binding, executed grouped by order with chaining.
+    const results = await this.executePlan(plan, context, consumerOperation, input.request);
 
-    // AG-1 — single aggregation.
-    const aggregate = aggregateSingle(plan, results);
+    // AG-1 / AG-2 — aggregate per the endpoint's strategy.
+    const aggregate = this.aggregate(plan, results, context, consumerOperation);
     if (aggregate.kind === "failure") {
       return { kind: "failed", cause: bindingFailureCause(aggregate.failure) };
     }
 
-    // AG-7 — validate the aggregated response against the consumer's response schema;
-    // a failure is a mediator-side defect, logged and never returned as data.
+    // AG-7 — validate the aggregated response against the consumer's response schema; a
+    // failure is a mediator-side defect, logged and never returned as data. A degraded
+    // response must still pass — it only ever omits genuinely-optional fields (AG-2.3).
     const validation = validateConsumerResponse(consumerOperation, aggregate.payload);
     if (!validation.ok) {
       this.deps.logger.warn(
@@ -131,12 +148,204 @@ export class AdapterServeHandler implements ServeHandler {
       body: aggregate.payload,
       degraded: aggregate.degraded,
       contributingBackendAppIds: aggregate.contributingBackendAppIds,
+      // AG-2.3 — name the failed backend(s) out of band; absent on a complete response.
+      ...(aggregate.degradedBackendAppIds.length > 0
+        ? { degradedBackendAppIds: aggregate.degradedBackendAppIds }
+        : {}),
     };
   }
 
-  /** Run one planned binding's TE-1 → TE-2 → TE-4 pipeline into a result envelope. */
+  /**
+   * AG-1 / AG-2 — dispatch to the strategy's aggregator. For `fanout-merge` it derives the
+   * composed decision the aggregator consumes **at request time** (CO-4.4): per binding the
+   * backend it calls and the top-level consumer response fields it supplies, plus the
+   * consumer schema's required field names — required-ness read **live from the schema**,
+   * never a composition-time snapshot.
+   */
+  private aggregate(
+    plan: ResolutionPlan,
+    results: readonly BindingResult[],
+    context: ServeContext,
+    consumerOperation: IrOperation,
+  ): AggregateOutcome {
+    if (plan.aggregationStrategy === "fanout-merge") {
+      return aggregateFanoutMerge(plan, results, this.fanoutContext(context, consumerOperation));
+    }
+    return aggregateSingle(plan, results);
+  }
+
+  /** Build the request-time {@link FanoutMergeContext} the fanout-merge aggregator consumes (CO-4.4). */
+  private fanoutContext(context: ServeContext, consumerOperation: IrOperation): FanoutMergeContext {
+    const bindingInfo = new Map<string, FanoutMergeBindingInfo>();
+    for (const loaded of context.bindings) {
+      const suppliedConsumerResponseFields = new Set<string>();
+      for (const field of loaded.responsePhaseFieldMappings) {
+        // The consumer response fields this binding supplies — its response-phase targets,
+        // already pair-scoped by the loader — matched at the schema's top-level segment.
+        suppliedConsumerResponseFields.add(topLevelConsumerFieldName(field.targetPath));
+      }
+      bindingInfo.set(loaded.binding.id, {
+        backendAppId: loaded.binding.backendAppId,
+        suppliedConsumerResponseFields,
+      });
+    }
+    const requiredConsumerResponseFieldNames = new Set<string>();
+    for (const field of consumerOperation.responseSchema?.fields ?? []) {
+      if (field.required) {
+        requiredConsumerResponseFieldNames.add(field.name);
+      }
+    }
+    return { bindingInfo, requiredConsumerResponseFieldNames };
+  }
+
+  /**
+   * Execute the plan into one envelope per binding (TE-1..TE-5). Eliminated bindings are
+   * `not-called` envelopes (their planner cause); planned bindings run **grouped by
+   * `executionOrder`** — each group in parallel, groups in ascending order (TE-2.1/2.2) —
+   * with a chained binding waiting for its upstream regardless of order (TE-3.1).
+   */
+  private async executePlan(
+    plan: ResolutionPlan,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    request: AdapterRequest,
+  ): Promise<BindingResult[]> {
+    const results: BindingResult[] = plan.eliminated.map((eliminated) => ({
+      kind: "not-called",
+      bindingId: eliminated.bindingId,
+      role: eliminated.role,
+      executionOrder: eliminated.executionOrder,
+      cause: eliminated.cause,
+    }));
+    // An eliminated binding is a settled (non-success) upstream: a dependent of it becomes
+    // a dependent failure (TE-3.5), never dispatched with a hole.
+    const settled = new Map<string, BindingResult>(
+      results.map((result) => [result.bindingId, result]),
+    );
+
+    for (const group of plan.groups) {
+      const groupResults = await this.executeGroup(
+        group,
+        settled,
+        context,
+        consumerOperation,
+        request,
+      );
+      for (const [bindingId, result] of groupResults) {
+        settled.set(bindingId, result);
+        results.push(result);
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Execute one `executionOrder` group's bindings **in parallel** (TE-2.1). All group
+   * promises are registered before any body proceeds (a microtask start-gate), so a
+   * chained binding whose upstream is in the same group can await that upstream's promise
+   * (TE-3.1); an upstream in an earlier group is already `settled`.
+   */
+  private async executeGroup(
+    group: PlanExecutionGroup,
+    settled: ReadonlyMap<string, BindingResult>,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    request: AdapterRequest,
+  ): Promise<Map<string, BindingResult>> {
+    const inFlight = new Map<string, Promise<BindingResult>>();
+    const startGate = Promise.resolve();
+    for (const planned of group.bindings) {
+      inFlight.set(
+        planned.bindingId,
+        (async (): Promise<BindingResult> => {
+          // Yield once so every group promise is registered before any dependency await.
+          await startGate;
+          return this.executeChainAware(
+            planned,
+            settled,
+            inFlight,
+            context,
+            consumerOperation,
+            request,
+          );
+        })(),
+      );
+    }
+    const out = new Map<string, BindingResult>();
+    for (const planned of group.bindings) {
+      const promise = inFlight.get(planned.bindingId);
+      if (promise !== undefined) {
+        out.set(planned.bindingId, await promise);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Run one planned binding, honoring its dependency (TE-3). A non-chained binding runs
+   * directly; a chained binding waits for its upstream's envelope, then either fails as a
+   * dependent (upstream failed → not called, TE-3.5) or runs with its `chainInputs` filled
+   * from the upstream's **consumer-shape** response (TE-3.2).
+   */
+  private async executeChainAware(
+    planned: PlannedBinding,
+    settled: ReadonlyMap<string, BindingResult>,
+    inFlight: ReadonlyMap<string, Promise<BindingResult>>,
+    context: ServeContext,
+    consumerOperation: IrOperation,
+    request: AdapterRequest,
+  ): Promise<BindingResult> {
+    const upstreamId = planned.dependsOnBindingId;
+    if (upstreamId === undefined) {
+      return this.executeBinding(planned, undefined, context, consumerOperation, request);
+    }
+
+    const upstream = await this.awaitUpstream(upstreamId, settled, inFlight);
+    if (upstream === undefined) {
+      // The upstream is neither settled (earlier group / eliminated) nor in this group —
+      // it must be ordered *after* the dependent, an ordering CO-2 should forbid. Fail loud
+      // rather than deadlock a live caller (a defensible runtime backstop).
+      return this.transformFailure(
+        planned,
+        `chained binding depends on '${upstreamId}', which is not resolved in an earlier or same execution group`,
+      );
+    }
+    if (upstream.kind !== "success") {
+      // TE-3.5 — the upstream failed, so the dependent is not called; propagate the
+      // upstream's specific cause so the request's fate keeps its root reason (AG-2).
+      return this.failureEnvelope(planned, resultFailureCause(upstream));
+    }
+    return this.executeBinding(
+      planned,
+      { chainInputs: planned.chainInputs ?? [], upstreamConsumerShape: upstream.payload },
+      context,
+      consumerOperation,
+      request,
+    );
+  }
+
+  /** Resolve an upstream binding's already-available envelope: a settled result, else its in-flight promise. */
+  private async awaitUpstream(
+    upstreamId: string,
+    settled: ReadonlyMap<string, BindingResult>,
+    inFlight: ReadonlyMap<string, Promise<BindingResult>>,
+  ): Promise<BindingResult | undefined> {
+    const already = settled.get(upstreamId);
+    if (already !== undefined) {
+      return already;
+    }
+    const promise = inFlight.get(upstreamId);
+    return promise === undefined ? undefined : promise;
+  }
+
+  /**
+   * Run one planned binding's TE-1 → TE-3 → TE-2 → TE-4 pipeline into a result envelope.
+   * `chain` is present only for a chained (dependent) binding — its `chainInputs` are
+   * resolved against the upstream's consumer-shape response before the request is composed.
+   */
   private async executeBinding(
     planned: PlannedBinding,
+    chain: ChainSource | undefined,
     context: ServeContext,
     consumerOperation: IrOperation,
     request: AdapterRequest,
@@ -154,6 +363,22 @@ export class AdapterServeHandler implements ServeHandler {
       );
     }
 
+    // TE-3 — fill chained parameters from the upstream's consumer-shape response. An absent
+    // chain value (or a transform defect) refuses the call, named, rather than dispatching
+    // with the parameter unfilled or guessed (TE-3.4).
+    let chainedParams: ReadonlyMap<string, string> | undefined;
+    if (chain !== undefined) {
+      const resolved = resolveChainInputs(
+        loaded.mappingId,
+        chain.chainInputs,
+        chain.upstreamConsumerShape,
+      );
+      if (!resolved.ok) {
+        return this.transformFailure(planned, resolved.detail);
+      }
+      chainedParams = resolved.params;
+    }
+
     // TE-1 — consumer request → backend request.
     const mapped = mapRequestToBackend({
       mappingId: loaded.mappingId,
@@ -162,6 +387,7 @@ export class AdapterServeHandler implements ServeHandler {
       parameterMappings: loaded.parameterMappings,
       requestPhaseFieldMappings: loaded.requestPhaseFieldMappings,
       request,
+      ...(chainedParams !== undefined ? { chainedParams } : {}),
     });
     if (!mapped.ok) {
       return this.transformFailure(planned, mapped.detail);

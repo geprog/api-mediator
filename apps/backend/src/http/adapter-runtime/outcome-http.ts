@@ -26,6 +26,11 @@ export const CAUSE_HEADER = "x-mediator-cause";
 export const DEGRADED_HEADER = "x-mediator-degraded";
 /** Out-of-band provenance header naming the contributing backends (never in the body). */
 export const CONTRIBUTING_BACKENDS_HEADER = "x-mediator-contributing-backends";
+/**
+ * Out-of-band header naming the **failed** backend(s) whose optional fields a degraded
+ * `fanout-merge` response omitted (AG-2.3) — never in the body, which stays consumer-schema-valid.
+ */
+export const DEGRADED_BACKENDS_HEADER = "x-mediator-degraded-backends";
 
 /**
  * The final disposition of a request that **matched a mounted operation** (so a
@@ -45,6 +50,8 @@ export type AdapterResult =
       readonly body: unknown;
       readonly degraded: boolean;
       readonly contributingBackendAppIds: readonly string[];
+      /** The failed backend(s) whose optional fields a degraded response omitted (AG-2.3). */
+      readonly degradedBackendAppIds?: readonly string[];
     }
   | {
       readonly kind: "serve-failed";
@@ -149,6 +156,11 @@ export function renderHttpResponse(result: AdapterResult): HttpResponse {
       }
       if (result.contributingBackendAppIds.length > 0) {
         headers[CONTRIBUTING_BACKENDS_HEADER] = result.contributingBackendAppIds.join(",");
+      }
+      // AG-2.3 — name the failed backend(s) out of band, never in the body.
+      const degradedBackends = result.degradedBackendAppIds ?? [];
+      if (degradedBackends.length > 0) {
+        headers[DEGRADED_BACKENDS_HEADER] = degradedBackends.join(",");
       }
       return { status: 200, headers, body: result.body };
     }
