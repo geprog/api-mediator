@@ -50,6 +50,7 @@ export {
 export {
   DownstreamArtifactRepository,
   type DownstreamArtifactOps,
+  type GraphEdgeStatusUpdate,
 } from "./downstream-artifacts.js";
 export {
   AdapterCompositionRepository,

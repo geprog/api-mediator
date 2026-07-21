@@ -1,4 +1,10 @@
-import type { AdapterBinding, AdapterEndpoint, GraphEdge, SyncRule } from "@mediator/domain";
+import type {
+  AdapterBinding,
+  AdapterEndpoint,
+  GraphEdge,
+  GraphEdgeMetadata,
+  SyncRule,
+} from "@mediator/domain";
 import { and, eq, exists, notExists, or, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
@@ -15,6 +21,27 @@ import {
   operationMapping,
   syncRule,
 } from "../schema.js";
+
+/**
+ * The status-recompute patch GR-1's {@link DownstreamArtifactRepository.updateGraphEdge}
+ * applies to an existing `graph_edge`, addressed by its stable
+ * `(sourceNodeId, targetNodeId, type)` app-pair+type key (GR-1.4 —
+ * `docs/requirements/phase-6-graph.md`). It carries exactly the two things a status
+ * recompute owns — the recomputed `status` and the aggregated `direction` — and
+ * DELIBERATELY EXCLUDES `metadata.lastActivityAt`: that field is owned by GR-4's
+ * activity updater, and the two updaters touch **disjoint** `metadata` fields
+ * (GR-1.5), so a status recompute cannot reset activity by construction. `status`
+ * is a plain string: the concept does not enumerate `GraphEdge.status`'s value set
+ * (`docs/architecture/data-model.md` `GraphEdge`), so no enum is coined here — the
+ * projection writes the value it derives from the aggregate's rule/binding health.
+ */
+export interface GraphEdgeStatusUpdate {
+  readonly sourceNodeId: string;
+  readonly targetNodeId: string;
+  readonly type: GraphEdge["type"];
+  readonly status: string;
+  readonly direction: GraphEdgeMetadata["direction"];
+}
 
 /**
  * The write operations the Phase-3 `MappingApproved` consumer drives to
@@ -205,6 +232,72 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
       .onConflictDoNothing({
         target: [graphEdge.sourceNodeId, graphEdge.targetNodeId, graphEdge.type],
       });
+  }
+
+  /**
+   * **GR-1.1/GR-1.4/GR-1.5 — in-place status recompute.** Rewrite the `status` and
+   * `metadata.direction` of the existing edge addressed by
+   * `(sourceNodeId, targetNodeId, type)`, **replacing** the prior values on the
+   * **same row** (the `id` is never touched) — the gap the ensure-exists
+   * {@link upsertGraphEdge} (`ON CONFLICT DO NOTHING`) cannot fill. An incremental
+   * updater (GR-2/GR-3) calls this when that `(app pair, direction)`'s aggregate of
+   * rules/bindings is non-empty but its health changed.
+   *
+   * `metadata.lastActivityAt` is **preserved** (GR-1.5): the write replaces only the
+   * `direction` sub-object via `jsonb_set`, leaving `lastActivityAt` — GR-4's
+   * disjoint activity field — exactly as persisted. A status recompute never resets
+   * activity; an activity update (GR-4) never rewrites status. Keyed by the
+   * app-pair+type triple (nodes = app ids), **never** by a mapping/rule/binding id,
+   * since one edge aggregates many of those (GR-1.4).
+   *
+   * A no-such-edge update matches no row and writes nothing: the incremental updater
+   * chooses create-if-absent vs. update vs. remove **explicitly** (GR-1.3), so a
+   * missing edge is its `upsertGraphEdge` create case, not a silent insert here.
+   */
+  public async updateGraphEdge(update: GraphEdgeStatusUpdate): Promise<void> {
+    await this.db
+      .update(graphEdge)
+      .set({
+        status: update.status,
+        // Replace ONLY metadata.direction; jsonb_set leaves metadata.lastActivityAt
+        // (GR-4's disjoint field) untouched — GR-1.5's preserve-activity guarantee,
+        // atomic in one UPDATE (no read-then-write race with a concurrent GR-4 write).
+        metadata: sql`jsonb_set(${graphEdge.metadata}, '{direction}', ${JSON.stringify(
+          update.direction,
+        )}::jsonb)`,
+      })
+      .where(
+        and(
+          eq(graphEdge.sourceNodeId, update.sourceNodeId),
+          eq(graphEdge.targetNodeId, update.targetNodeId),
+          eq(graphEdge.type, update.type),
+        ),
+      );
+  }
+
+  /**
+   * **GR-1.2/GR-1.4 — remove.** Delete the edge addressed by
+   * `(sourceNodeId, targetNodeId, type)` — used when that `(app pair, direction)`'s
+   * **last** underlying `SyncRule`/`AdapterBinding` is gone (e.g. an AL-2 deregister
+   * cascade) and the aggregate is now empty, so the graph never shows a dependency
+   * backed by nothing (GR-1.2). Keyed by the app-pair+type triple, **never** by a
+   * rule/binding id (GR-1.4). A no-such-edge remove matches no row and is a safe
+   * no-op — idempotent on redelivery or a repeat recompute.
+   */
+  public async removeGraphEdge(
+    sourceNodeId: string,
+    targetNodeId: string,
+    type: GraphEdge["type"],
+  ): Promise<void> {
+    await this.db
+      .delete(graphEdge)
+      .where(
+        and(
+          eq(graphEdge.sourceNodeId, sourceNodeId),
+          eq(graphEdge.targetNodeId, targetNodeId),
+          eq(graphEdge.type, type),
+        ),
+      );
   }
 
   // ── Reconciliation sweep query ─────────────────────────────────────────────
