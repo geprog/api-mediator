@@ -43,11 +43,43 @@ export interface DownstreamArtifactOps {
    */
   ensureAdapterEndpoint(candidate: AdapterEndpoint): Promise<AdapterEndpoint>;
   /**
-   * Attach a `proposed` `AdapterBinding` unless one already exists for its
+   * Attach an `AdapterBinding` unless one already exists for its
    * `(adapterEndpointId, backendAppId, backendOperationId, approvedMappingId)`
-   * (AI-2 criterion 2).
+   * (AI-2 criterion 2). CO-1 chooses its `status` before calling — `active` for an
+   * endpoint's first binding, `proposed` for any further one — and this insert is
+   * `ON CONFLICT DO NOTHING`, so a redelivery never re-attaches, re-activates, or
+   * resets an existing binding (including one an operator later `disabled`, CO-1.6).
    */
   insertAdapterBindingIfAbsent(binding: AdapterBinding): Promise<void>;
+  /**
+   * Every existing `AdapterBinding` of an endpoint, in any status
+   * (`active`/`proposed`/`disabled`). CO-1 reads this to decide whether an
+   * attaching binding is the endpoint's **first** (→ auto-activate) or a **further**
+   * one (→ attach `proposed`, endpoint `composition-required`): "already has a
+   * binding" (CO-1.3) is any existing binding row, whatever its status.
+   */
+  listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]>;
+  /**
+   * CO-1.2 first-binding auto-activation. Promote an as-yet-unserved endpoint to its
+   * zero-friction single-backend serving state — `status = active`,
+   * `aggregationStrategy = single`, `strictness = degraded`, `cacheTtl` cleared (no
+   * caching) — **only** while it is still `composition-required` (the neutral
+   * "attached, nothing composed" create state). The `status` guard makes it a no-op
+   * on an already-`active` (composed), operator-`disabled`, or otherwise non-neutral
+   * endpoint, so a redelivery or a later mapping never re-activates or resets a
+   * composed endpoint (CO-1.6). Returns the endpoint's resulting persisted state.
+   */
+  activateAdapterEndpointForSingleBinding(adapterEndpointId: string): Promise<AdapterEndpoint>;
+  /**
+   * CO-1.3 second-binding transition. Move an `active` endpoint to
+   * `composition-required` so a human composes the now-multiple backends, **only**
+   * from `active`. It changes `status` alone — the endpoint's serving config
+   * (`aggregationStrategy`/`strictness`/`cacheTtl`) and its already-`active` binding
+   * are left untouched, so the prior configuration keeps serving (RT-3.3). The
+   * `status` guard makes it a no-op on an already-`composition-required` or
+   * `disabled` endpoint (idempotent, never re-flips). Returns the resulting state.
+   */
+  markAdapterEndpointCompositionRequired(adapterEndpointId: string): Promise<AdapterEndpoint>;
   /**
    * Ensure the projected `GraphEdge` for `(sourceNodeId, targetNodeId, type)`
    * exists (AI-1/AI-2 criterion 3). Ensure-exists (not update): for a fixed node
@@ -114,6 +146,56 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
           adapterBinding.approvedMappingId,
         ],
       });
+  }
+
+  public async activateAdapterEndpointForSingleBinding(
+    adapterEndpointId: string,
+  ): Promise<AdapterEndpoint> {
+    // Guarded UPDATE (CO-1.2): promote ONLY a still-neutral `composition-required`
+    // endpoint. The `status` predicate is a correctness guard, not just defensive —
+    // it makes activation a no-op on an already-composed (`active`), operator
+    // (`disabled`), or otherwise non-neutral endpoint, so a redelivery / a later
+    // mapping can never re-activate or reset a composed endpoint (CO-1.6). Composition
+    // fields are set to the documented single-binding safe defaults; `cacheTtl` NULL
+    // = no caching.
+    await this.db
+      .update(adapterEndpoint)
+      .set({
+        status: "active",
+        aggregationStrategy: "single",
+        strictness: "degraded",
+        cacheTtl: null,
+      })
+      .where(
+        and(
+          eq(adapterEndpoint.id, adapterEndpointId),
+          eq(adapterEndpoint.status, "composition-required"),
+        ),
+      );
+    return this.requireAdapterEndpointById(adapterEndpointId);
+  }
+
+  public async markAdapterEndpointCompositionRequired(
+    adapterEndpointId: string,
+  ): Promise<AdapterEndpoint> {
+    // Guarded UPDATE (CO-1.3): move ONLY an `active` endpoint to `composition-required`.
+    // `status` alone changes — the serving config and the already-`active` binding are
+    // untouched, so the prior configuration keeps serving (RT-3.3). The guard makes it
+    // a no-op on an already-`composition-required` or `disabled` endpoint (idempotent).
+    await this.db
+      .update(adapterEndpoint)
+      .set({ status: "composition-required" })
+      .where(and(eq(adapterEndpoint.id, adapterEndpointId), eq(adapterEndpoint.status, "active")));
+    return this.requireAdapterEndpointById(adapterEndpointId);
+  }
+
+  /** Load an endpoint by id after a guarded CO-1 transition; it always exists here. */
+  private async requireAdapterEndpointById(id: string): Promise<AdapterEndpoint> {
+    const [row] = await this.db.select().from(adapterEndpoint).where(eq(adapterEndpoint.id, id));
+    if (row === undefined) {
+      throw new Error("adapter_endpoint not found after a CO-1 status transition");
+    }
+    return mapAdapterEndpointRow(row);
   }
 
   public async upsertGraphEdge(edge: GraphEdge): Promise<void> {

@@ -21,6 +21,10 @@ import type {
  *   no-op that **keeps the existing row** (its id and any state untouched).
  * - `ensureAdapterEndpoint` models get-or-create: it returns the existing endpoint
  *   (never a duplicate) on a natural-key hit, otherwise inserts the candidate.
+ * - `activateAdapterEndpointForSingleBinding` / `markAdapterEndpointCompositionRequired`
+ *   model the real guarded `UPDATE ... WHERE status = ?`: each transitions the stored
+ *   endpoint only from its allowed source status and is a no-op otherwise, so the CO-1
+ *   idempotency/never-reset guards behave identically to the live DB.
  *
  * Composite keys use `JSON.stringify([...])` so a natural key stays collision-free
  * even when a component (the canonical `resourcePairRef`) itself contains
@@ -40,6 +44,9 @@ export class FakeDownstreamArtifactOps implements DownstreamArtifactOps {
     insertSyncRuleIfAbsent: 0,
     ensureAdapterEndpoint: 0,
     insertAdapterBindingIfAbsent: 0,
+    listAdapterBindingsByEndpoint: 0,
+    activateAdapterEndpointForSingleBinding: 0,
+    markAdapterEndpointCompositionRequired: 0,
     upsertGraphEdge: 0,
   };
 
@@ -77,6 +84,66 @@ export class FakeDownstreamArtifactOps implements DownstreamArtifactOps {
     return Promise.resolve();
   }
 
+  public listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]> {
+    this.calls.listAdapterBindingsByEndpoint += 1;
+    return Promise.resolve(
+      [...this.#bindings.values()].filter(
+        (binding) => binding.adapterEndpointId === adapterEndpointId,
+      ),
+    );
+  }
+
+  public activateAdapterEndpointForSingleBinding(
+    adapterEndpointId: string,
+  ): Promise<AdapterEndpoint> {
+    this.calls.activateAdapterEndpointForSingleBinding += 1;
+    // Mirrors the real guarded UPDATE: promote ONLY a still-neutral
+    // `composition-required` endpoint to the single-binding serving defaults;
+    // `cacheTtl` stays absent (no caching). Any other status is a no-op.
+    return Promise.resolve(
+      this.#transitionEndpoint(adapterEndpointId, (endpoint) =>
+        endpoint.status === "composition-required"
+          ? {
+              id: endpoint.id,
+              consumerAppId: endpoint.consumerAppId,
+              consumerOperationId: endpoint.consumerOperationId,
+              status: "active",
+              aggregationStrategy: "single",
+              strictness: "degraded",
+            }
+          : endpoint,
+      ),
+    );
+  }
+
+  public markAdapterEndpointCompositionRequired(
+    adapterEndpointId: string,
+  ): Promise<AdapterEndpoint> {
+    this.calls.markAdapterEndpointCompositionRequired += 1;
+    // Mirrors the real guarded UPDATE: move ONLY an `active` endpoint to
+    // `composition-required`, changing `status` alone (serving config untouched).
+    return Promise.resolve(
+      this.#transitionEndpoint(adapterEndpointId, (endpoint) =>
+        endpoint.status === "active" ? { ...endpoint, status: "composition-required" } : endpoint,
+      ),
+    );
+  }
+
+  /** Apply a status transition to the stored endpoint with the given id (found by id). */
+  #transitionEndpoint(
+    adapterEndpointId: string,
+    transition: (endpoint: AdapterEndpoint) => AdapterEndpoint,
+  ): AdapterEndpoint {
+    for (const [key, endpoint] of this.#endpoints) {
+      if (endpoint.id === adapterEndpointId) {
+        const next = transition(endpoint);
+        this.#endpoints.set(key, next);
+        return next;
+      }
+    }
+    throw new Error("adapter_endpoint not found after a CO-1 status transition");
+  }
+
   public upsertGraphEdge(edge: GraphEdge): Promise<void> {
     this.calls.upsertGraphEdge += 1;
     const key = JSON.stringify([edge.sourceNodeId, edge.targetNodeId, edge.type]);
@@ -92,6 +159,21 @@ export class FakeDownstreamArtifactOps implements DownstreamArtifactOps {
   public seedEndpoint(endpoint: AdapterEndpoint): void {
     const key = JSON.stringify([endpoint.consumerAppId, endpoint.consumerOperationId]);
     this.#endpoints.set(key, endpoint);
+  }
+
+  /**
+   * Seed an already-attached binding (for CO-1 prior-binding / operator-`disabled`
+   * tests). Keyed by the same natural key the real UNIQUE index uses, so a later
+   * `insertAdapterBindingIfAbsent` for the same key is the no-op it is in Postgres.
+   */
+  public seedBinding(binding: AdapterBinding): void {
+    const key = JSON.stringify([
+      binding.adapterEndpointId,
+      binding.backendAppId,
+      binding.backendOperationId,
+      binding.approvedMappingId,
+    ]);
+    this.#bindings.set(key, binding);
   }
 
   public get syncRules(): SyncRule[] {

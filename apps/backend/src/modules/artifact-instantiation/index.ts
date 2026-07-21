@@ -1,10 +1,14 @@
 /**
- * Phase-3 disabled-artifact instantiation (AI-1..AI-3): the `MappingApproved`
- * consumer that instantiates an approval's downstream artifacts in a
- * **non-executing** state — disabled `SyncRule`s for a peer-peer mapping, a
- * `proposed` `AdapterBinding` under an ensured `AdapterEndpoint` for a
- * consumer-provider mapping — plus the projected `GraphEdge` and the reconciler
- * that re-derives a lost reaction. See `docs/requirements/phase-3-artifact-instantiation.md`.
+ * `MappingApproved` artifact instantiation (Phase-3 AI-1..AI-3 + Phase-5 CO-1): the
+ * consumer that instantiates an approval's downstream artifacts — disabled
+ * `SyncRule`s for a peer-peer mapping, or an `AdapterEndpoint` + `AdapterBinding`(s)
+ * for a consumer-provider mapping — plus the projected `GraphEdge` and the reconciler
+ * that re-derives a lost reaction. Per CO-1 the first binding of a consumer operation
+ * auto-activates (`active` endpoint + `primary`/`active` binding, single/degraded/no
+ * cache); a further binding attaches `proposed` and moves the endpoint to
+ * `composition-required` for a human composition decision. See
+ * `docs/requirements/phase-3-artifact-instantiation.md` and
+ * `docs/requirements/phase-5-endpoint-composition.md`.
  */
 export { buildArtifactInstantiation } from "./background.js";
 export type { ArtifactInstantiation, ArtifactInstantiationDeps } from "./background.js";
