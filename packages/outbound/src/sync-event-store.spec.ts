@@ -1,7 +1,7 @@
-import type { AuditLogEntry } from "@mediator/domain";
+import type { AuditLogEntry, AuditLogStatus } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
-import { FakeSyncEventStore } from "./sync-event-store.js";
+import { FakeSyncEventStore, syncExecutionOutboxEvent } from "./sync-event-store.js";
 
 /**
  * The `FakeSyncEventStore` must mirror the real
@@ -55,5 +55,78 @@ describe("FakeSyncEventStore.findRecentByIdempotencyKey", () => {
     expect(found).toHaveLength(3);
     // The three most recent (9, 8, 7).
     expect(found.map((e) => e.id)).toStrictEqual(["9", "8", "7"]);
+  });
+});
+
+/**
+ * XI-1 — the pure `AuditLogEntry → SyncExecutionOutboxEvent` projection the
+ * `DbSyncEventStore` enqueues onto the `event_outbox`. Kept a total, throw-free function so
+ * it is safe on the sync write path (XI-1.4); its transactional emit + the end-to-end CH-3
+ * drop are proven against live Postgres in the backend integration suite.
+ */
+describe("syncExecutionOutboxEvent (XI-1 projection)", () => {
+  const T0 = new Date("2026-07-21T00:00:00.000Z");
+
+  it("projects a sync-execution row onto the exact envelope the CH-3 consumer reads", () => {
+    const entry = event({
+      id: "evt-1",
+      timestamp: T0,
+      status: "success",
+      originAppId: "appB",
+      relatedRuleId: "rule-1",
+      // Fields the consumer does NOT read must not leak into the CH-3 signal shape.
+      relatedMappingId: "mapping-1",
+      sourceNativeId: "src-1",
+      payloadHash: "hash",
+    });
+    expect(syncExecutionOutboxEvent(entry)).toStrictEqual({
+      id: "evt-1",
+      type: "sync-execution",
+      occurredAt: T0,
+      status: "success",
+      originAppId: "appB",
+      relatedRuleId: "rule-1",
+    });
+  });
+
+  it("uses the audit row's id and timestamp verbatim (1:1 outbox row, natural de-dup)", () => {
+    const result = syncExecutionOutboxEvent(event({ id: "audit-42", timestamp: T0 }));
+    expect(result?.id).toBe("audit-42");
+    expect(result?.occurredAt).toBe(T0);
+  });
+
+  it("carries EVERY status faithfully (the consumer's isAppliedChange guard filters — XI-1.3)", () => {
+    const statuses: AuditLogStatus[] = [
+      "success",
+      "failure",
+      "skipped-loop",
+      "skipped-policy",
+      "conflict",
+    ];
+    for (const status of statuses) {
+      const result = syncExecutionOutboxEvent(
+        event({ id: `evt-${status}`, timestamp: T0, status, originAppId: "appB" }),
+      );
+      expect(result?.status).toBe(status);
+    }
+  });
+
+  it("omits absent originAppId/relatedRuleId/status rather than emitting explicit undefined", () => {
+    const result = syncExecutionOutboxEvent(event({ id: "evt-bare", timestamp: T0 }));
+    expect(result).toStrictEqual({ id: "evt-bare", type: "sync-execution", occurredAt: T0 });
+    expect(result).not.toHaveProperty("status");
+    expect(result).not.toHaveProperty("originAppId");
+    expect(result).not.toHaveProperty("relatedRuleId");
+  });
+
+  it("returns undefined for a non-sync-execution row — a backfill-run carries no CH-3 signal", () => {
+    expect(
+      syncExecutionOutboxEvent(
+        event({ id: "bf", timestamp: T0, type: "backfill-run", status: "success" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      syncExecutionOutboxEvent(event({ id: "pr", timestamp: T0, type: "poll-run" })),
+    ).toBeUndefined();
   });
 });

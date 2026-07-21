@@ -1,5 +1,4 @@
 import {
-  AuditLogRepository,
   auditLog,
   closeDb,
   createDb,
@@ -7,11 +6,12 @@ import {
   resolveDatabaseUrl,
   runMigrations,
   type Database,
+  type DbHandle,
 } from "@mediator/db";
-import type { AuditLogEntry, OutboundLoadLimits } from "@mediator/domain";
+import type { AuditLogEntry, DomainEventEnvelope, OutboundLoadLimits } from "@mediator/domain";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { DbSyncEventStore } from "./sync-event-store.js";
+import { DbSyncEventStore, type SyncEventOutbox } from "./sync-event-store.js";
 
 /**
  * Live-database integration for the OC persistence the unit tests fake: the
@@ -21,7 +21,23 @@ import { DbSyncEventStore } from "./sync-event-store.js";
  * compose `postgres` service + a resolvable `DATABASE_URL`; excluded from
  * `pnpm verify`, run via `pnpm --filter @mediator/outbound test:integration`.
  * Self-skips when `DATABASE_URL` is unresolvable.
+ *
+ * XI-1 also asserts here — against the real `db.transaction` in `DbSyncEventStore.record` —
+ * that a recorded `sync-execution` emits exactly one faithful outbox event through the
+ * {@link SyncEventOutbox} seam while a `backfill-run` emits none (a `RecordingOutbox` stands
+ * in for the real `PostgresEventBus`; the end-to-end outbox → dispatcher → CH-3 cache drop is
+ * proven in the backend integration suite, where the event bus + consumer + cache live).
  */
+
+/** Captures the events `DbSyncEventStore.record` emits, without a real outbox insert. */
+class RecordingOutbox implements SyncEventOutbox {
+  public readonly emitted: DomainEventEnvelope[] = [];
+  public emit(event: DomainEventEnvelope, _tx: DbHandle): Promise<void> {
+    void _tx;
+    this.emitted.push(event);
+    return Promise.resolve();
+  }
+}
 
 let databaseUrl: string | undefined;
 try {
@@ -45,16 +61,19 @@ function syncEvent(overrides: Partial<AuditLogEntry> & Pick<AuditLogEntry, "id">
 suite("Phase-4 outbound persistence integration (requires Postgres)", () => {
   let db: Database;
   let store: DbSyncEventStore;
+  let outbox: RecordingOutbox;
 
   beforeAll(async () => {
     db = createDb(resolveDatabaseUrl(process.env));
     await runMigrations(db);
-    store = new DbSyncEventStore(new AuditLogRepository(db));
+    outbox = new RecordingOutbox();
+    store = new DbSyncEventStore(db, outbox);
   });
 
   beforeEach(async () => {
     await db.delete(auditLog);
     await db.delete(registeredApp);
+    outbox.emitted.length = 0;
   });
 
   afterAll(async () => {
@@ -87,6 +106,45 @@ suite("Phase-4 outbound persistence integration (requires Postgres)", () => {
     expect(row?.payloadHash).toBe("payload-hash-A");
     expect(row?.traceId).toBe("trace-abc");
     expect(row?.spanId).toBe("span-def");
+  });
+
+  it("XI-1: recording a sync-execution also emits exactly one faithful outbox event", async () => {
+    await store.record(
+      syncEvent({
+        id: "66666666-6666-6666-6666-666666666666",
+        status: "success",
+        originAppId: "77777777-7777-7777-7777-777777777777",
+        relatedRuleId: "88888888-8888-8888-8888-888888888888",
+        sourceNativeId: "src-2",
+      }),
+    );
+
+    expect(outbox.emitted).toHaveLength(1);
+    // The event id is the audit row's id (1:1), and it carries exactly the CH-3 signal fields.
+    expect(outbox.emitted[0]).toStrictEqual({
+      id: "66666666-6666-6666-6666-666666666666",
+      type: "sync-execution",
+      occurredAt: T0,
+      status: "success",
+      originAppId: "77777777-7777-7777-7777-777777777777",
+      relatedRuleId: "88888888-8888-8888-8888-888888888888",
+    });
+  });
+
+  it("XI-1: a backfill-run row is persisted but emits NO outbox event (CH-3 handles sync-execution only)", async () => {
+    await store.record(
+      syncEvent({
+        id: "99999999-9999-9999-9999-999999999999",
+        type: "backfill-run",
+        status: "success",
+        relatedRuleId: "88888888-8888-8888-8888-888888888888",
+      }),
+    );
+
+    expect(outbox.emitted).toHaveLength(0);
+    // The audit row itself still committed in the same transaction.
+    const rows = await db.select().from(auditLog);
+    expect(rows.map((r) => r.id)).toStrictEqual(["99999999-9999-9999-9999-999999999999"]);
   });
 
   it("bounded lookback: filters by key + since, most-recent-first, capped at limit (OC-2)", async () => {
