@@ -29,7 +29,7 @@ import { buildServer, createServerLogger, type RunningServer } from "../../compo
 import { operatorAccountsEnv } from "../../testing/auth.testkit.js";
 import { buildAdapterMountReactions } from "./background.js";
 import { buildAdapterRuntime, type AdapterRuntime } from "./build-adapter-runtime.js";
-import { CONSUMER_APP_HEADER } from "./consumer-app-resolver.js";
+import { CONSUMER_APP_HEADER, headerConsumerAppResolver } from "./consumer-app-resolver.js";
 import { CAUSE_HEADER } from "./outcome-http.js";
 
 /**
@@ -270,7 +270,9 @@ describe("adapter runtime integration (requires Postgres)", () => {
     operator = buildServer({ config, db, logger });
     await operator.app.listen({ port: config.http.port, host: "127.0.0.1" });
 
-    adapter = buildAdapterRuntime({ db, logger });
+    // RT tests use the header stand-in — passed EXPLICITLY, since the runtime no
+    // longer defaults to it (an auth surface must never silently trust a header).
+    adapter = buildAdapterRuntime({ db, logger, resolveConsumerApp: headerConsumerAppResolver });
     await adapter.mountManager.reconcile();
     await adapter.app.listen({ port: config.adapterHttp.port, host: "127.0.0.1" });
   });
@@ -378,7 +380,12 @@ describe("adapter runtime integration (requires Postgres)", () => {
           contributingBackendAppIds: [],
         }),
     };
-    const runtime = buildAdapterRuntime({ db, logger: createServerLogger(config), serveHandler });
+    const runtime = buildAdapterRuntime({
+      db,
+      logger: createServerLogger(config),
+      serveHandler,
+      resolveConsumerApp: headerConsumerAppResolver,
+    });
     await runtime.mountManager.reconcile();
 
     // A (served-consumer): its `/todos` endpoint is active → a real served 200.
@@ -446,7 +453,12 @@ describe("adapter runtime integration (requires Postgres)", () => {
           contributingBackendAppIds: [input.activeBindings[0]?.backendAppId ?? "none"],
         }),
     };
-    const runtime = buildAdapterRuntime({ db, logger: createServerLogger(config), serveHandler });
+    const runtime = buildAdapterRuntime({
+      db,
+      logger: createServerLogger(config),
+      serveHandler,
+      resolveConsumerApp: headerConsumerAppResolver,
+    });
     await runtime.mountManager.reconcile();
 
     const response = await runtime.app.inject({
@@ -463,7 +475,11 @@ describe("adapter runtime integration (requires Postgres)", () => {
   // ── RT-4: mount lifecycle ──────────────────────────────────────────────────
 
   it("RT-4.5: a fresh runtime re-derives the mounted surface from persisted state alone", async () => {
-    const fresh = buildAdapterRuntime({ db, logger: createServerLogger(config) });
+    const fresh = buildAdapterRuntime({
+      db,
+      logger: createServerLogger(config),
+      resolveConsumerApp: headerConsumerAppResolver,
+    });
     const before = await fresh.app.inject({
       method: "GET",
       url: "/todos",
