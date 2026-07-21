@@ -147,3 +147,111 @@ describe("InProcessResponseCache (CH-1)", () => {
     expect(cache.get("endpoint-1", keyB, t0)?.body).toEqual({ id: "42" });
   });
 });
+
+describe("InProcessResponseCache — coarse invalidation (CH-3.1/CH-3.3/CH-5 seam)", () => {
+  const t0 = new Date(1_000_000);
+  const live = new Date(t0.getTime() + 1_000); // within every fixture's TTL
+  const has = (cache: InProcessResponseCache, endpointId: string, key: string): boolean =>
+    cache.get(endpointId, key, live) !== undefined;
+
+  it("dropByBackendResource drops every entry (across endpoints) the pair contributed to; others survive", () => {
+    const cache = new InProcessResponseCache();
+    // Two endpoints backed by (backend, tasks); one by an unrelated (other, notes).
+    cache.set(
+      entry({
+        endpointId: "ep-a",
+        normalizedParams: "k1",
+        contributingBackendResources: [{ backendAppId: "backend", resourceRef: "tasks" }],
+      }),
+      t0,
+    );
+    cache.set(
+      entry({
+        endpointId: "ep-b",
+        normalizedParams: "k2",
+        contributingBackendResources: [{ backendAppId: "backend", resourceRef: "tasks" }],
+      }),
+      t0,
+    );
+    cache.set(
+      entry({
+        endpointId: "ep-c",
+        normalizedParams: "k3",
+        contributingBackendResources: [{ backendAppId: "other", resourceRef: "notes" }],
+      }),
+      t0,
+    );
+
+    cache.dropByBackendResource("backend", "tasks");
+
+    expect(has(cache, "ep-a", "k1")).toBe(false);
+    expect(has(cache, "ep-b", "k2")).toBe(false);
+    expect(has(cache, "ep-c", "k3")).toBe(true); // unrelated backend resource untouched
+  });
+
+  it("CH-3.3: a multi-resource endpoint loses ALL its entries when ONE bound resource signals", () => {
+    const cache = new InProcessResponseCache();
+    // ep-multi is bound to BOTH (backend, tasks) and (backend, labels); ep-solo only to labels.
+    cache.set(
+      entry({
+        endpointId: "ep-multi",
+        normalizedParams: "m1",
+        contributingBackendResources: [
+          { backendAppId: "backend", resourceRef: "tasks" },
+          { backendAppId: "backend", resourceRef: "labels" },
+        ],
+      }),
+      t0,
+    );
+    cache.set(
+      entry({
+        endpointId: "ep-multi",
+        normalizedParams: "m2",
+        contributingBackendResources: [
+          { backendAppId: "backend", resourceRef: "tasks" },
+          { backendAppId: "backend", resourceRef: "labels" },
+        ],
+      }),
+      t0,
+    );
+    cache.set(
+      entry({
+        endpointId: "ep-solo",
+        normalizedParams: "s1",
+        contributingBackendResources: [{ backendAppId: "backend", resourceRef: "labels" }],
+      }),
+      t0,
+    );
+
+    // Only ONE of ep-multi's two contributors signals…
+    cache.dropByBackendResource("backend", "tasks");
+
+    // …yet BOTH of ep-multi's entries are dropped (coarse per endpoint, CH-3.3)…
+    expect(has(cache, "ep-multi", "m1")).toBe(false);
+    expect(has(cache, "ep-multi", "m2")).toBe(false);
+    // …while an endpoint NOT bound to `tasks` is untouched.
+    expect(has(cache, "ep-solo", "s1")).toBe(true);
+  });
+
+  it("dropByBackendResource is a no-op for an unknown pair", () => {
+    const cache = new InProcessResponseCache();
+    cache.set(entry({ endpointId: "ep-a", normalizedParams: "k1" }), t0);
+    cache.dropByBackendResource("nobody", "nothing");
+    expect(has(cache, "ep-a", "k1")).toBe(true);
+  });
+
+  it("dropByEndpoint drops one endpoint's entries and leaves others (CH-5 seam); unknown = no-op", () => {
+    const cache = new InProcessResponseCache();
+    cache.set(entry({ endpointId: "ep-a", normalizedParams: "k1" }), t0);
+    cache.set(entry({ endpointId: "ep-a", normalizedParams: "k2" }), t0);
+    cache.set(entry({ endpointId: "ep-b", normalizedParams: "k3" }), t0);
+
+    cache.dropByEndpoint("ep-a");
+    expect(has(cache, "ep-a", "k1")).toBe(false);
+    expect(has(cache, "ep-a", "k2")).toBe(false);
+    expect(has(cache, "ep-b", "k3")).toBe(true);
+
+    cache.dropByEndpoint("does-not-exist"); // no throw
+    expect(has(cache, "ep-b", "k3")).toBe(true);
+  });
+});

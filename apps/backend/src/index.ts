@@ -13,10 +13,13 @@ import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
 import {
   AdapterTelemetry,
+  buildAdapterCacheInvalidation,
   buildAdapterMountReactions,
   buildAdapterRuntime,
   buildAdapterServeHandler,
   createTokenConsumerAppResolver,
+  InProcessResponseCache,
+  ResponseCacheInvalidator,
 } from "./http/adapter-runtime/index.js";
 import { buildAdapterTokenValidator } from "./modules/adapter-token/index.js";
 import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
@@ -78,12 +81,25 @@ const adapterTokenValidator = buildAdapterTokenValidator({
 // One shared AdapterTelemetry so the serve handler's response-cache hit/miss counters
 // (CH-1.5) and the runtime's request metrics land on the same meter.
 const adapterTelemetry = new AdapterTelemetry();
+// CH-3/CH-4 — the ONE shared in-process response cache and the single coarse-invalidation
+// seam over it: the serve handler serves reads from and (on a successful write) invalidates
+// this exact cache, and the `SyncEvent` consumer registered below invalidates the same one.
+const adapterResponseCache = new InProcessResponseCache();
+const adapterCacheInvalidator = new ResponseCacheInvalidator(adapterResponseCache);
 const adapterServeHandler = buildAdapterServeHandler({
   db,
   logger,
   credentialMasterKey: config.credentials.masterKey,
   loadGovernor: sync.loadGovernor,
   cacheMetrics: adapterTelemetry,
+  responseCache: adapterResponseCache,
+  cacheInvalidator: adapterCacheInvalidator,
+});
+// CH-3 — the `sync-execution` consumer that drops cached responses for a resource the Sync
+// Engine changed, through the same seam the write path uses. Registered on the shared outbox
+// dispatcher below (like the other reaction consumers).
+const adapterCacheInvalidation = buildAdapterCacheInvalidation({
+  invalidator: adapterCacheInvalidator,
 });
 const adapterRuntime = buildAdapterRuntime({
   db,
@@ -119,7 +135,11 @@ const detection = buildDetectionBackground({
   config,
   db,
   logger,
-  additionalConsumers: [artifactInstantiation.consumer, adapterMountReactions.consumer],
+  additionalConsumers: [
+    artifactInstantiation.consumer,
+    adapterMountReactions.consumer,
+    adapterCacheInvalidation.consumer,
+  ],
   additionalReconcilers: [
     artifactInstantiation.reconciler,
     sync.reconciler,

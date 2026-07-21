@@ -18,7 +18,12 @@ import type { FastifyBaseLogger } from "fastify";
 
 import { createCredentialApplier } from "../../../modules/sync/credential-applier.js";
 import { AdapterBackendCaller } from "./backend-call.js";
-import { InProcessResponseCache, type ResponseCacheMetrics } from "./response-cache.js";
+import type { CacheInvalidator } from "./cache-invalidator.js";
+import {
+  InProcessResponseCache,
+  type ResponseCache,
+  type ResponseCacheMetrics,
+} from "./response-cache.js";
 import { DbServeContextLoader } from "./serve-context.js";
 import { AdapterServeHandler } from "./serve-handler.js";
 import { RecordLinkUnionLinkResolver } from "./union-links.js";
@@ -48,6 +53,20 @@ export interface BuildAdapterServeHandlerDeps {
   readonly credentialApplier?: CredentialApplier;
   /** AG-5.1 — the config-defined per-request union row ceiling; default when omitted. */
   readonly unionRowCeiling?: number;
+  /**
+   * CH-1 — the in-process response cache. Optional: when omitted, a fresh
+   * {@link InProcessResponseCache} is created for this handler. The composition root passes
+   * the ONE shared instance so the CH-3 `SyncEvent` consumer and this handler's write path
+   * (CH-4) invalidate the very cache this handler serves reads from.
+   */
+  readonly responseCache?: ResponseCache;
+  /**
+   * CH-4 — the coarse-invalidation seam a successful adapter write drops through. Pass the
+   * invalidator built over the SAME {@link responseCache}; omit it (integration tests that
+   * build a handler in isolation) and a successful write serves normally but invalidates
+   * nothing.
+   */
+  readonly cacheInvalidator?: CacheInvalidator;
   /**
    * CH-1.5 — the response-cache hit/miss metric seam (the shared `AdapterTelemetry`
    * satisfies it). Optional: when omitted the cache metric is a no-op, so a serve handler
@@ -90,7 +109,10 @@ export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): Se
     writeOutcomeStore: new DbWriteOutcomeStore(new AdapterWriteOutcomeRepository(deps.db)),
     // CH-1 — the real in-process response cache; it activates only for endpoints with a
     // `cacheTtl` set, so a serve handler built here caches read responses when composed to.
-    responseCache: new InProcessResponseCache(),
+    // The composition root passes the ONE shared instance (so CH-3/CH-4 invalidate it);
+    // an isolated build gets its own.
+    responseCache: deps.responseCache ?? new InProcessResponseCache(),
+    ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
     ...(deps.cacheMetrics !== undefined ? { cacheMetrics: deps.cacheMetrics } : {}),
     ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.unionRowCeiling !== undefined ? { unionRowCeiling: deps.unionRowCeiling } : {}),

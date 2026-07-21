@@ -27,6 +27,7 @@ import type {
   ApiSpec,
   FieldMapping,
   Ir,
+  IrOperation,
   OperationMapping,
   ParameterMapping,
   RegisteredApp,
@@ -41,6 +42,8 @@ import { operatorAccountsEnv } from "../../../testing/auth.testkit.js";
 import { buildAdapterRuntime, type AdapterRuntime } from "../build-adapter-runtime.js";
 import { CONSUMER_APP_HEADER, headerConsumerAppResolver } from "../consumer-app-resolver.js";
 import { buildAdapterServeHandler } from "./build-serve-handler.js";
+import { ResponseCacheInvalidator } from "./cache-invalidator.js";
+import { InProcessResponseCache } from "./response-cache.js";
 
 /**
  * **The real-machinery proof of CH-1 (response cache) end to end.** Boots the Adapter
@@ -85,6 +88,14 @@ class StubBackend {
     this.#server = createServer((request: IncomingMessage, response: ServerResponse) => {
       const url = request.url ?? "";
       this.requests.push(`${request.method ?? ""} ${url}`);
+      // A successful write to the same backend resource (`tasks`) — invalidates the read cache.
+      if (request.method === "POST" && (url === "/tasks" || url === "/tasks?")) {
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({ task_id: "created-1", task_title: "Created", completed: false }),
+        );
+        return;
+      }
       const taskMatch = /^\/tasks\/([^/?]+)/.exec(url);
       if (request.method === "GET" && taskMatch) {
         const taskId = decodeURIComponent(taskMatch[1] ?? "");
@@ -141,6 +152,15 @@ function activeApp(name: string, baseUrl?: string): RegisteredApp {
   };
 }
 
+const todoResponseSchema: NonNullable<IrOperation["responseSchema"]> = {
+  name: "Todo",
+  fields: [
+    { name: "id", type: "string", required: true },
+    { name: "title", type: "string", required: true },
+    { name: "done", type: "boolean", required: true },
+  ],
+};
+
 const consumerIr: Ir = [
   {
     resourceRef: "todos",
@@ -151,14 +171,29 @@ const consumerIr: Ir = [
         method: "get",
         path: "/todos/{todoId}",
         parameters: [{ name: "todoId", location: "path", required: true, type: "string" }],
-        responseSchema: {
-          name: "Todo",
-          fields: [
-            { name: "id", type: "string", required: true },
-            { name: "title", type: "string", required: true },
-            { name: "done", type: "boolean", required: true },
-          ],
+        responseSchema: todoResponseSchema,
+      },
+    ],
+    schemas: [],
+    crossResourceRefs: [],
+  },
+  {
+    // A SEPARATE consumer resource for the write, so its request-phase field mapping is scoped
+    // to (drafts, tasks) and never applies to the (todos, tasks) read — while still targeting
+    // the same BACKEND resource `tasks`, which is what makes the write invalidate the read.
+    resourceRef: "drafts",
+    name: "drafts",
+    operations: [
+      {
+        operationId: "createDraft",
+        method: "post",
+        path: "/drafts",
+        parameters: [],
+        requestSchema: {
+          name: "NewTodo",
+          fields: [{ name: "title", type: "string", required: true }],
         },
+        responseSchema: todoResponseSchema,
       },
     ],
     schemas: [],
@@ -176,6 +211,12 @@ const backendIr: Ir = [
         method: "get",
         path: "/tasks/{taskId}",
         parameters: [{ name: "taskId", location: "path", required: true, type: "string" }],
+      },
+      {
+        operationId: "createTask",
+        method: "post",
+        path: "/tasks",
+        parameters: [],
       },
     ],
     schemas: [],
@@ -198,14 +239,19 @@ function specRow(appId: string, role: ApiSpec["role"], ir: Ir): ApiSpec {
   };
 }
 
-function renameField(mappingId: string, sourcePath: string, targetPath: string): FieldMapping {
+function renameField(
+  mappingId: string,
+  sourcePath: string,
+  targetPath: string,
+  phase: FieldMapping["phase"] = "response",
+): FieldMapping {
   return {
     id: randomUUID(),
     mappingId,
     sourcePath,
     targetPath,
     transform: "rename",
-    phase: "response",
+    phase,
   };
 }
 
@@ -272,13 +318,30 @@ describe("adapter response cache integration (requires Postgres)", () => {
       sourceParamRef: "todos/getTodo#todoId",
       targetParamRef: "tasks/getTask#taskId",
     };
+    // The SAME consumer↔backend mapping also covers the write createDraft→createTask (a second
+    // ACTIVE mapping over the same spec pair violates the unique-direction index). The write is
+    // on its OWN (drafts, tasks) resource pair, so its request-phase field mapping never touches
+    // the (todos, tasks) read; both write to the same BACKEND resource `tasks`.
+    const writeOpMapping: OperationMapping = {
+      id: randomUUID(),
+      mappingId,
+      sourceOperationRef: "drafts/createDraft",
+      targetOperationRef: "tasks/createTask",
+      action: "create",
+    };
     await new MappingArtifactsRepository(db).replaceChildren(mappingId, {
       fieldMappings: [
+        // read (tasks → todos), response phase
         renameField(mappingId, "tasks/task_id", "todos/id"),
         renameField(mappingId, "tasks/task_title", "todos/title"),
         renameField(mappingId, "tasks/completed", "todos/done"),
+        // write request (drafts → tasks) + response (tasks → drafts)
+        renameField(mappingId, "drafts/title", "tasks/task_title", "request"),
+        renameField(mappingId, "tasks/task_id", "drafts/id"),
+        renameField(mappingId, "tasks/task_title", "drafts/title"),
+        renameField(mappingId, "tasks/completed", "drafts/done"),
       ],
-      operationMappings: [opMapping],
+      operationMappings: [opMapping, writeOpMapping],
       parameterMappings: [paramMapping],
     });
 
@@ -304,11 +367,37 @@ describe("adapter response cache integration (requires Postgres)", () => {
     };
     await artifacts.insertAdapterBindingIfAbsent(binding);
 
+    // CH-4.2 — a WRITE endpoint over the SAME backend resource (`tasks`): createTodo→createTask.
+    // A successful write through it must drop the read endpoint's cached entry for `tasks`.
+    const writeEndpoint: AdapterEndpoint = {
+      id: randomUUID(),
+      consumerAppId: consumerApp.id,
+      consumerOperationId: "drafts/createDraft",
+      status: "active",
+      aggregationStrategy: "single",
+    };
+    await artifacts.ensureAdapterEndpoint(writeEndpoint);
+    await artifacts.insertAdapterBindingIfAbsent({
+      id: randomUUID(),
+      adapterEndpointId: writeEndpoint.id,
+      backendAppId: backendApp.id,
+      backendOperationId: "tasks/createTask",
+      approvedMappingId: mappingId,
+      role: "primary",
+      status: "active",
+    });
+
+    // CH-3/CH-4 — the ONE shared cache + the single invalidation seam over it, exactly as the
+    // composition root wires them: the serve handler reads from and (on a successful write)
+    // invalidates this cache through `cacheInvalidator`.
+    const responseCache = new InProcessResponseCache();
     const serveHandler = buildAdapterServeHandler({
       db,
       logger: createServerLogger(config),
       credentialMasterKey: config.credentials.masterKey,
       loadGovernor: new AppLoadGovernor(),
+      responseCache,
+      cacheInvalidator: new ResponseCacheInvalidator(responseCache),
     });
     adapter = buildAdapterRuntime({
       db,
@@ -358,13 +447,25 @@ describe("adapter response cache integration (requires Postgres)", () => {
     await closeDb(db);
   });
 
-  function get(): Promise<LightMyRequestResponse> {
+  function get(todoId = "42"): Promise<LightMyRequestResponse> {
     return adapterApp().inject({
       method: "GET",
-      url: "/todos/42",
+      url: `/todos/${todoId}`,
       headers: { [CONSUMER_APP_HEADER]: consumerAppId },
     });
   }
+
+  function createDraft(): Promise<LightMyRequestResponse> {
+    return adapterApp().inject({
+      method: "POST",
+      url: "/drafts",
+      headers: { [CONSUMER_APP_HEADER]: consumerAppId, "content-type": "application/json" },
+      payload: { title: "Ship it" },
+    });
+  }
+
+  /** Count only the backend GETs (a write also hits the stub, via POST). */
+  const backendGets = (): number => stub.requests.filter((r) => r.startsWith("GET /tasks")).length;
 
   it("CH-1.1: a first read is served + cached; a second identical read is served from cache with NO second backend call", async () => {
     const before = stub.requests.length;
@@ -380,5 +481,32 @@ describe("adapter response cache integration (requires Postgres)", () => {
     expect(second.json()).toEqual({ id: "42", title: "Task 42", done: true });
     // CH-1.1 — the second request short-circuited the backend: still exactly one call.
     expect(stub.requests.length).toBe(before + 1);
+  });
+
+  it("CH-4.2: a successful write to the same backend resource makes the next read a MISS that re-calls the backend", async () => {
+    // A fresh id so this test does not depend on CH-1.1's cached /todos/42 entry.
+    const beforeGets = backendGets();
+
+    const first = await get("77");
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({ id: "77", title: "Task 77", done: true });
+    expect(backendGets()).toBe(beforeGets + 1); // miss → one backend GET, now cached
+
+    const cached = await get("77");
+    expect(cached.statusCode).toBe(200);
+    expect(backendGets()).toBe(beforeGets + 1); // hit → still no new backend GET
+
+    // A successful adapter write to `tasks/createTask` (backend resource `tasks`) — the same
+    // resource the read endpoint is bound to.
+    const written = await createDraft();
+    expect(written.statusCode).toBe(200);
+    expect(written.json()).toEqual({ id: "created-1", title: "Created", done: false });
+
+    // CH-4.2 — the write invalidated the read's cached `tasks` entry, so the next equivalent
+    // read is a MISS and re-calls the backend.
+    const afterWrite = await get("77");
+    expect(afterWrite.statusCode).toBe(200);
+    expect(afterWrite.json()).toEqual({ id: "77", title: "Task 77", done: true });
+    expect(backendGets()).toBe(beforeGets + 2);
   });
 });
