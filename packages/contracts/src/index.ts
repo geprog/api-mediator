@@ -30,6 +30,13 @@ export {
 } from "./credentials.js";
 
 export {
+  cutoverAdapterTokenResponseSchema,
+  issueAdapterTokenResponseSchema,
+  type CutoverAdapterTokenResponse,
+  type IssueAdapterTokenResponse,
+} from "./adapter-token.js";
+
+export {
   apiSpecMetadataDtoSchema,
   appListResponseSchema,
   appSpecsResponseSchema,

@@ -6,6 +6,7 @@ import type {
   EscapeHatchService,
   ProposalReadService,
 } from "../../modules/approval/index.js";
+import type { AdapterTokenService } from "../../modules/adapter-token/index.js";
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
@@ -37,6 +38,15 @@ export interface OperatorApiDeps {
   readonly proposalReadService: ProposalReadService;
   readonly approvalService: ApprovalService;
   readonly escapeHatchService: EscapeHatchService;
+  /**
+   * Phase-5 Auth Gateway & adapter token (AT-1/AT-4): issue/rotate/cutover a
+   * consumer app's inbound adapter token, attributing each action in the audit log.
+   * The real composition root always provides it, so the routes are mounted in
+   * production; optional only so the pre-Phase-5 in-memory unit harness (no real db)
+   * legitimately omits it, exactly like `sync`. The per-request token *validation*
+   * the gateway does lives in the Adapter Server Runtime, not here.
+   */
+  readonly adapterTokens?: AdapterTokenService;
   // Phase-4 Sync HTTP API (SA-1..SA-3): configure/enable/disable a `SyncRule`, read
   // sync state, and manually link/unlink records. Optional: the sync operator
   // surface is only mounted when the Sync Engine runtime is wired in (the real

@@ -12,7 +12,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { buildAdapterRequestAudit, type AdapterAuditWriter } from "./adapter-audit.js";
 import { AdapterTelemetry } from "./adapter-telemetry.js";
-import type { ConsumerAppResolver } from "./consumer-app-resolver.js";
+import type { ConsumerAppResolver, ResolvedConsumerApp } from "./consumer-app-resolver.js";
 import {
   auditFieldsFor,
   causeTokenOf,
@@ -52,10 +52,14 @@ export class AdapterRequestHandler {
   public constructor(private readonly deps: AdapterRequestHandlerDeps) {}
 
   public async handle(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const consumerAppId = this.deps.resolveConsumerApp(request);
-    if (consumerAppId === undefined) {
+    // The Auth Gateway runs strictly in front (AT-2.1): the token is validated
+    // *before* any routing/planning/serving, so nothing outbound happens for an
+    // unauthenticated, unrecognized, expired, or foreign token.
+    const resolution = await this.deps.resolveConsumerApp(request);
+    if (resolution === undefined) {
       // Unattributable → 401, never audited: it never reached a consumer surface.
-      // (Real token validation is AT; this RT slice only threads the app-id seam.)
+      // A recognized-but-invalid token lands here too — a clean 401, never a serve,
+      // distinct from every serving cause (AT-2.4).
       await reply
         .code(401)
         .send({ cause: "unauthenticated", message: "The adapter caller could not be identified." });
@@ -64,7 +68,7 @@ export class AdapterRequestHandler {
 
     const method = request.method;
     const path = request.url.split("?")[0] ?? "/";
-    const match = this.deps.protocolServer.resolve(consumerAppId, method, path);
+    const match = this.deps.protocolServer.resolve(resolution.consumerAppId, method, path);
     if (match === undefined) {
       // Path in no mounted consumer spec → plain 404, never audited (RT-2.2/RT-3):
       // deliberately distinguishable from `not-yet-mapped`.
@@ -72,15 +76,16 @@ export class AdapterRequestHandler {
       return;
     }
 
-    await this.handleMatched(consumerAppId, match, request, reply);
+    await this.handleMatched(resolution, match, request, reply);
   }
 
   private async handleMatched(
-    consumerAppId: string,
+    resolution: ResolvedConsumerApp,
     match: RouteMatch,
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> {
+    const consumerAppId = resolution.consumerAppId;
     const operationKey = match.route.operationKey;
     const startedAt = performance.now();
 
@@ -102,7 +107,7 @@ export class AdapterRequestHandler {
         // An unexpected internal failure (e.g. the store threw): still exactly one
         // audit row and a generic 500 — never a payload-leaking error body.
         rootSpan.setAttribute("adapter.outcome", "internal-error");
-        await this.recordAudit(consumerAppId, {
+        await this.recordAudit(resolution, {
           status: "failure",
           details: "internal-error",
         });
@@ -128,7 +133,7 @@ export class AdapterRequestHandler {
         rootSpan.setAttribute("adapter.cause", cause);
       }
       const auditFields = auditFieldsFor(result);
-      await this.recordAudit(consumerAppId, auditFields);
+      await this.recordAudit(resolution, auditFields);
       this.deps.telemetry.recordRequest({
         operationKey,
         endpointId: auditFields.endpointId,
@@ -219,11 +224,14 @@ export class AdapterRequestHandler {
   }
 
   private async recordAudit(
-    consumerAppId: string,
+    resolution: ResolvedConsumerApp,
     fields: Parameters<typeof buildAdapterRequestAudit>[0]["fields"],
   ): Promise<void> {
     const entry = buildAdapterRequestAudit({
-      consumerAppId,
+      consumerAppId: resolution.consumerAppId,
+      // AT-4.3: record which adapter token authenticated the request (by id, never
+      // by value), so a request served during a rotation overlap is attributable.
+      ...(resolution.credentialId !== undefined ? { credentialId: resolution.credentialId } : {}),
       fields,
       newId: this.deps.newId,
       now: new Date(),

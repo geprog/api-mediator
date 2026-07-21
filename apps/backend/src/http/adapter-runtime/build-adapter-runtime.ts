@@ -7,7 +7,7 @@ import Fastify from "fastify";
 
 import { AdapterTelemetry } from "./adapter-telemetry.js";
 import { DbAdapterStore } from "./db-adapter-store.js";
-import { headerConsumerAppResolver, type ConsumerAppResolver } from "./consumer-app-resolver.js";
+import type { ConsumerAppResolver } from "./consumer-app-resolver.js";
 import { AdapterRequestHandler } from "./request-handler.js";
 import { RestProtocolServer } from "./rest-protocol-server.js";
 
@@ -24,10 +24,15 @@ export interface AdapterRuntimeDeps {
    */
   readonly serveHandler?: ServeHandler;
   /**
-   * The `consumerAppId` seam the Auth Gateway (AT) fills. Defaults to the header
-   * stand-in ({@link headerConsumerAppResolver}); AT injects a token-validating one.
+   * The Auth Gateway resolver that authenticates each caller and derives its consumer
+   * app id (AT-2/AT-3). **Required — there is deliberately no default.** An auth
+   * surface must never silently fall back to a trusting stand-in (the header resolver
+   * trusts `x-mediator-consumer-app-id` and would let any caller impersonate any
+   * consumer), so every composition must supply a resolver explicitly and the
+   * compiler enforces it. Production wires the token-validating resolver; RT's own
+   * tests pass the header stand-in (`headerConsumerAppResolver`) explicitly.
    */
-  readonly resolveConsumerApp?: ConsumerAppResolver;
+  readonly resolveConsumerApp: ConsumerAppResolver;
   readonly newId?: () => string;
 }
 
@@ -77,7 +82,7 @@ export function buildAdapterRuntime(deps: AdapterRuntimeDeps): AdapterRuntime {
   const handler = new AdapterRequestHandler({
     protocolServer,
     store,
-    resolveConsumerApp: deps.resolveConsumerApp ?? headerConsumerAppResolver,
+    resolveConsumerApp: deps.resolveConsumerApp,
     auditWriter,
     telemetry,
     ...(deps.serveHandler !== undefined ? { serveHandler: deps.serveHandler } : {}),

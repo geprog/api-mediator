@@ -14,6 +14,12 @@ export interface AdapterAuditWriter {
 
 export interface AdapterAuditContext {
   readonly consumerAppId: string;
+  /**
+   * The adapter-token `Credential` id that authenticated the request (AT-4.3) —
+   * a metadata id, never the token value. Absent when the resolver performed no
+   * token authentication (the header stand-in).
+   */
+  readonly credentialId?: string;
   readonly fields: AdapterAuditFields;
   readonly newId: () => string;
   readonly now: Date;
@@ -40,6 +46,7 @@ export function buildAdapterRequestAudit(context: AdapterAuditContext): AuditLog
     actor: `consumer-app:${context.consumerAppId}`,
     status: fields.status,
     timestamp: context.now,
+    ...(context.credentialId !== undefined ? { relatedCredentialId: context.credentialId } : {}),
     ...(fields.cause !== undefined ? { cause: fields.cause } : {}),
     ...(fields.degraded !== undefined ? { degraded: fields.degraded } : {}),
     ...(fields.endpointId !== undefined ? { relatedEndpointId: fields.endpointId } : {}),
