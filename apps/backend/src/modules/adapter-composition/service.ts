@@ -317,11 +317,18 @@ export class AdapterCompositionService {
    *    the context is loaded **inside** this transaction — so its binding facts are re-derived
    *    from the just-re-pointed successor's `ParameterMapping`s / `phase = response`
    *    `FieldMapping`s — and its current composed configuration is re-run through the **same**
-   *    {@link validateComposition} CO-2/CO-3 use. That re-checks every content-dependent
-   *    derivation: a dependent binding's `chainInputs.upstreamFieldPath` against the successor
-   *    response phase, a chained binding's own `targetParamRef`s, the required-parameter
-   *    composability a dropped `ParameterMapping` (revoked pushdown) would break, and the
-   *    union dedup-key / ref preconditions.
+   *    {@link validateComposition} CO-2/CO-3 use — so a break lands exactly as it would at
+   *    first composition: a **blocking** flag where the concept blocks, a **loud per-request**
+   *    failure where the concept activates-then-checks-at-request-time (CO-7.4). Blocking:
+   *    a dependent binding's `chainInputs.upstreamFieldPath` no longer populated by the
+   *    successor's response phase, a chained binding's own `targetParamRef`s, and the
+   *    required-parameter composability a dropped `ParameterMapping` (revoked pushdown) would
+   *    break. **Not** re-flagged here (by design, matching CO-3/CO-4): the union dedup key's
+   *    *schema* precondition is re-checked, but a successor that drops the response-phase
+   *    `FieldMapping` populating the dedup value is not — it degrades fail-safe at runtime
+   *    (unknown value ⇒ singleton row, an honest superset, AG-3.5), and a dropped *required*
+   *    response field is caught loud by AG-7. An *optional* filter's revoked pushdown likewise
+   *    activates and is rejected per-request by RP-2 — never a silent plausible-but-wrong answer.
    * 3. **Flag or keep (CO-7.4).** Validation passing leaves the endpoint `active` with its
    *    re-pointed bindings; validation failing flags an `active` endpoint
    *    `composition-required` (never a broken `active`) — it keeps serving its previous
