@@ -97,6 +97,7 @@ class FakeUnitOfWork implements UnitOfWork {
           return Promise.resolve(next);
         },
         createMany: (): Promise<ResourceBinding[]> => Promise.resolve([]),
+        listByApiSpecId: (): Promise<ResourceBinding[]> => Promise.resolve([]),
         updateScopePathBinding: (): Promise<ResourceBinding | undefined> =>
           Promise.resolve(undefined),
         updateSourceScopeRef: (): Promise<ResourceBinding | undefined> =>
@@ -116,6 +117,11 @@ class FakeUnitOfWork implements UnitOfWork {
         create: (a: RegisteredApp): Promise<RegisteredApp> => Promise.resolve(a),
       },
       credentialStore: { store: (): Promise<never> => Promise.reject(new Error("unused")) },
+      approvedMappings: {
+        listActiveBySpecId: (): Promise<never[]> => Promise.resolve([]),
+        repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
+      },
+      audit: { insert: (): Promise<void> => Promise.resolve() },
       emit: (): Promise<void> => Promise.resolve(),
     } satisfies TxStores;
     return work(stores);

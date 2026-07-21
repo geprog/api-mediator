@@ -1,9 +1,22 @@
-import type { RegisteredApp } from "@mediator/domain";
+import type {
+  ApiSpec,
+  ApprovedMapping,
+  Ir,
+  RegisteredApp,
+  ResourceBinding,
+} from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import { FakeUnitOfWork, InMemoryStore } from "../testing/fake-persistence.testkit.js";
 import { providerSpecDocument } from "../testing/sample-specs.testkit.js";
-import { NoActiveSpecError, SpecRegistry, UnknownAppError } from "./spec-registry.js";
+import {
+  NoActiveSpecError,
+  SpecRegistry,
+  UnknownAppError,
+  carryForwardAnalysisExclusions,
+  carryForwardResourceBinding,
+  repinnedSpecPair,
+} from "./spec-registry.js";
 
 /**
  * Unit tests for the documented `SpecRegistry.ingestSpec` interface: it reads the
@@ -202,5 +215,306 @@ describe("SpecRegistry.ingestNewVersion", () => {
       ),
     ).rejects.toBeInstanceOf(NoActiveSpecError);
     expect(store.specs.size).toBe(0);
+  });
+});
+
+/**
+ * SL-2 — the additive reaction wired into the additive branch of `ingestNewVersion`:
+ * re-pin every active mapping pinned to the superseded version, carry forward the prior
+ * version's `analysisExclusions` + `ResourceBinding`s, and audit each re-pin — all
+ * without changing anything that executes (never `stale`, never a content change, never
+ * a touched counterpart).
+ */
+describe("SpecRegistry.ingestNewVersion additive reaction (SL-2)", () => {
+  const COUNTERPART_APP = "app-counterpart";
+  const COUNTERPART_SPEC = "spec-counterpart-v1";
+
+  async function seedV1(
+    store: InMemoryStore,
+    unitOfWork: FakeUnitOfWork,
+    registry: SpecRegistry,
+    analysisExclusions: string[] = [],
+  ): Promise<{ app: RegisteredApp; v1: ApiSpec }> {
+    const app = seedApp(store);
+    const v1 = await unitOfWork.run((tx) =>
+      registry.ingestSpec(app.id, providerSpecDocument(), "PROVIDER", analysisExclusions, tx),
+    );
+    return { app, v1 };
+  }
+
+  /** An `active` peer-peer mapping seeded straight into the store. */
+  function seedMapping(store: InMemoryStore, mapping: ApprovedMapping): ApprovedMapping {
+    store.approvedMappings.set(mapping.id, mapping);
+    return mapping;
+  }
+
+  function peerMapping(
+    id: string,
+    sourceSpecId: string,
+    targetSpecId: string,
+    counterpartMappingId: string,
+  ): ApprovedMapping {
+    return {
+      id,
+      sourceSpecId,
+      targetSpecId,
+      sourceAppId: "app-1",
+      targetAppId: COUNTERPART_APP,
+      variant: "peer-peer",
+      approvedBy: "reviewer:alice",
+      approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+      status: "active",
+      counterpartMappingId,
+    };
+  }
+
+  it("re-pins every active mapping pinned to the prior version, audits each, and leaves no active mapping on the superseded row (SL-2.1/2.3)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // A bidirectional peer pair: one direction pins v1 as source, the reverse as target.
+    seedMapping(store, peerMapping("m1", v1.id, COUNTERPART_SPEC, "m2"));
+    seedMapping(store, peerMapping("m2", COUNTERPART_SPEC, v1.id, "m1"));
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("additive");
+    const v2Id = outcome.newSpec.id;
+
+    // Each side advanced only on the side that pinned v1; the counterpart side is untouched.
+    const m1 = store.approvedMappings.get("m1");
+    const m2 = store.approvedMappings.get("m2");
+    expect(m1).toMatchObject({ sourceSpecId: v2Id, targetSpecId: COUNTERPART_SPEC });
+    expect(m2).toMatchObject({ sourceSpecId: COUNTERPART_SPEC, targetSpecId: v2Id });
+
+    // SL-2.3 — no active mapping still references the now-superseded v1 row.
+    const stillOnV1 = [...store.approvedMappings.values()].filter(
+      (m) => m.status === "active" && (m.sourceSpecId === v1.id || m.targetSpecId === v1.id),
+    );
+    expect(stillOnV1).toEqual([]);
+
+    // SL-2.1 — each re-pin is an audit-logged event (system-attributed, per mapping).
+    const repins = store.auditLog.filter((entry) => entry.type === "mapping-decision");
+    expect(repins).toHaveLength(2);
+    expect(repins.map((entry) => entry.relatedMappingId).sort()).toEqual(["m1", "m2"]);
+    for (const entry of repins) {
+      expect(entry.actor).toBe("system");
+      expect(entry.status).toBeUndefined(); // a mapping-decision row carries no execution status.
+      expect(entry.details).toContain(v2Id);
+    }
+  });
+
+  it("changes only the pinned spec version — no status/counterpart/content change, never stale (SL-2.2/2.5)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    const original = seedMapping(store, peerMapping("m1", v1.id, COUNTERPART_SPEC, "m2"));
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // Byte-identical except the one advanced spec id: status still active (never stale),
+    // counterpartMappingId undisturbed (SL-2.5), approver/variant/appIds unchanged.
+    expect(store.approvedMappings.get("m1")).toEqual({
+      ...original,
+      sourceSpecId: outcome.newSpec.id,
+    });
+    expect(store.approvedMappings.get("m1")?.status).toBe("active");
+    expect(store.approvedMappings.get("m1")?.counterpartMappingId).toBe("m2");
+  });
+
+  it("carries forward analysisExclusions and ResourceBindings (with confirmations) to the new version (SL-2.4)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    // v1 excludes the `issues` group and its derived binding gets an operator confirmation.
+    const { app, v1 } = await seedV1(store, unitOfWork, registry, ["issues"]);
+    const v1Issues = [...store.bindings.values()].find(
+      (b) => b.apiSpecId === v1.id && b.resourceRef === "issues",
+    );
+    if (v1Issues?.nativeIdRef === undefined) throw new Error("expected a derived nativeIdRef");
+    const confirmedAt = new Date("2026-07-20T12:00:00.000Z");
+    store.bindings.set(v1Issues.id, {
+      ...v1Issues,
+      nativeIdRef: { ...v1Issues.nativeIdRef, confirmedBy: "reviewer:bob", confirmedAt },
+    });
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    const v2Id = outcome.newSpec.id;
+
+    // Exclusions carried forward (the `issues` group still resolves in the new IR).
+    expect(outcome.newSpec.analysisExclusions).toEqual(["issues"]);
+    expect(store.specs.get(v2Id)?.analysisExclusions).toEqual(["issues"]);
+
+    // The binding carried forward as a fresh row on v2, confirmation intact.
+    const v2Issues = [...store.bindings.values()].find(
+      (b) => b.apiSpecId === v2Id && b.resourceRef === "issues",
+    );
+    expect(v2Issues).toBeDefined();
+    expect(v2Issues?.id).not.toBe(v1Issues.id); // a new row on the new version.
+    expect(v2Issues?.nativeIdRef).toEqual({
+      value: v1Issues.nativeIdRef.value,
+      confirmedBy: "reviewer:bob",
+      confirmedAt,
+    });
+  });
+
+  it("triggers nothing for an excluded group beyond carrying its exclusion forward (SL-2.6)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app } = await seedV1(store, unitOfWork, registry, ["issues"]);
+    const eventsBefore = store.events.length;
+
+    // The additive change (a new optional field) lands *inside* the excluded `issues` group.
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // The exclusion is preserved and nothing was triggered for it: no analysis event, and
+    // (no mappings) no re-pin audit rows — the deterministic reaction never analyses.
+    expect(outcome.newSpec.analysisExclusions).toEqual(["issues"]);
+    expect(store.events.length).toBe(eventsBefore);
+    expect(store.auditLog).toEqual([]);
+  });
+
+  it("does not run the reaction on a breaking advance (out of SL-2 scope)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+    seedMapping(store, peerMapping("m1", v1.id, COUNTERPART_SPEC, "m2"));
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithRetypedField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+
+    // A breaking advance re-pins nothing and audits nothing (SL-4…SL-6 own that path).
+    expect(store.approvedMappings.get("m1")?.sourceSpecId).toBe(v1.id);
+    expect(store.auditLog).toEqual([]);
+  });
+});
+
+/**
+ * SL-2 pure policy: the re-pin/carry-forward helpers, unit-tested directly so the
+ * "drop what no longer resolves" safety net is provable without a whole additive round
+ * (a real additive diff removes nothing, so the drop is otherwise unreachable).
+ */
+describe("SL-2 pure carry-forward / re-pin helpers", () => {
+  function issuesIr(fieldNames: string[]): Ir {
+    return [
+      {
+        resourceRef: "issues",
+        name: "issues",
+        operations: [
+          {
+            operationId: "listIssues",
+            method: "get",
+            path: "/issues",
+            parameters: [],
+            responseSchema: {
+              name: "IssueList",
+              fields: fieldNames.map((name) => ({ name, type: "string", required: false })),
+            },
+          },
+        ],
+        schemas: [],
+        crossResourceRefs: [],
+      },
+    ];
+  }
+
+  it("repinnedSpecPair advances only the side pinned to the superseded version", () => {
+    expect(repinnedSpecPair({ sourceSpecId: "old", targetSpecId: "b" }, "old", "new")).toEqual({
+      sourceSpecId: "new",
+      targetSpecId: "b",
+    });
+    expect(repinnedSpecPair({ sourceSpecId: "a", targetSpecId: "old" }, "old", "new")).toEqual({
+      sourceSpecId: "a",
+      targetSpecId: "new",
+    });
+    expect(repinnedSpecPair({ sourceSpecId: "a", targetSpecId: "b" }, "old", "new")).toEqual({
+      sourceSpecId: "a",
+      targetSpecId: "b",
+    });
+  });
+
+  it("carryForwardAnalysisExclusions keeps resolving groups and drops the rest", () => {
+    const ir = issuesIr(["id"]);
+    expect(carryForwardAnalysisExclusions(["issues", "ghosts"], ir)).toEqual(["issues"]);
+    expect(carryForwardAnalysisExclusions([], ir)).toEqual([]);
+  });
+
+  it("carryForwardResourceBinding copies a fully-resolving binding verbatim onto the new version", () => {
+    const confirmedAt = new Date("2026-07-20T00:00:00.000Z");
+    const prior: ResourceBinding = {
+      id: "old-binding",
+      apiSpecId: "old-spec",
+      resourceRef: "issues",
+      nativeIdRef: { value: { kind: "field", path: "id" }, confirmedBy: "op", confirmedAt },
+      scopePathBindings: [],
+    };
+    const carried = carryForwardResourceBinding(prior, "new-spec", "new-binding", issuesIr(["id"]));
+    expect(carried).toEqual({
+      id: "new-binding",
+      apiSpecId: "new-spec",
+      resourceRef: "issues",
+      nativeIdRef: { value: { kind: "field", path: "id" }, confirmedBy: "op", confirmedAt },
+      scopePathBindings: [],
+    });
+  });
+
+  it("carryForwardResourceBinding drops a ref the new IR no longer resolves", () => {
+    const prior: ResourceBinding = {
+      id: "old-binding",
+      apiSpecId: "old-spec",
+      resourceRef: "issues",
+      // `id` is gone from the new representation → this ref no longer resolves.
+      nativeIdRef: {
+        value: { kind: "field", path: "id" },
+        confirmedBy: "op",
+        confirmedAt: new Date(),
+      },
+      collectionReadRef: {
+        value: { kind: "operation", operationId: "listIssues" },
+        confirmedBy: null,
+        confirmedAt: null,
+      },
+      scopePathBindings: [],
+    };
+    const carried = carryForwardResourceBinding(
+      prior,
+      "new-spec",
+      "new-binding",
+      issuesIr(["title"]),
+    );
+    expect(carried?.nativeIdRef).toBeUndefined(); // dropped — no longer resolves.
+    expect(carried?.collectionReadRef).toEqual(prior.collectionReadRef); // still resolves.
+    expect(carried?.id).toBe("new-binding");
+    expect(carried?.apiSpecId).toBe("new-spec");
+  });
+
+  it("carryForwardResourceBinding drops the whole binding when its resource group is gone", () => {
+    const prior: ResourceBinding = {
+      id: "old-binding",
+      apiSpecId: "old-spec",
+      resourceRef: "issues",
+      scopePathBindings: [],
+    };
+    expect(carryForwardResourceBinding(prior, "new-spec", "new-binding", [])).toBeUndefined();
   });
 });

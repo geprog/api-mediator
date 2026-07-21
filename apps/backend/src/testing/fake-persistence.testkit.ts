@@ -12,6 +12,8 @@ import type {
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
+  ApprovedMapping,
+  AuditLogEntry,
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
@@ -23,8 +25,10 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { AnalysisExclusionsService } from "../modules/analysis-exclusions.js";
 import { FakeApprovalPersistence } from "../modules/approval/approval.testkit.js";
 import type {
+  ApprovedMappingTxRepo,
   AppReader,
   AppTxRepo,
+  AuditTxRepo,
   BindingReader,
   BindingTxRepo,
   CredentialTxStore,
@@ -81,6 +85,10 @@ export class InMemoryStore {
    * to make `scope-link` a selectable kind for a resource (SS-18.4).
    */
   public readonly scopeCorrespondences = new Map<string, ScopeCorrespondence>();
+  /** SL-2 — `ApprovedMapping`s keyed by id, so the additive re-pin can find + advance them. */
+  public readonly approvedMappings = new Map<string, ApprovedMapping>();
+  /** SL-2 — appended audit rows (the re-pin records `mapping-decision`/`system` entries). */
+  public readonly auditLog: AuditLogEntry[] = [];
 }
 
 /**
@@ -300,6 +308,44 @@ class FakeCredentialStore implements CredentialTxStore {
 }
 
 /**
+ * Mirrors {@link ApprovedMappingRepository}'s SL-2 methods: the `active` mappings pinned
+ * to a spec id (either side), and a spec-ids-only re-pin that leaves every other column
+ * byte-identical.
+ */
+class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+  public listActiveBySpecId(specId: string): Promise<ApprovedMapping[]> {
+    return Promise.resolve(
+      [...this.store.approvedMappings.values()].filter(
+        (mapping) =>
+          mapping.status === "active" &&
+          (mapping.sourceSpecId === specId || mapping.targetSpecId === specId),
+      ),
+    );
+  }
+  public repinSpecs(
+    id: string,
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined> {
+    const existing = this.store.approvedMappings.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    // Only the pinned spec ids change — every other column stays byte-identical (SL-2.2).
+    const updated: ApprovedMapping = { ...existing, sourceSpecId, targetSpecId };
+    this.store.approvedMappings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+}
+
+class FakeAuditRepo implements AuditTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+  public insert(entry: AuditLogEntry): Promise<void> {
+    this.store.auditLog.push(entry);
+    return Promise.resolve();
+  }
+}
+
+/**
  * A {@link UnitOfWork} over the in-memory {@link InMemoryStore}. On a thrown
  * error it restores a snapshot taken before `work` ran, mimicking a transaction
  * rollback so atomicity (AR-1 crit 7) is unit-testable.
@@ -314,12 +360,16 @@ export class FakeUnitOfWork implements UnitOfWork {
       bindings: new Map(this.store.bindings),
       credentials: [...this.store.credentials],
       events: [...this.store.events],
+      approvedMappings: new Map(this.store.approvedMappings),
+      auditLog: [...this.store.auditLog],
     };
     const stores: TxStores = {
       registeredApps: new FakeAppRepo(this.store),
       apiSpecs: new FakeSpecRepo(this.store),
       resourceBindings: new FakeBindingRepo(this.store),
       credentialStore: new FakeCredentialStore(this.store),
+      approvedMappings: new FakeApprovedMappingRepo(this.store),
+      audit: new FakeAuditRepo(this.store),
       emit: (event) => {
         this.store.events.push(event);
         return Promise.resolve();
@@ -339,12 +389,16 @@ export class FakeUnitOfWork implements UnitOfWork {
     bindings: Map<string, ResourceBinding>;
     credentials: RecordedCredential[];
     events: DomainEventEnvelope[];
+    approvedMappings: Map<string, ApprovedMapping>;
+    auditLog: AuditLogEntry[];
   }): void {
     replaceMap(this.store.apps, snapshot.apps);
     replaceMap(this.store.specs, snapshot.specs);
     replaceMap(this.store.bindings, snapshot.bindings);
     replaceArray(this.store.credentials, snapshot.credentials);
     replaceArray(this.store.events, snapshot.events);
+    replaceMap(this.store.approvedMappings, snapshot.approvedMappings);
+    replaceArray(this.store.auditLog, snapshot.auditLog);
   }
 }
 

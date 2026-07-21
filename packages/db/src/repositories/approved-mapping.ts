@@ -1,5 +1,5 @@
 import type { ApprovedMapping } from "@mediator/domain";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapApprovedMappingRow, toApprovedMappingInsert } from "../mappers/approved-mapping.js";
@@ -73,6 +73,49 @@ export class ApprovedMappingRepository {
           eq(approvedMapping.status, "active"),
         ),
       );
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
+   * **SL-2.1 — every `active` `ApprovedMapping` pinned to `specId`** on either side
+   * (`sourceSpecId` or `targetSpecId`). The set the additive re-pin advances when a
+   * spec lineage's active version is superseded: an additive diff proves each
+   * referenced element unchanged, so each of these mappings is re-pinned to the new
+   * version. Only `active` rows — a `superseded`/`archived` mapping already describes
+   * an old shape and is never advanced.
+   */
+  public async listActiveBySpecId(specId: string): Promise<ApprovedMapping[]> {
+    const rows = await this.db
+      .select()
+      .from(approvedMapping)
+      .where(
+        and(
+          eq(approvedMapping.status, "active"),
+          or(eq(approvedMapping.sourceSpecId, specId), eq(approvedMapping.targetSpecId, specId)),
+        ),
+      );
+    return rows.map(mapApprovedMappingRow);
+  }
+
+  /**
+   * **SL-2.1/2.2 — re-pin a mapping to a new spec version.** Updates **only** the
+   * pinned spec ids (`sourceSpecId`/`targetSpecId`); every other column —
+   * `status`, `counterpartMappingId`, `approvedBy`/`approvedAt`, `variant`, and the
+   * mapping's `FieldMapping`/`OperationMapping` children — is left byte-identical, so
+   * nothing that executes changes and no re-review is required. The caller supplies
+   * the re-pinned pair (one side advanced, the other carried forward). Returns the
+   * updated mapping, or `undefined` when no row with `id` exists.
+   */
+  public async repinSpecs(
+    id: string,
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ sourceSpecId, targetSpecId })
+      .where(eq(approvedMapping.id, id))
+      .returning();
     return row === undefined ? undefined : mapApprovedMappingRow(row);
   }
 
