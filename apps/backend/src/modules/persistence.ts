@@ -18,6 +18,8 @@ import type { CredentialStoreLogger } from "@mediator/credentials";
 import type { EventBus } from "@mediator/event-bus";
 import type {
   ApiSpec,
+  ApiSpecRole,
+  ApiSpecStatus,
   DomainEventEnvelope,
   RegisteredApp,
   ResourceBinding,
@@ -69,6 +71,10 @@ export interface AppTxRepo {
 export interface SpecTxRepo {
   create(spec: ApiSpec): Promise<ApiSpec>;
   getById(id: string): Promise<ApiSpec | undefined>;
+  /** SL-1.1 — the single `active` spec of a `(app, role)` lineage (the version a re-ingest advances from). */
+  findActiveByAppAndRole(appId: string, role: ApiSpecRole): Promise<ApiSpec | undefined>;
+  /** SL-1.1 — advance a spec's lifecycle status (used to supersede the prior active version). */
+  updateStatus(id: string, status: ApiSpecStatus): Promise<ApiSpec | undefined>;
   updateAnalysisExclusions(id: string, analysisExclusions: string[]): Promise<ApiSpec | undefined>;
 }
 

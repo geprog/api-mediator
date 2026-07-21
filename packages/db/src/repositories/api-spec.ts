@@ -1,5 +1,5 @@
-import type { ApiSpec } from "@mediator/domain";
-import { eq } from "drizzle-orm";
+import type { ApiSpec, ApiSpecRole, ApiSpecStatus } from "@mediator/domain";
+import { and, eq } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapApiSpecRow, toApiSpecInsert } from "../mappers/api-spec.js";
@@ -37,6 +37,38 @@ export class ApiSpecRepository {
   public async listActive(): Promise<ApiSpec[]> {
     const rows = await this.db.select().from(apiSpec).where(eq(apiSpec.status, "active"));
     return rows.map(mapApiSpecRow);
+  }
+
+  /**
+   * The single `active` `ApiSpec` for one `(app, role)` **spec lineage** (SL-1.1) —
+   * the version a re-ingestion advances from. At most one row is `active` per lineage
+   * (the version-advance transition supersedes the prior active in the same
+   * transaction), so the first row is returned; `undefined` when the lineage has no
+   * active version yet (a first-ever ingestion, which is `ingestSpec`'s v1 path).
+   */
+  public async findActiveByAppAndRole(
+    appId: string,
+    role: ApiSpecRole,
+  ): Promise<ApiSpec | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(apiSpec)
+      .where(and(eq(apiSpec.appId, appId), eq(apiSpec.role, role), eq(apiSpec.status, "active")));
+    return row === undefined ? undefined : mapApiSpecRow(row);
+  }
+
+  /**
+   * Advance a spec's `status` (SL-1.1) — used to mark the prior active version
+   * `superseded` when a new version is ingested for its lineage. Returns the updated
+   * `ApiSpec`, or `undefined` when no spec with `id` exists.
+   */
+  public async updateStatus(id: string, status: ApiSpecStatus): Promise<ApiSpec | undefined> {
+    const [row] = await this.db
+      .update(apiSpec)
+      .set({ status })
+      .where(eq(apiSpec.id, id))
+      .returning();
+    return row === undefined ? undefined : mapApiSpecRow(row);
   }
 
   /**

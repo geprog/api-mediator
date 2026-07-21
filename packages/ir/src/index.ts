@@ -11,14 +11,22 @@
  * binding `id` via `crypto.randomUUID()` (non-deterministic, though not I/O).
  * `computeContentHash` and the decomposition itself are deterministic.
  *
- * `SpecDiff` (additive/breaking classification between IR versions) is Phase 6
- * and deliberately not part of this slice.
+ * `diffSpec` (SL-1: the additive/breaking `SpecDiff` classification between two IR
+ * versions of one lineage) is likewise pure over the IR and lives here.
  */
 
 export { buildIr } from "./build-ir.js";
 export { deriveResourceBindings } from "./resource-bindings.js";
 export { computeContentHash } from "./content-hash.js";
 export { IrError, SpecParseError, UnsupportedSpecVersionError } from "./errors.js";
+export { diffSpec } from "./spec-diff.js";
+export type {
+  SpecChange,
+  SpecChangeClassification,
+  SpecChangeKind,
+  SpecChangeLocation,
+  SpecDiff,
+} from "./spec-diff.js";
 export {
   pausesDependentRules,
   revalidateResourceBinding,

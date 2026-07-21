@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 
 import type { ApiSpec, ApiSpecRole, AppCapabilities, Ir } from "@mediator/domain";
 import { createSpecIngested } from "@mediator/event-bus";
-import { buildIr, computeContentHash, deriveResourceBindings } from "@mediator/ir";
+import {
+  buildIr,
+  computeContentHash,
+  deriveResourceBindings,
+  diffSpec,
+  type SpecDiff,
+} from "@mediator/ir";
 
 import type { TxStores } from "./persistence.js";
 
@@ -28,6 +34,41 @@ export class UnknownAppError extends Error {
     this.name = "UnknownAppError";
   }
 }
+
+/**
+ * Raised when {@link SpecRegistry.ingestNewVersion} is called for a `(app, role)`
+ * lineage that has no `active` spec yet. Version advance requires a prior version to
+ * diff against and supersede; the first-ever (v1) ingestion of a lineage is
+ * {@link SpecRegistry.ingestSpec}'s path (Phase 1), not this one.
+ */
+export class NoActiveSpecError extends Error {
+  public constructor(appId: string, role: ApiSpecRole) {
+    super(`App ${appId} has no active ${role} spec to advance from.`);
+    this.name = "NoActiveSpecError";
+  }
+}
+
+/**
+ * **SL-1 — the outcome of re-ingesting a document for an existing lineage.** A
+ * discriminated union, not optional-field soup, so the caller handles both branches
+ * exhaustively:
+ *
+ * - `"unchanged"` — an identical re-submission (same `contentHash`) of the already-
+ *   active version (SL-1.5): **no** new version was created and **no** `diff` was
+ *   computed, so nothing downstream should react.
+ * - `"advanced"` — the lineage's active version advanced: `newSpec` is the new
+ *   `active` version, `supersededSpec` is the prior version now `superseded`, and
+ *   `diff` is the one classification (SL-1.6) the additive/breaking reactions
+ *   (SL-2…SL-6) read instead of re-diffing.
+ */
+export type SpecReingestOutcome =
+  | { readonly kind: "unchanged"; readonly activeSpec: ApiSpec }
+  | {
+      readonly kind: "advanced";
+      readonly newSpec: ApiSpec;
+      readonly supersededSpec: ApiSpec;
+      readonly diff: SpecDiff;
+    };
 
 /**
  * The Spec Registry's Phase-1 responsibility: parse an OpenAPI document into the
@@ -104,5 +145,89 @@ export class SpecRegistry {
     );
 
     return created;
+  }
+
+  /**
+   * **SL-1.2/1.3/1.4 — the documented `SpecRegistry.diffSpec` interface**
+   * (`docs/architecture/overview.md`), delegating to the pure `@mediator/ir`
+   * classifier. Protocol-agnostic (over the IR, no OpenAPI logic) and side-effect
+   * free; the version-advance orchestration below computes it once and hands it on.
+   */
+  public diffSpec(oldIr: Ir, newIr: Ir): SpecDiff {
+    return diffSpec(oldIr, newIr);
+  }
+
+  /**
+   * **SL-1 — advance a `(app, role)` spec lineage to a newly-ingested document and
+   * classify what changed.** For a lineage that already has an `active` `ApiSpec`
+   * (the first-ever v1 ingestion is {@link ingestSpec}'s Phase-1 path):
+   *
+   * 1. **Content-hash no-op (SL-1.5)** — an identical re-submission (same
+   *    `contentHash` as the active version) creates no new version and computes no
+   *    diff: `{ kind: "unchanged" }`. Nothing downstream reacts.
+   * 2. **Version advance (SL-1.1)** — otherwise the document is parsed to IR, stored
+   *    as a **new** `ApiSpec` version (`active`, `version + 1`), and the prior active
+   *    version is marked `superseded`, so the lineage's active version advances.
+   * 3. **Diff (SL-1.2/1.6)** — the `SpecDiff` between the prior active IR and the new
+   *    IR is computed **once** and returned in the `"advanced"` outcome, for the
+   *    SL-2…SL-6 reactions to read.
+   *
+   * Deliberately **out of scope here** (owned by later slices, so the boundary stays
+   * clean): applying either reaction — no mapping is re-pinned or set `stale`, no
+   * `ResourceBinding`/`analysisExclusions` carry-forward (SL-2), and **no
+   * `SpecIngested` is emitted** (that event triggers a *full* detection analysis; the
+   * SL-2…SL-6 reactions are the diff's scoped consumers instead). Between this
+   * transition and those reactions an active mapping may still reference the now-
+   * `superseded` prior version — the expected intermediate the reactions resolve.
+   */
+  public async ingestNewVersion(
+    appId: string,
+    document: Record<string, unknown>,
+    role: ApiSpecRole,
+    tx: TxStores,
+  ): Promise<SpecReingestOutcome> {
+    const app = await tx.registeredApps.getById(appId);
+    if (app === undefined) {
+      throw new UnknownAppError(appId);
+    }
+    const active = await tx.apiSpecs.findActiveByAppAndRole(appId, role);
+    if (active === undefined) {
+      throw new NoActiveSpecError(appId, role);
+    }
+
+    const contentHash = computeContentHash(document);
+    if (contentHash === active.contentHash) {
+      // SL-1.5 — identical re-submission: no new version, no diff, no reaction.
+      return { kind: "unchanged", activeSpec: active };
+    }
+
+    const newIr = await buildIr(document);
+    const diff = this.diffSpec(active.parsedIR, newIr);
+
+    const newSpec = await tx.apiSpecs.create({
+      id: randomUUID(),
+      appId,
+      role,
+      rawDocument: document,
+      parsedIR: newIr,
+      // Exclusions (and `ResourceBinding`s) carry forward in SL-2; the advance itself
+      // starts the new version with an empty scope and derives nothing (nothing
+      // analyzes it in SL-1 — no `SpecIngested` is emitted).
+      analysisExclusions: [],
+      version: active.version + 1,
+      contentHash,
+      status: "active",
+      createdAt: new Date(),
+    });
+    const superseded = await tx.apiSpecs.updateStatus(active.id, "superseded");
+
+    return {
+      kind: "advanced",
+      newSpec,
+      // `updateStatus` returns undefined only if the row vanished mid-transaction (it
+      // did not — we just read it); fall back to the known prior with its new status.
+      supersededSpec: superseded ?? { ...active, status: "superseded" },
+      diff,
+    };
   }
 }

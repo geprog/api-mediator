@@ -106,6 +106,8 @@ class FakeUnitOfWork implements UnitOfWork {
         getById: (id: string): Promise<ApiSpec | undefined> =>
           Promise.resolve(id === SPEC_ID ? spec() : undefined),
         create: (s: ApiSpec): Promise<ApiSpec> => Promise.resolve(s),
+        findActiveByAppAndRole: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
+        updateStatus: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
         updateAnalysisExclusions: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
       },
       registeredApps: {
