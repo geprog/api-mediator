@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { AppConfig } from "@mediator/config";
 import { EnvKeyProvider, type CredentialStoreLogger } from "@mediator/credentials";
 import {
@@ -16,6 +18,7 @@ import { getActiveTraceContext, shutdownTelemetry } from "@mediator/telemetry";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import { pino } from "pino";
 
+import { AdapterCompositionService } from "./modules/adapter-composition/index.js";
 import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
 import {
@@ -194,6 +197,9 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       db,
       rotationOverlapMs: config.adapterAuth.rotationOverlapMs,
     }),
+    // Phase-5 endpoint composition (CO-2): validate + atomically activate a
+    // composition-required endpoint, attributing each activation (OA-3).
+    adapterComposition: new AdapterCompositionService({ db, newId: randomUUID }),
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's
     // operator surface + the pooled db (reads + the config/attribution `tx`). Only
     // present when the sync background is wired in.

@@ -30,6 +30,19 @@ export {
 } from "./credentials.js";
 
 export {
+  composeAdapterEndpointRequestSchema,
+  composeAdapterEndpointResponseSchema,
+  composeBindingRequestSchema,
+  composedBindingDtoSchema,
+  composedEndpointDtoSchema,
+  type ComposeAdapterEndpointRequest,
+  type ComposeAdapterEndpointResponse,
+  type ComposeBindingRequest,
+  type ComposedBindingDto,
+  type ComposedEndpointDto,
+} from "./adapter-endpoints.js";
+
+export {
   cutoverAdapterTokenResponseSchema,
   issueAdapterTokenResponseSchema,
   type CutoverAdapterTokenResponse,

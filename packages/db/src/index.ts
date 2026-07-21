@@ -156,6 +156,7 @@ export {
 
 // Repositories.
 export {
+  AdapterCompositionRepository,
   AdapterWriteOutcomeRepository,
   ApiSpecRepository,
   ApprovedMappingRepository,
@@ -179,9 +180,13 @@ export {
   SyncFieldStateRepository,
   SyncRuleRepository,
   type AdapterWriteOutcomeOps,
+  type ApplyCompositionInput,
+  type ApplyCompositionResult,
   type ClaimedDetectionJob,
   type ClaimedQueueEntry,
   type ClaimParams,
+  type CompositionBindingConfig,
+  type CompositionEndpointConfig,
   type DetectionJob,
   type DetectionJobEnqueueOps,
   type DetectionJobWorkerOps,

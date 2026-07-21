@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { AdapterCompositionService } from "../../modules/adapter-composition/index.js";
 import type { ExclusionsReplacer } from "../../modules/analysis-exclusions.js";
 import type {
   ApprovalService,
@@ -47,6 +48,14 @@ export interface OperatorApiDeps {
    * the gateway does lives in the Adapter Server Runtime, not here.
    */
   readonly adapterTokens?: AdapterTokenService;
+  /**
+   * Phase-5 endpoint composition (CO-2): validate + atomically activate a
+   * `composition-required` `AdapterEndpoint`. Optional for the same reason as
+   * `adapterTokens`/`sync` — the real composition root always provides it (so the route
+   * is mounted in production), while the pre-Phase-5 in-memory unit harness, which has no
+   * real db/transaction, legitimately omits it and the route is simply not registered.
+   */
+  readonly adapterComposition?: AdapterCompositionService;
   // Phase-4 Sync HTTP API (SA-1..SA-3): configure/enable/disable a `SyncRule`, read
   // sync state, and manually link/unlink records. Optional: the sync operator
   // surface is only mounted when the Sync Engine runtime is wired in (the real
