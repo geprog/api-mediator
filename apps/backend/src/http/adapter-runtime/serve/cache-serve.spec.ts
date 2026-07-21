@@ -6,10 +6,12 @@ import type {
   FieldMapping,
   IrOperation,
   ParameterMapping,
+  ResourceBinding,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import type { BackendCallInput, BackendCallResult, BackendCaller } from "./backend-call.js";
+import type { CacheInvalidator } from "./cache-invalidator.js";
 import {
   InProcessResponseCache,
   type ResponseCache,
@@ -18,6 +20,11 @@ import {
 } from "./response-cache.js";
 import { AdapterServeHandler, type ServeLogger } from "./serve-handler.js";
 import type { LoadedBinding, ServeContext, ServeContextLoader } from "./serve-context.js";
+import type {
+  UnionCollectionReadInput,
+  UnionCollectionReadResult,
+  UnionCollectionReader,
+} from "./union-fetch.js";
 import type { RecordWriteOutcomeInput, WriteOutcomeStore } from "./write-outcome-store.js";
 
 /**
@@ -138,6 +145,16 @@ const okBody: BackendCallResult = {
   body: { task_id: "42", task_title: "Ship it", completed: true },
 };
 const servedTodo = { id: "42", title: "Ship it", done: true };
+
+/**
+ * A backend body whose mapped consumer shape violates the consumer response schema: `completed`
+ * is a string, so the renamed `done` is a string where the schema requires a boolean — an AG-7
+ * `mediator-transform-error` (the transform succeeds; validation rejects the shape).
+ */
+const agSevenBody: BackendCallResult = {
+  ok: true,
+  body: { task_id: "42", task_title: "Ship it", completed: "not-a-boolean" },
+};
 
 // ── fanout-merge fixtures (for the degraded CH-2 case) ───────────────────────
 
@@ -389,6 +406,12 @@ class RecordingResponseCache implements ResponseCache {
     this.sets.push(entry);
     this.#inner.set(entry, now);
   }
+  public dropByBackendResource(backendAppId: string, resourceRef: string): void {
+    this.#inner.dropByBackendResource(backendAppId, resourceRef);
+  }
+  public dropByEndpoint(endpointId: string): void {
+    this.#inner.dropByEndpoint(endpointId);
+  }
 }
 
 class RecordingCacheMetrics implements ResponseCacheMetrics {
@@ -439,6 +462,8 @@ interface HandlerOpts {
   readonly metrics?: ResponseCacheMetrics;
   readonly now?: () => Date;
   readonly writeOutcomeStore?: WriteOutcomeStore;
+  readonly unionCollectionReader?: UnionCollectionReader;
+  readonly cacheInvalidator?: CacheInvalidator;
 }
 
 function buildHandler(opts: HandlerOpts): AdapterServeHandler {
@@ -450,7 +475,126 @@ function buildHandler(opts: HandlerOpts): AdapterServeHandler {
     ...(opts.metrics !== undefined ? { cacheMetrics: opts.metrics } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(opts.writeOutcomeStore !== undefined ? { writeOutcomeStore: opts.writeOutcomeStore } : {}),
+    ...(opts.unionCollectionReader !== undefined
+      ? { unionCollectionReader: opts.unionCollectionReader }
+      : {}),
+    ...(opts.cacheInvalidator !== undefined ? { cacheInvalidator: opts.cacheInvalidator } : {}),
   });
+}
+
+/** Records every `(backendAppId, resourceRef)` the write path invalidates through the seam. */
+class SpyCacheInvalidator implements CacheInvalidator {
+  public readonly calls: { backendAppId: string; resourceRef: string }[] = [];
+  public invalidateBackendResource(backendAppId: string, resourceRef: string): void {
+    this.calls.push({ backendAppId, resourceRef });
+  }
+}
+
+// ── collection-union fixtures (for the CH-2.5 dropped-contributor case) ───────
+
+const consumerListTodos: IrOperation = {
+  operationId: "listTodos",
+  method: "get",
+  path: "/todos",
+  parameters: [],
+  responseSchema: {
+    name: "Todo",
+    fields: [
+      { name: "id", type: "string", required: true },
+      { name: "title", type: "string", required: true },
+    ],
+  },
+};
+
+function backendListOp(resource: string): IrOperation {
+  return { operationId: `list_${resource}`, method: "get", path: `/${resource}`, parameters: [] };
+}
+
+/** A minimal confirmed-nothing `ResourceBinding` → single-page paging, no native-id dedup. */
+function unionResourceBinding(resource: string): ResourceBinding {
+  return { id: `rb-${resource}`, apiSpecId: `spec-${resource}`, resourceRef: resource };
+}
+
+function unionSupplement(
+  bindingId: string,
+  backendAppId: string,
+  resource: string,
+  idField: string,
+  titleField: string,
+): LoadedBinding {
+  return {
+    binding: {
+      id: bindingId,
+      adapterEndpointId: "endpoint-u",
+      backendAppId,
+      backendOperationId: `${resource}/list_${resource}`,
+      approvedMappingId: "mapping-1",
+      role: "supplement",
+      status: "active",
+      executionOrder: 0,
+    },
+    mappingId: "mapping-1",
+    mappingStatus: "active",
+    backendStatus: "active",
+    parameterMappings: [],
+    requestPhaseFieldMappings: [],
+    responsePhaseFieldMappings: [
+      rename(`fm-${bindingId}-id`, `${resource}/${idField}`, "todos/id"),
+      rename(`fm-${bindingId}-title`, `${resource}/${titleField}`, "todos/title"),
+    ],
+    backendBaseUrl: `http://${backendAppId}.example`,
+    backendOperation: backendListOp(resource),
+    backendResourceBinding: unionResourceBinding(resource),
+  };
+}
+
+function unionContext(): ServeContext {
+  return {
+    consumerOperation: consumerListTodos,
+    bindings: [
+      unionSupplement("u-tasks", "tasks-app", "tasks", "task_id", "task_title"),
+      unionSupplement("u-issues", "issues-app", "issues", "issue_id", "issue_title"),
+    ],
+  };
+}
+
+function unionInput(cacheTtl: number): ServeInput {
+  const bindings = unionContext().bindings.map((loaded) => loaded.binding);
+  return {
+    request: {
+      consumerAppId: "consumer-app",
+      operationKey: "todos/listTodos",
+      pathParameters: {},
+      query: {},
+      headers: {},
+      body: undefined,
+    },
+    endpoint: {
+      id: "endpoint-u",
+      consumerAppId: "consumer-app",
+      consumerOperationId: "todos/listTodos",
+      status: "active",
+      aggregationStrategy: "collection-union",
+      strictness: "degraded",
+      postMergeDedup: { mode: "none" },
+      cacheTtl,
+    },
+    activeBindings: bindings,
+  };
+}
+
+/** Routes a union contributor's paged read per backend app; a missing stub is an upstream error. */
+class FakeUnionCollectionReader implements UnionCollectionReader {
+  public constructor(private readonly results: Map<string, UnionCollectionReadResult>) {}
+  public read(input: UnionCollectionReadInput): Promise<UnionCollectionReadResult> {
+    return Promise.resolve(
+      this.results.get(input.backendAppId) ?? {
+        ok: false,
+        kind: "upstream-error",
+        detail: `no stub for ${input.backendAppId}`,
+      },
+    );
+  }
 }
 
 // ── CH-1 ─────────────────────────────────────────────────────────────────────
@@ -600,5 +744,87 @@ describe("AdapterServeHandler — only complete, valid responses are cached (CH-
     });
     expect(cache.getCount).toBe(0); // a write never even looks the cache up
     expect(cache.sets).toHaveLength(0); // …and never writes it
+  });
+
+  it("CH-2.1: an AG-7 mediator-transform-error response is NOT cached", async () => {
+    // The mapped `done` is a string where the consumer schema requires a boolean → AG-7 fails.
+    const caller = new FakeBackendCaller(agSevenBody);
+    const cache = new RecordingResponseCache();
+    const handler = buildHandler({ ctx: context(), caller, cache });
+
+    const first = await handler.serve(serveInput("42", 30_000));
+    expect(first).toEqual({ kind: "failed", cause: "mediator-transform-error" });
+    expect(cache.sets).toHaveLength(0);
+
+    // Not frozen: the next equivalent read re-runs the (still-defective) backend flow rather
+    // than replaying a cached failure.
+    await handler.serve(serveInput("42", 30_000));
+    expect(caller.calls).toBe(2);
+  });
+
+  it("CH-2.5: a collection-union response served with a DROPPED contributor is NOT cached", async () => {
+    // `tasks-app` yields a row; `issues-app` has no stub → upstream error → dropped (AG-3.2).
+    const reader = new FakeUnionCollectionReader(
+      new Map<string, UnionCollectionReadResult>([
+        [
+          "tasks-app",
+          { ok: true, rows: [{ task_id: "t1", task_title: "Alpha" }], nativeIds: [undefined] },
+        ],
+      ]),
+    );
+    const cache = new RecordingResponseCache();
+    const outcome = await buildHandler({
+      ctx: unionContext(),
+      caller: new FakeBackendCaller(okBody), // unused: the union reads via the union reader
+      cache,
+      unionCollectionReader: reader,
+    }).serve(unionInput(30_000));
+
+    expect(outcome).toMatchObject({
+      kind: "served",
+      degraded: true,
+      degradedBackendAppIds: ["issues-app"],
+      body: [{ id: "t1", title: "Alpha" }],
+    });
+    // The dropped contributor makes it degraded, so — exactly like a failed supplement — it is
+    // excluded from the cache directly (CH-2.5), not merely by the shared CH-2.2 comment.
+    expect(cache.sets).toHaveLength(0);
+  });
+});
+
+// ── CH-4 (adapter-write invalidation seam) ───────────────────────────────────
+
+describe("AdapterServeHandler — successful writes invalidate through the shared seam (CH-4)", () => {
+  it("CH-4.1/4.3: a successful write calls the CacheInvalidator with the written (backendAppId, resourceRef)", async () => {
+    const invalidator = new SpyCacheInvalidator();
+    const outcome = await buildHandler({
+      ctx: writeContext(),
+      caller: new FakeBackendCaller(createdTask),
+      writeOutcomeStore: new FakeWriteOutcomeStore(),
+      cacheInvalidator: invalidator,
+    }).serve(writeInput(30_000));
+
+    expect(outcome).toMatchObject({ kind: "served" });
+    // The write binding is `backend-app`'s `tasks/createTask` → resource ref `tasks`. It routes
+    // through the SAME seam the CH-3 SyncEvent consumer uses — never a parallel mechanism.
+    expect(invalidator.calls).toEqual([{ backendAppId: "backend-app", resourceRef: "tasks" }]);
+  });
+
+  it("CH-4.5/WR-4.5: a FAILED write invalidates nothing", async () => {
+    const invalidator = new SpyCacheInvalidator();
+    const outcome = await buildHandler({
+      ctx: writeContext(),
+      caller: new FakeBackendCaller({
+        ok: false,
+        kind: "upstream-error",
+        detail: "HTTP 500",
+        reachedBackend: true,
+      }),
+      writeOutcomeStore: new FakeWriteOutcomeStore(),
+      cacheInvalidator: invalidator,
+    }).serve(writeInput(30_000));
+
+    expect(outcome.kind).toBe("failed");
+    expect(invalidator.calls).toHaveLength(0);
   });
 });

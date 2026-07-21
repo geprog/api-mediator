@@ -28,6 +28,7 @@ import {
   type FanoutMergeContext,
 } from "./aggregator.js";
 import type { BackendCaller } from "./backend-call.js";
+import type { CacheInvalidator } from "./cache-invalidator.js";
 import { orderFirstSuccessAttempts, firstSuccessExhaustionCause } from "./first-success.js";
 import {
   validateConsumerResponse,
@@ -160,6 +161,14 @@ export interface AdapterServeHandlerDeps {
    * is byte-for-byte unchanged), which is how every unit test that omits it behaves.
    */
   readonly responseCache?: ResponseCache;
+  /**
+   * CH-4.1/CH-4.3 — the coarse-invalidation seam a **successful** adapter write drops the
+   * written backend resource's cached entries through. The SAME seam the CH-3 `SyncEvent`
+   * consumer uses, over the one shared in-process cache. Absent → a successful write serves
+   * normally but invalidates nothing (how a serve handler built without a cache behaves); a
+   * failed write never calls it (CH-4.5/WR-4.5).
+   */
+  readonly cacheInvalidator?: CacheInvalidator;
   /**
    * CH-1.5 — the hit/miss metric seam (the shared `AdapterTelemetry` satisfies it). Absent
    * → the cache metric is a no-op, so the counter never sits on a business-critical path.
@@ -1177,8 +1186,18 @@ export class AdapterServeHandler implements ServeHandler {
     // recently-written cache and creates NO suppressing `SyncFieldState` baseline (this path
     // simply never touches either), so the Sync Engine's next poll picks it up as a genuine
     // change and propagates it to that backend's sync peers like any other edit.
-    // TODO(CH-*): invalidate cached entries of every endpoint bound to this backend resource
-    // (WR-4.3); write responses are never cached (WR-4.4).
+    //
+    // CH-4.1/CH-4.3 — this write DID change the backend resource, so drop every cached read
+    // response bound to it, through the SAME `(backendAppId, resourceRef)` seam the SyncEvent
+    // consumer uses (CH-3) — never a parallel mechanism. Only reached on a fresh success: a
+    // failed write returns above without invalidating (CH-4.5/WR-4.5), a dedup replay is
+    // answered earlier from the store (the original delivery already invalidated), and a write
+    // response is itself never cached (CH-2.4/WR-4.4). The drop is a correctness-safe in-memory
+    // op, so it needs no transaction and never fails the write.
+    this.deps.cacheInvalidator?.invalidateBackendResource(
+      loaded.binding.backendAppId,
+      backendResourceRefOf(loaded.binding.backendOperationId),
+    );
     return this.recordWriteAndAnswer(store, loaded, endpointId, idempotencyKey, {
       outcome: "success",
       responseStatus: WRITE_SERVED_STATUS,
@@ -1263,11 +1282,10 @@ function backendResourceRefOf(operationRef: string): string {
 
 /**
  * The set of `(backendAppId, resourceRef)` an endpoint's active bindings back — captured on
- * a cache entry as **forward-wiring** for the CH-3/CH-4 coarse-invalidation slice (which
- * will drop entries by backend resource). Deduped, deterministic order. For a complete
+ * a cache entry so CH-3/CH-4 coarse invalidation can drop it by backend resource
+ * (`ResponseCache.dropByBackendResource`). Deduped, deterministic order. For a complete
  * cacheable response this is exactly the participating set (no binding was eliminated, else
- * the response would be degraded/failed and never cached). Nothing consumes it yet — this
- * slice builds no drop operation.
+ * the response would be degraded/failed and never cached).
  */
 function contributingBackendResources(context: ServeContext): ContributingBackendResource[] {
   const seen = new Set<string>();

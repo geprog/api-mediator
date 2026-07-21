@@ -17,6 +17,20 @@ export {
 export { AdapterTelemetry } from "./adapter-telemetry.js";
 export { buildAdapterMountReactions, type AdapterMountReactions } from "./background.js";
 export {
+  buildAdapterCacheInvalidation,
+  SyncEventCacheInvalidationConsumer,
+  targetResourceRefForOrigin,
+  ADAPTER_CACHE_INVALIDATION_CONSUMER_NAME,
+  type AdapterCacheInvalidation,
+  type SyncRulePairRefReader,
+} from "./cache-invalidation.js";
+export {
+  InProcessResponseCache,
+  type ResponseCache,
+  type ResponseCacheEntry,
+} from "./serve/response-cache.js";
+export { ResponseCacheInvalidator, type CacheInvalidator } from "./serve/cache-invalidator.js";
+export {
   headerConsumerAppResolver,
   CONSUMER_APP_HEADER,
   type ConsumerAppResolver,
