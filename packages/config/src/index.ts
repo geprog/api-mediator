@@ -74,6 +74,20 @@ export interface HttpConfig {
 }
 
 /**
+ * The Adapter Server Runtime HTTP surface (Phase-5 RT-1). A **second** HTTP
+ * listener, on its own config-defined port, separate from the operator
+ * {@link HttpConfig} — consumer traffic can never reach operator routes and the
+ * two surfaces' auth models stay separate (`docs/architecture/overview.md`
+ * *Deployment model*: single process, two listeners;
+ * `docs/architecture/security.md` *Summary of trust boundaries*). The scenarios
+ * reserve host port `1<scenario>900` for this surface (`scenarios/README.md`);
+ * the default keeps clear of the operator API (`3333`) and Grafana (`3000`).
+ */
+export interface AdapterHttpConfig {
+  readonly port: number;
+}
+
+/**
  * App-registration defaults. `defaultPollInterval` (milliseconds) is the
  * conservative fallback stamped onto a `RegisteredApp.capabilities` when a
  * registration omits `capabilities` entirely (AR-1 criterion 2 / open question
@@ -148,6 +162,7 @@ export interface SyncConfig {
 
 export interface AppConfig {
   readonly http: HttpConfig;
+  readonly adapterHttp: AdapterHttpConfig;
   readonly database: DatabaseConfig;
   readonly telemetry: TelemetryConfig;
   readonly mappingLlm: MappingLlmConfig;
@@ -309,6 +324,12 @@ const envSchema = z
     // (GRAFANA_PORT) to avoid a dev clash.
     HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3333),
 
+    // Adapter Server Runtime HTTP server (Phase-5 RT-1) — the SECOND listener, on
+    // its own port, in the same process over the same store. Default 3334 keeps
+    // clear of the operator API (3333) and Grafana (3000); the scenarios override
+    // it to their reserved `1<scenario>900` host port.
+    ADAPTER_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3334),
+
     // Database
     DATABASE_URL: z.string().refine(isPostgresConnectionUrl, { error: POSTGRES_URL_MESSAGE }),
 
@@ -421,6 +442,7 @@ function toAuthConfig(raw: RawEnv): AuthConfig {
 function toAppConfig(raw: RawEnv): AppConfig {
   return {
     http: { port: raw.HTTP_PORT },
+    adapterHttp: { port: raw.ADAPTER_HTTP_PORT },
     database: { url: raw.DATABASE_URL },
     telemetry: toTelemetryConfig(raw),
     mappingLlm: {
@@ -444,6 +466,7 @@ function toAppConfig(raw: RawEnv): AppConfig {
 
 function freezeConfig(config: AppConfig): AppConfig {
   Object.freeze(config.http);
+  Object.freeze(config.adapterHttp);
   Object.freeze(config.database);
   Object.freeze(config.telemetry);
   Object.freeze(config.mappingLlm);

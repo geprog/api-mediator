@@ -52,6 +52,7 @@ const suite = databaseUrl === undefined ? describe.skip : describe;
 function testConfig(url: string): AppConfig {
   return {
     http: { port: 0 },
+    adapterHttp: { port: 0 },
     database: { url },
     telemetry: { enabled: false },
     mappingLlm: {

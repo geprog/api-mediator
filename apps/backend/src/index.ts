@@ -11,14 +11,16 @@ import { createDb } from "@mediator/db";
 
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
+import { buildAdapterMountReactions, buildAdapterRuntime } from "./http/adapter-runtime/index.js";
 import { buildArtifactInstantiation } from "./modules/artifact-instantiation/background.js";
 import { buildScopeProposalReporter } from "./modules/artifact-instantiation/report-scope-proposal.js";
 import { buildDetectionBackground } from "./modules/detection/background.js";
 import { buildSyncBackground } from "./modules/sync/background.js";
 
 /**
- * Dev binds loopback: the operator API is a host-local surface (the second,
- * token-gated Adapter Server Runtime is a separate Phase-5 surface).
+ * Dev binds loopback: both surfaces are host-local. The operator API and the
+ * token-gated Adapter Server Runtime are two separate listeners in the **same
+ * process** over the **same store**, on their own config-defined ports (RT-1).
  */
 const HOST = "127.0.0.1";
 
@@ -43,6 +45,17 @@ const db = createDb(config.database.url, (error) => {
 const sync = buildSyncBackground({ config, db, logger });
 
 const { app, shutdown: shutdownServer } = buildServer({ config, db, logger, sync });
+
+// The Phase-5 Adapter Server Runtime (RT-1..RT-5): a SECOND Fastify listener, on its
+// own config-defined port, in the same process over the same db. It hosts each active
+// CONSUMER spec's operation surface as a virtual provider and answers
+// not-yet-mapped / endpoint-disabled / 404 per request. Its mount lifecycle (RT-4) is
+// driven by a `SpecIngested` consumer + a reconciler that both re-derive the mounted
+// surface from persisted state; they register on the single shared dispatcher/sweep
+// below, exactly like the other backgrounds. Its listener is started after the
+// operator `listen` (with an initial `reconcile`) and closed before the db pool.
+const adapterRuntime = buildAdapterRuntime({ db, logger });
+const adapterMountReactions = buildAdapterMountReactions(adapterRuntime.mountManager);
 
 // The Phase-3 artifact-instantiation reaction: the `MappingApproved` consumer that
 // instantiates an approval's disabled downstream artifacts (SyncRules /
@@ -69,19 +82,21 @@ const detection = buildDetectionBackground({
   config,
   db,
   logger,
-  additionalConsumers: [artifactInstantiation.consumer],
+  additionalConsumers: [artifactInstantiation.consumer, adapterMountReactions.consumer],
   additionalReconcilers: [
     artifactInstantiation.reconciler,
     sync.reconciler,
     sync.scopeDiscoveryReconciler,
+    adapterMountReactions.reconciler,
   ],
 });
 
 async function shutdown(): Promise<void> {
   // Stop sync first (it awaits an in-flight poll/backfill/queue pass), then the
-  // detection loops, then the server + db pool.
+  // detection loops, then the adapter listener, then the operator server + db pool.
   await sync.stop();
   detection.stop();
+  await adapterRuntime.app.close();
   await shutdownServer();
 }
 
@@ -108,6 +123,10 @@ process.once("SIGINT", (signal) => {
 
 try {
   await app.listen({ port: config.http.port, host: HOST });
+  // Derive the adapter surface from persisted state (RT-4.5) BEFORE the listener
+  // accepts traffic, so a mounted operation never briefly answers 404 at boot.
+  await adapterRuntime.mountManager.reconcile();
+  await adapterRuntime.app.listen({ port: config.adapterHttp.port, host: HOST });
   detection.start();
   sync.start();
 } catch (error) {

@@ -299,6 +299,7 @@ class FakeLandscape implements ProtocolClient {
 function testConfig(url: string, testPollTrigger: boolean): AppConfig {
   return {
     http: { port: 0 },
+    adapterHttp: { port: 0 },
     database: { url },
     telemetry: { enabled: false },
     mappingLlm: {

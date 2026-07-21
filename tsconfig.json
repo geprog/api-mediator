@@ -14,6 +14,7 @@
     { "path": "./packages/transform" },
     { "path": "./packages/sync-engine" },
     { "path": "./packages/outbound" },
+    { "path": "./packages/adapter-engine" },
     { "path": "./eval" },
     { "path": "./apps/backend" },
     { "path": "./apps/e2e" }

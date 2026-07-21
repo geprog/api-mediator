@@ -10,6 +10,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@mediator/adapter-engine": "workspace:*",
     "@mediator/config": "workspace:*",
     "@mediator/contracts": "workspace:*",
     "@mediator/credentials": "workspace:*",
