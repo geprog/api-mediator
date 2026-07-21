@@ -138,6 +138,7 @@ export type CompositionRejectionReason =
       readonly strategy: AggregationStrategy;
       readonly validRoles: readonly AdapterBindingRole[];
     }
+  | { readonly code: "fanout-merge-primary-count"; readonly primaryCount: number }
   | {
       readonly code: "depends-on-not-allowed-for-strategy";
       readonly bindingId: string;
@@ -269,6 +270,22 @@ export function validateComposition(input: CompositionValidationInput): Composit
       submitted.dependsOnBindingId === undefined
     ) {
       reasons.push({ code: "chain-inputs-without-dependency", bindingId: submitted.bindingId });
+    }
+  }
+
+  // CO-2.2 structural minimum — `fanout-merge` needs exactly ONE `primary`: the primary
+  // supplies the base object the `supplement`s contribute fields to
+  // (`docs/architecture/adapter-engine.md`: "`primary` supplies the base object;
+  // `supplement` bindings contribute additional fields"). Zero primaries = no base object
+  // to merge onto; two primaries = two competing base objects — both undefined-semantics
+  // merges, the exact class CO-2 exists to reject before activation. (The other
+  // strategies need no such minimum: `single` is exactly one binding, `collection-union`
+  // is all equivalent supplements, and an all-`fallback` first-success chain is still the
+  // well-defined "try in strict order, take the first success".)
+  if (strategy === CHAINING_STRATEGY) {
+    const primaryCount = submission.bindings.filter((binding) => binding.role === "primary").length;
+    if (primaryCount !== 1) {
+      reasons.push({ code: "fanout-merge-primary-count", primaryCount });
     }
   }
 
@@ -476,6 +493,14 @@ export function formatCompositionRejection(reason: CompositionRejectionReason): 
       return {
         path: `bindings.${reason.bindingId}.role`,
         message: `Role '${reason.role}' is not valid under aggregationStrategy '${reason.strategy}' (valid: ${reason.validRoles.join(", ")}).`,
+      };
+    case "fanout-merge-primary-count":
+      return {
+        path: "bindings",
+        message:
+          reason.primaryCount === 0
+            ? "fanout-merge needs a base-object primary — no binding is 'primary'."
+            : `fanout-merge must have exactly one primary base object, but ${String(reason.primaryCount)} bindings are 'primary'.`,
       };
     case "depends-on-not-allowed-for-strategy":
       return {

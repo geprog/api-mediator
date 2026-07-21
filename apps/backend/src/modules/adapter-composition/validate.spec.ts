@@ -103,6 +103,52 @@ describe("validateComposition — role-validity table (CO-2.2)", () => {
   }
 });
 
+describe("validateComposition — fanout-merge structural minimum (CO-2.2)", () => {
+  it("rejects a fanout-merge with zero primaries (no base object to supplement)", () => {
+    const result = validateComposition({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { role: "supplement" }),
+          submitted("b2", { role: "supplement" }),
+        ],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(codesOf(result)).toContain("fanout-merge-primary-count");
+  });
+
+  it("rejects a fanout-merge with two primaries (two competing base objects)", () => {
+    const result = validateComposition({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [submitted("b1", { role: "primary" }), submitted("b2", { role: "primary" })],
+      }),
+      bindingFacts: [facts({ bindingId: "b1" }), facts({ bindingId: "b2" })],
+    });
+    expect(codesOf(result)).toContain("fanout-merge-primary-count");
+  });
+
+  it("accepts a fanout-merge with exactly one primary and supplements", () => {
+    const result = validateComposition({
+      submission: submission({
+        aggregationStrategy: "fanout-merge",
+        bindings: [
+          submitted("b1", { role: "primary" }),
+          submitted("b2", { role: "supplement" }),
+          submitted("b3", { role: "supplement" }),
+        ],
+      }),
+      bindingFacts: [
+        facts({ bindingId: "b1" }),
+        facts({ bindingId: "b2" }),
+        facts({ bindingId: "b3" }),
+      ],
+    });
+    expect(result).toStrictEqual({ ok: true });
+  });
+});
+
 describe("validateComposition — dependsOnBindingId (CO-2.3)", () => {
   it("accepts a dependency on another binding of the same endpoint under fanout-merge", () => {
     const result = validateComposition({

@@ -101,6 +101,15 @@ const B_BINDING1 = randomUUID();
 const B_BINDING2 = randomUUID();
 const B_CONSUMER_OP = "detail/getIssue";
 
+// Endpoints in a non-`composition-required` state — CO-2 only composes
+// `composition-required` endpoints; recomposing an `active`/`disabled` one is CO-6, so the
+// service rejects it as a state conflict without touching the endpoint.
+const ENDPOINT_ACTIVE = randomUUID();
+const ENDPOINT_DISABLED = randomUUID();
+const ACTIVE_CONSUMER_OP = "active/getActive";
+const DISABLED_CONSUMER_OP = "disabled/getDisabled";
+const UNKNOWN_ENDPOINT = randomUUID();
+
 function appOf(id: string, name: string): RegisteredApp {
   return {
     id,
@@ -175,14 +184,20 @@ function opMappingOf(
   return { id: randomUUID(), mappingId, sourceOperationRef, targetOperationRef, action: "read" };
 }
 
-function endpointOf(id: string, consumerOperationId: string): AdapterEndpoint {
+function endpointOf(
+  id: string,
+  consumerOperationId: string,
+  status: AdapterEndpoint["status"] = "composition-required",
+): AdapterEndpoint {
   // A realistic `composition-required` endpoint: it was auto-activated single/degraded on
-  // its first binding (CO-1), then a second binding flipped only its status.
+  // its first binding (CO-1), then a second binding flipped only its status. The
+  // non-`composition-required` variants (active/disabled) carry the same single/degraded
+  // serving config, so the boundary tests can assert it survives a rejected recomposition.
   return {
     id,
     consumerAppId: CONSUMER_APP,
     consumerOperationId,
-    status: "composition-required",
+    status,
     aggregationStrategy: "single",
     strictness: "degraded",
   };
@@ -349,6 +364,17 @@ suite("Phase-5 CO-2 endpoint composition integration (requires Postgres)", () =>
           }),
         ),
       );
+
+      // Non-composition-required endpoints for the CO-2 state-boundary tests (no bindings
+      // needed — the status pre-check rejects before any validation).
+      await txn
+        .insert(adapterEndpoint)
+        .values(toAdapterEndpointInsert(endpointOf(ENDPOINT_ACTIVE, ACTIVE_CONSUMER_OP, "active")));
+      await txn
+        .insert(adapterEndpoint)
+        .values(
+          toAdapterEndpointInsert(endpointOf(ENDPOINT_DISABLED, DISABLED_CONSUMER_OP, "disabled")),
+        );
     });
 
     app = Fastify();
@@ -519,5 +545,62 @@ suite("Phase-5 CO-2 endpoint composition integration (requires Postgres)", () =>
     expect(audits[0]?.details).toContain("composed");
     // Metadata only — no request/response status or degraded flag on a composition row.
     expect(audits[0]?.status).toBeNull();
+  });
+
+  // The state boundary (service.ts): CO-2 composes only `composition-required` endpoints.
+  const anyValidBody = {
+    aggregationStrategy: "single",
+    strictness: "degraded",
+    bindings: [{ bindingId: randomUUID(), role: "primary" }],
+  };
+
+  it("state boundary: composing an active endpoint is 409 and writes nothing (recomposition is CO-6)", async () => {
+    const response = await injectAs(app, TEST_OPERATOR_ALICE, {
+      method: "POST",
+      url: `/api/adapter-endpoints/${ENDPOINT_ACTIVE}/compose`,
+      payload: anyValidBody,
+    });
+    expect(response.statusCode).toBe(409);
+
+    const [endpointRow] = await db
+      .select()
+      .from(adapterEndpoint)
+      .where(eq(adapterEndpoint.id, ENDPOINT_ACTIVE));
+    expect(endpointRow?.status).toBe("active");
+    expect(endpointRow?.aggregationStrategy).toBe("single");
+    const audits = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.relatedEndpointId, ENDPOINT_ACTIVE));
+    expect(audits).toHaveLength(0);
+  });
+
+  it("state boundary: composing a disabled endpoint is 409 and writes nothing", async () => {
+    const response = await injectAs(app, TEST_OPERATOR_ALICE, {
+      method: "POST",
+      url: `/api/adapter-endpoints/${ENDPOINT_DISABLED}/compose`,
+      payload: anyValidBody,
+    });
+    expect(response.statusCode).toBe(409);
+
+    const [endpointRow] = await db
+      .select()
+      .from(adapterEndpoint)
+      .where(eq(adapterEndpoint.id, ENDPOINT_DISABLED));
+    expect(endpointRow?.status).toBe("disabled");
+    const audits = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.relatedEndpointId, ENDPOINT_DISABLED));
+    expect(audits).toHaveLength(0);
+  });
+
+  it("state boundary: composing an unknown endpoint id is 404", async () => {
+    const response = await injectAs(app, TEST_OPERATOR_ALICE, {
+      method: "POST",
+      url: `/api/adapter-endpoints/${UNKNOWN_ENDPOINT}/compose`,
+      payload: anyValidBody,
+    });
+    expect(response.statusCode).toBe(404);
   });
 });
