@@ -33,6 +33,12 @@ export interface AdapterRuntimeDeps {
    * tests pass the header stand-in (`headerConsumerAppResolver`) explicitly.
    */
   readonly resolveConsumerApp: ConsumerAppResolver;
+  /**
+   * The shared {@link AdapterTelemetry}. Pass the same instance given to the serve
+   * handler's `cacheMetrics` so request metrics and the response-cache hit/miss counters
+   * (CH-1.5) land on one meter; defaults to a fresh instance when omitted.
+   */
+  readonly telemetry?: AdapterTelemetry;
   readonly newId?: () => string;
 }
 
@@ -74,7 +80,7 @@ export function buildAdapterRuntime(deps: AdapterRuntimeDeps): AdapterRuntime {
 
   const protocolServer = new RestProtocolServer();
   const store = new DbAdapterStore(deps.db);
-  const telemetry = new AdapterTelemetry();
+  const telemetry = deps.telemetry ?? new AdapterTelemetry();
   const auditWriter = {
     record: (entry: Parameters<AuditLogRepository["insert"]>[0]) =>
       new AuditLogRepository(deps.db).insert(entry),

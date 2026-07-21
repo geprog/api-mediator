@@ -18,6 +18,7 @@ import type { FastifyBaseLogger } from "fastify";
 
 import { createCredentialApplier } from "../../../modules/sync/credential-applier.js";
 import { AdapterBackendCaller } from "./backend-call.js";
+import { InProcessResponseCache, type ResponseCacheMetrics } from "./response-cache.js";
 import { DbServeContextLoader } from "./serve-context.js";
 import { AdapterServeHandler } from "./serve-handler.js";
 import { RecordLinkUnionLinkResolver } from "./union-links.js";
@@ -47,6 +48,14 @@ export interface BuildAdapterServeHandlerDeps {
   readonly credentialApplier?: CredentialApplier;
   /** AG-5.1 — the config-defined per-request union row ceiling; default when omitted. */
   readonly unionRowCeiling?: number;
+  /**
+   * CH-1.5 — the response-cache hit/miss metric seam (the shared `AdapterTelemetry`
+   * satisfies it). Optional: when omitted the cache metric is a no-op, so a serve handler
+   * built in isolation (integration tests) needs no telemetry wiring.
+   */
+  readonly cacheMetrics?: ResponseCacheMetrics;
+  /** CH-1.4 — injected clock so tests can drive TTL deterministically; default real time. */
+  readonly now?: () => Date;
 }
 
 export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): ServeHandler {
@@ -79,6 +88,11 @@ export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): Se
     // (default 24h dedup window, matching the Phase-4 OC-2 lookback). Read serving never
     // consults it.
     writeOutcomeStore: new DbWriteOutcomeStore(new AdapterWriteOutcomeRepository(deps.db)),
+    // CH-1 — the real in-process response cache; it activates only for endpoints with a
+    // `cacheTtl` set, so a serve handler built here caches read responses when composed to.
+    responseCache: new InProcessResponseCache(),
+    ...(deps.cacheMetrics !== undefined ? { cacheMetrics: deps.cacheMetrics } : {}),
+    ...(deps.now !== undefined ? { now: deps.now } : {}),
     ...(deps.unionRowCeiling !== undefined ? { unionRowCeiling: deps.unionRowCeiling } : {}),
     logger: {
       warn: (fields, message) => {

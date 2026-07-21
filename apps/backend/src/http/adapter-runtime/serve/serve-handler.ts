@@ -54,6 +54,12 @@ import {
   resolveChainInputs,
 } from "./request-mapping.js";
 import { mapBackendResponseToConsumer } from "./response-mapping.js";
+import {
+  normalizeCacheParams,
+  type ContributingBackendResource,
+  type ResponseCache,
+  type ResponseCacheMetrics,
+} from "./response-cache.js";
 import type { LoadedBinding, ServeContext, ServeContextLoader } from "./serve-context.js";
 import type { RecordWriteOutcomeInput, WriteOutcomeStore } from "./write-outcome-store.js";
 import {
@@ -147,6 +153,23 @@ export interface AdapterServeHandlerDeps {
    * fails loud (a composition-root wiring gap). Read endpoints never consult it.
    */
   readonly writeOutcomeStore?: WriteOutcomeStore;
+  /**
+   * CH-1 — the in-process {@link ResponseCache}. Consulted **only** on the read path and
+   * **only** when the endpoint has `cacheTtl` set (CH-1.3); a write is served before any
+   * cache store, so it never reaches it (CH-2.4). Absent → no caching at all (read serving
+   * is byte-for-byte unchanged), which is how every unit test that omits it behaves.
+   */
+  readonly responseCache?: ResponseCache;
+  /**
+   * CH-1.5 — the hit/miss metric seam (the shared `AdapterTelemetry` satisfies it). Absent
+   * → the cache metric is a no-op, so the counter never sits on a business-critical path.
+   */
+  readonly cacheMetrics?: ResponseCacheMetrics;
+  /**
+   * CH-1.4 — injected clock so tests drive TTL deterministically. Read once per serve and
+   * threaded into `ResponseCache.get`/`set`; defaults to real time.
+   */
+  readonly now?: () => Date;
 }
 
 /** A union contributor's fetch outcome: a per-binding envelope, or a whole-request fail-loud. */
@@ -162,11 +185,14 @@ type UnionContributorOutcome =
 export class AdapterServeHandler implements ServeHandler {
   private readonly unionReader: UnionCollectionReader;
   private readonly unionRowCeiling: number;
+  /** CH-1.4 — the injected clock; read once per serve to drive cache TTL deterministically. */
+  private readonly clock: () => Date;
 
   public constructor(private readonly deps: AdapterServeHandlerDeps) {
     this.unionReader =
       deps.unionCollectionReader ?? new RestUnionCollectionReader(deps.backendCaller);
     this.unionRowCeiling = deps.unionRowCeiling ?? DEFAULT_UNION_ROW_CEILING;
+    this.clock = deps.now ?? ((): Date => new Date());
   }
 
   public async serve(input: ServeInput): Promise<ServeOutcome> {
@@ -192,6 +218,36 @@ export class AdapterServeHandler implements ServeHandler {
     );
     if (!inbound.ok) {
       return { kind: "rejected", reason: inbound.reason, detail: inbound.detail };
+    }
+
+    // CH-1 — response cache read path. Consulted only for a READ endpoint with `cacheTtl`
+    // set (CH-1.3); a write is served below and never cached (CH-2.4). Auth already ran in
+    // the request handler BEFORE serve() (CH-1.6), so a hit short-circuits planning and every
+    // backend call — never authentication. The normalized key collides for requests that
+    // differ only in parameter ordering/encoding of the same values (CH-1.2).
+    const cache = this.deps.responseCache;
+    const cacheTtl = input.endpoint.cacheTtl;
+    const cacheKey =
+      cache !== undefined && cacheTtl !== undefined && !isWriteRequest(context)
+        ? normalizeCacheParams(consumerOperation, input.request)
+        : undefined;
+    if (cache !== undefined && cacheKey !== undefined) {
+      const hit = cache.get(input.endpoint.id, cacheKey, this.clock());
+      if (hit !== undefined) {
+        // CH-1.1 — a live hit returns the cached response, short-circuiting planning and
+        // every backend call; CH-1.5 — count the hit for the per-endpoint hit-rate metric.
+        this.deps.cacheMetrics?.recordCacheHit(input.request.operationKey, input.endpoint.id);
+        return {
+          kind: "served",
+          body: hit.body,
+          degraded: false,
+          contributingBackendAppIds: hit.contributingBackendAppIds,
+        };
+      }
+      // CH-1.5 — a cacheable-read lookup with no live entry is a miss (a fresh entry may
+      // follow below). Recording it here keeps hit rate = hits / (hits + misses) over every
+      // cacheable read, independent of whether the ensuing backend flow ends up served.
+      this.deps.cacheMetrics?.recordCacheMiss(input.request.operationKey, input.endpoint.id);
     }
 
     // RP-3 / RP-4 — re-validate binding health and produce the explicit plan.
@@ -261,7 +317,7 @@ export class AdapterServeHandler implements ServeHandler {
       return { kind: "failed", cause: "mediator-transform-error" };
     }
 
-    return {
+    const served: ServeOutcome = {
       kind: "served",
       body: aggregate.payload,
       degraded: aggregate.degraded,
@@ -271,6 +327,36 @@ export class AdapterServeHandler implements ServeHandler {
         ? { degradedBackendAppIds: aggregate.degradedBackendAppIds }
         : {}),
     };
+
+    // CH-2 — store on a miss ONLY a complete, valid response: `served` AND not degraded (no
+    // failed/dropped contributor — a failed supplement (AG-2/AG-3) or a dropped union
+    // contributor both surface as degraded). A degraded, failed, rejected, or write response
+    // is never cached — caching a transient failure would freeze it across the whole TTL. A
+    // response that failed AG-7 is a `failed` outcome, already returned above. `cacheKey` is
+    // defined only for a cacheable read (endpoint has `cacheTtl`, not a write).
+    if (
+      cache !== undefined &&
+      cacheKey !== undefined &&
+      cacheTtl !== undefined &&
+      !aggregate.degraded &&
+      aggregate.degradedBackendAppIds.length === 0
+    ) {
+      cache.set(
+        {
+          endpointId: input.endpoint.id,
+          normalizedParams: cacheKey,
+          body: aggregate.payload,
+          contributingBackendAppIds: aggregate.contributingBackendAppIds,
+          // CH-3/CH-4 forward-wiring — the (backendAppId, resourceRef) set this response was
+          // built from, captured for the LATER invalidation slice. No drop op is built here.
+          contributingBackendResources: contributingBackendResources(context),
+          cacheTtl,
+        },
+        this.clock(),
+      );
+    }
+
+    return served;
   }
 
   /**
@@ -1173,6 +1259,30 @@ export class AdapterServeHandler implements ServeHandler {
 function backendResourceRefOf(operationRef: string): string {
   const slash = operationRef.indexOf("/");
   return slash <= 0 ? operationRef : operationRef.slice(0, slash);
+}
+
+/**
+ * The set of `(backendAppId, resourceRef)` an endpoint's active bindings back — captured on
+ * a cache entry as **forward-wiring** for the CH-3/CH-4 coarse-invalidation slice (which
+ * will drop entries by backend resource). Deduped, deterministic order. For a complete
+ * cacheable response this is exactly the participating set (no binding was eliminated, else
+ * the response would be degraded/failed and never cached). Nothing consumes it yet — this
+ * slice builds no drop operation.
+ */
+function contributingBackendResources(context: ServeContext): ContributingBackendResource[] {
+  const seen = new Set<string>();
+  const resources: ContributingBackendResource[] = [];
+  for (const loaded of context.bindings) {
+    const backendAppId = loaded.binding.backendAppId;
+    const resourceRef = backendResourceRefOf(loaded.binding.backendOperationId);
+    const dedupKey = `${backendAppId} ${resourceRef}`;
+    if (seen.has(dedupKey)) {
+      continue;
+    }
+    seen.add(dedupKey);
+    resources.push({ backendAppId, resourceRef });
+  }
+  return resources;
 }
 
 /** The consumer-facing HTTP status a served write renders (README OQ2 — status mapping is REST-side). */

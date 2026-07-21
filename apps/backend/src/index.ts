@@ -12,6 +12,7 @@ import { createDb } from "@mediator/db";
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
 import {
+  AdapterTelemetry,
   buildAdapterMountReactions,
   buildAdapterRuntime,
   buildAdapterServeHandler,
@@ -74,17 +75,22 @@ const adapterTokenValidator = buildAdapterTokenValidator({
 // the Phase-4 machinery — the CredentialStore withCredential path, the REST
 // ProtocolClient, and the SHARED per-app AppLoadGovernor (so adapter fan-out and sync
 // share one ceiling per backend, TE-2.4) — around the pure planner/executor/aggregator.
+// One shared AdapterTelemetry so the serve handler's response-cache hit/miss counters
+// (CH-1.5) and the runtime's request metrics land on the same meter.
+const adapterTelemetry = new AdapterTelemetry();
 const adapterServeHandler = buildAdapterServeHandler({
   db,
   logger,
   credentialMasterKey: config.credentials.masterKey,
   loadGovernor: sync.loadGovernor,
+  cacheMetrics: adapterTelemetry,
 });
 const adapterRuntime = buildAdapterRuntime({
   db,
   logger,
   serveHandler: adapterServeHandler,
   resolveConsumerApp: createTokenConsumerAppResolver(adapterTokenValidator),
+  telemetry: adapterTelemetry,
 });
 const adapterMountReactions = buildAdapterMountReactions(adapterRuntime.mountManager);
 
