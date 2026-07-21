@@ -581,14 +581,16 @@ describe("adapter union composition (CO-3) — requires Postgres", () => {
 
   it("CO-3↔RP-2: a request whose sort/filter/pagination params are all configured passes RP-2", async () => {
     // `sort=title` (configured), `status` (postMergeFilters), `page`/`size` (confirmed
-    // pagination) all pass RP-2; the request then reaches planning, which is unimplemented
-    // for collection-union (AG-3) and fails there — proving RP-2 did NOT reject it.
+    // pagination) all pass RP-2; the request then reaches planning + the AG-3 union serve,
+    // where both contributors' backend (an unreachable base URL) fails the read. Non-strict,
+    // both contributors are dropped → no authoritative answer → the request fails as
+    // `upstream-error` — proving RP-2 did NOT reject it (it reached execution).
     const outcome = await serveHandler.serve(
       await serveTodos({ sort: "title", status: "open", page: "1", size: "10" }),
     );
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") {
-      expect(outcome.cause).toBe("mediator-transform-error");
+      expect(outcome.cause).toBe("upstream-error");
     }
   });
 });

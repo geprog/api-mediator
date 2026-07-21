@@ -24,9 +24,9 @@ import type {
  * mappings; the caller loads them (`docs/architecture/adapter-engine.md` *Binding:
  * decided at composition time*).
  *
- * This slice serves the `single` (AG-1) and `fanout-merge` (AG-2, with TE-3 chained
- * bindings) strategies. `collection-union` / `fanout-first-success` are out of scope;
- * the planner fails **loudly** on them rather than serving an approximation.
+ * This slice serves the `single` (AG-1), `fanout-merge` (AG-2, with TE-3 chained
+ * bindings), and `collection-union` (AG-3/4/5) strategies. `fanout-first-success` is out
+ * of scope; the planner fails **loudly** on it rather than serving an approximation.
  */
 
 /** The safe defaults an auto-activated single-binding endpoint serves under (AG-1.4). */
@@ -170,11 +170,13 @@ export function planResolution(input: PlannerInput): PlanResult {
     case "single":
       return planSingle(input, strictness);
     case "fanout-merge":
-      return planFanoutMerge(input, strictness);
+      return planParallelContributors(input, "fanout-merge", strictness);
+    case "collection-union":
+      return planParallelContributors(input, "collection-union", strictness);
     default:
       return {
         ok: false,
-        detail: `aggregation strategy '${strategy}' is not implemented (single / fanout-merge serve only)`,
+        detail: `aggregation strategy '${strategy}' is not implemented`,
       };
   }
 }
@@ -204,14 +206,20 @@ function planSingle(input: PlannerInput, strictness: EndpointStrictness): PlanRe
 }
 
 /**
- * Re-validate every binding of a `fanout-merge` endpoint (AG-2 / RP-4). Healthy bindings
- * become execution groups by `executionOrder` (carrying their `dependsOnBindingId` /
- * `chainInputs` for TE-3); unhealthy ones are eliminated with their planner cause. The
- * planner does **not** enforce the exactly-one-primary rule — that is the aggregator's
- * AG-2.1 defense-in-depth at execution, evaluated over the full result set (a `primary`
- * eliminated at planning still surfaces its role to that check as a not-called envelope).
+ * Re-validate every binding of a **parallel** endpoint — `fanout-merge` (AG-2) or
+ * `collection-union` (AG-3) — into its plan (RP-4). Healthy bindings become execution
+ * groups by `executionOrder` (carrying their `dependsOnBindingId` / `chainInputs` for TE-3
+ * under `fanout-merge`; a union never chains, guarded by the TE-3.6 backstop above); unhealthy
+ * ones are eliminated with their planner cause. The planner does **not** enforce the role
+ * table — that is the aggregator's execution-time defense-in-depth (AG-2.1 exactly-one-primary,
+ * AG-3.1 all-supplement), evaluated over the full result set (an eliminated binding still
+ * surfaces its role to that check as a not-called envelope).
  */
-function planFanoutMerge(input: PlannerInput, strictness: EndpointStrictness): PlanResult {
+function planParallelContributors(
+  input: PlannerInput,
+  strategy: "fanout-merge" | "collection-union",
+  strictness: EndpointStrictness,
+): PlanResult {
   const planned: PlannedBinding[] = [];
   const eliminated: EliminatedBinding[] = [];
   for (const active of input.activeBindings) {
@@ -224,7 +232,7 @@ function planFanoutMerge(input: PlannerInput, strictness: EndpointStrictness): P
   }
   return {
     ok: true,
-    plan: plan(input, "fanout-merge", strictness, groupByExecutionOrder(planned), eliminated),
+    plan: plan(input, strategy, strictness, groupByExecutionOrder(planned), eliminated),
   };
 }
 

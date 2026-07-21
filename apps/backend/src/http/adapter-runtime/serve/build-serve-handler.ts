@@ -6,7 +6,7 @@ import {
   EnvKeyProvider,
   type CredentialStoreLogger,
 } from "@mediator/credentials";
-import type { Database } from "@mediator/db";
+import { RecordLinkRepository, type Database } from "@mediator/db";
 import {
   AppLoadGovernor,
   FetchRestProtocolClient,
@@ -20,6 +20,7 @@ import { createCredentialApplier } from "../../../modules/sync/credential-applie
 import { AdapterBackendCaller } from "./backend-call.js";
 import { DbServeContextLoader } from "./serve-context.js";
 import { AdapterServeHandler } from "./serve-handler.js";
+import { RecordLinkUnionLinkResolver } from "./union-links.js";
 
 /**
  * Wire the concrete {@link ServeHandler} (RP/TE/AG) the Adapter Server Runtime injects
@@ -43,6 +44,8 @@ export interface BuildAdapterServeHandlerDeps {
   readonly protocolClient?: ProtocolClient;
   /** How a decrypted secret becomes request auth; default the composition-root applier. */
   readonly credentialApplier?: CredentialApplier;
+  /** AG-5.1 — the config-defined per-request union row ceiling; default when omitted. */
+  readonly unionRowCeiling?: number;
 }
 
 export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): ServeHandler {
@@ -67,6 +70,11 @@ export function buildAdapterServeHandler(deps: BuildAdapterServeHandlerDeps): Se
   return new AdapterServeHandler({
     loader: new DbServeContextLoader(deps.db),
     backendCaller,
+    // AG-3.3 — link-based dedup reads existing `RecordLink`s over the same DB. The bounded
+    // paged union reader (AG-5) defaults to one over `backendCaller` inside the handler, so
+    // it needs no explicit wiring here.
+    unionLinkResolver: new RecordLinkUnionLinkResolver(new RecordLinkRepository(deps.db)),
+    ...(deps.unionRowCeiling !== undefined ? { unionRowCeiling: deps.unionRowCeiling } : {}),
     logger: {
       warn: (fields, message) => {
         deps.logger.warn(fields, message);

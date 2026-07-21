@@ -4,6 +4,7 @@ import {
   ApprovedMappingRepository,
   MappingArtifactsRepository,
   RegisteredAppRepository,
+  ResourceBindingRepository,
   type Database,
 } from "@mediator/db";
 import type {
@@ -17,6 +18,7 @@ import type {
   OutboundLoadLimits,
   ParameterMapping,
   RegisteredAppStatus,
+  ResourceBinding,
 } from "@mediator/domain";
 
 import { fieldMappingsForResourcePair } from "../../../modules/sync/resolution.js";
@@ -49,6 +51,13 @@ export interface LoadedBinding {
   readonly backendBaseUrl: string | undefined;
   readonly backendLimits?: OutboundLoadLimits;
   readonly backendOperation: IrOperation | undefined;
+  /**
+   * The backend resource's `ResourceBinding` — loaded **only** for a `collection-union`
+   * endpoint (AG-3/AG-5 need its confirmed `nativeIdRef` for row provenance/dedup and its
+   * `paginationRef` for the bounded paged fetch). Absent for a `single`/`fanout-merge`
+   * binding, which never reads a collection, so their loading is unchanged.
+   */
+  readonly backendResourceBinding?: ResourceBinding;
 }
 
 /** The whole serving context for one request. */
@@ -112,9 +121,13 @@ export class DbServeContextLoader implements ServeContextLoader {
       input.request.operationKey,
     );
 
+    // The backend resource's `ResourceBinding` is only needed by a `collection-union`
+    // endpoint (AG-3/AG-5); a `single`/`fanout-merge` load never reads it, so its extra
+    // query is skipped for them.
+    const loadResourceBinding = input.endpoint.aggregationStrategy === "collection-union";
     const bindings = await Promise.all(
       input.activeBindings.map((binding) =>
-        this.loadBinding(binding, input.endpoint.consumerOperationId),
+        this.loadBinding(binding, input.endpoint.consumerOperationId, loadResourceBinding),
       ),
     );
     return { consumerOperation, bindings };
@@ -123,6 +136,7 @@ export class DbServeContextLoader implements ServeContextLoader {
   private async loadBinding(
     binding: AdapterBinding,
     consumerOperationId: string,
+    loadResourceBinding: boolean,
   ): Promise<LoadedBinding> {
     const mapping = await new ApprovedMappingRepository(this.db).getById(binding.approvedMappingId);
     const backendApp = await new RegisteredAppRepository(this.db).getById(binding.backendAppId);
@@ -163,6 +177,15 @@ export class DbServeContextLoader implements ServeContextLoader {
     const requestPhase = fieldMappings.filter((field) => field.phase === "request");
     const responsePhase = fieldMappings.filter((field) => field.phase === "response");
 
+    // AG-3/AG-5 — the union needs the backend resource's confirmed `nativeIdRef`/`paginationRef`.
+    const backendResourceBinding = loadResourceBinding
+      ? await this.loadBackendResourceBinding(
+          backendSpecs,
+          binding.backendOperationId,
+          backendResourceRef,
+        )
+      : undefined;
+
     return {
       binding,
       mappingId: binding.approvedMappingId,
@@ -187,7 +210,35 @@ export class DbServeContextLoader implements ServeContextLoader {
         ? { backendLimits: backendApp.outboundLimits }
         : {}),
       backendOperation,
+      ...(backendResourceBinding !== undefined ? { backendResourceBinding } : {}),
     };
+  }
+
+  /**
+   * The `ResourceBinding` of the backend resource whose active PROVIDER spec declares the
+   * binding's `backendOperationId` — the source of the confirmed `nativeIdRef`/`paginationRef`
+   * a `collection-union` contributor pages and dedups by. `undefined` when the operation or
+   * its resource binding does not resolve (the union then treats it as non-composable).
+   */
+  private async loadBackendResourceBinding(
+    backendSpecs: readonly ApiSpec[],
+    backendOperationId: string,
+    backendResourceRef: string,
+  ): Promise<ResourceBinding | undefined> {
+    for (const spec of backendSpecs) {
+      if (spec.role !== "PROVIDER" || spec.status !== "active") {
+        continue;
+      }
+      if (findOperationInIr(spec.parsedIR, backendOperationId) === undefined) {
+        continue;
+      }
+      const bindings = await new ResourceBindingRepository(this.db).listByApiSpecId(spec.id);
+      const match = bindings.find((entry) => entry.resourceRef === backendResourceRef);
+      if (match !== undefined) {
+        return match;
+      }
+    }
+    return undefined;
   }
 }
 
