@@ -205,6 +205,13 @@ export interface SyncBackground {
   readonly queueDispatcher: OrderingQueueDispatcher;
   /** The RS in-flight registry (shared with the reconciler) — exposed for observability/tests. */
   readonly inFlightRegistry: InMemoryBackfillInFlightRegistry;
+  /**
+   * The shared per-app load governor (OC-3). Exposed so the Phase-5 Adapter Engine's
+   * backend calls go through the **same** instance — adapter fan-out and sync
+   * polling/backfill then compete for one per-app ceiling, adapter traffic not exempt
+   * (`docs/requirements/phase-5-transform-execution.md` TE-2.4).
+   */
+  readonly loadGovernor: AppLoadGovernor;
 
   // ── For the composition root: register on the SHARED reconciliation sweep ────
   readonly reconciler: SyncExecutionReconciler;
@@ -654,6 +661,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     scheduler,
     queueDispatcher,
     inFlightRegistry,
+    loadGovernor: governor,
     reconciler,
     scopeDiscoveryReconciler,
     start(): void {

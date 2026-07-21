@@ -14,6 +14,7 @@ import { loadRepoEnv } from "./env.js";
 import {
   buildAdapterMountReactions,
   buildAdapterRuntime,
+  buildAdapterServeHandler,
   createTokenConsumerAppResolver,
 } from "./http/adapter-runtime/index.js";
 import { buildAdapterTokenValidator } from "./modules/adapter-token/index.js";
@@ -68,9 +69,21 @@ const adapterTokenValidator = buildAdapterTokenValidator({
   db,
   rotationOverlapMs: config.adapterAuth.rotationOverlapMs,
 });
+// The Phase-5 serve pipeline (RP/TE/AG): the real ServeHandler injected behind the
+// Protocol-Server seam, replacing RT's `serving-not-implemented` placeholder. It reuses
+// the Phase-4 machinery — the CredentialStore withCredential path, the REST
+// ProtocolClient, and the SHARED per-app AppLoadGovernor (so adapter fan-out and sync
+// share one ceiling per backend, TE-2.4) — around the pure planner/executor/aggregator.
+const adapterServeHandler = buildAdapterServeHandler({
+  db,
+  logger,
+  credentialMasterKey: config.credentials.masterKey,
+  loadGovernor: sync.loadGovernor,
+});
 const adapterRuntime = buildAdapterRuntime({
   db,
   logger,
+  serveHandler: adapterServeHandler,
   resolveConsumerApp: createTokenConsumerAppResolver(adapterTokenValidator),
 });
 const adapterMountReactions = buildAdapterMountReactions(adapterRuntime.mountManager);

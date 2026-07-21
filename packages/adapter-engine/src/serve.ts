@@ -16,13 +16,34 @@ export interface ServeInput {
 }
 
 /**
+ * Why the serving core rejected a request against the **consumer's own contract**
+ * before any backend was involved (RP-2). Kept protocol-neutral — the token is the
+ * machine-readable contract, the REST runtime maps it to a client-error status:
+ *
+ * - `invalid-request` — the request violates the consumer operation's own request
+ *   schema/parameters (a missing required parameter, a body that fails the schema).
+ *   The fix is the caller's.
+ * - `unmapped-consumer-input` — the request *supplies* a declared consumer input
+ *   the composition neither mapped to a backend nor acknowledged, so honoring it is
+ *   impossible; answering anyway would compute a result from an input silently
+ *   dropped. The fix is finishing composition (README open question 7). These are
+ *   two different fixes, so they are two distinct reasons (RP-2.6).
+ */
+export type ServeRejectionReason = "invalid-request" | "unmapped-consumer-input";
+
+/**
  * The protocol-neutral result of serving a resolved request. A discriminated
- * union so a served response and a failure can never be confused:
+ * union so a served response, a client-contract rejection, and a serving failure
+ * can never be confused:
  *
  * - `served` — a complete consumer-shape response `body`. `degraded` marks a
  *   result that omitted a failed `supplement`'s optional fields (AD-5.3); the
  *   contributing backends are named for the out-of-band provenance header the
  *   concept requires (never injected into the body).
+ * - `rejected` — the inbound request failed validation against the consumer's own
+ *   contract (RP-2), a **client error** deliberately distinct from every serving
+ *   cause: no backend ran and the request was never passed through. `detail` is a
+ *   non-secret, payload-free note (parameter/field names only), never a value.
  * - `failed` — one of the backend-execution causes (`mapping-stale`,
  *   `mapping-suspended`, `backend-disabled`, `mediator-transform-error`, or a
  *   generic `upstream-error`). These are RP/TE/AG's to produce, not RT's; the
@@ -37,6 +58,11 @@ export type ServeOutcome =
       readonly body: unknown;
       readonly degraded: boolean;
       readonly contributingBackendAppIds: readonly string[];
+    }
+  | {
+      readonly kind: "rejected";
+      readonly reason: ServeRejectionReason;
+      readonly detail: string;
     }
   | {
       readonly kind: "failed";

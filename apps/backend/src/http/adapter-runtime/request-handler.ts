@@ -210,6 +210,16 @@ export class AdapterRequestHandler {
               contributingBackendAppIds: served.contributingBackendAppIds,
             };
           }
+          if (served.kind === "rejected") {
+            // RP-2: a consumer-contract violation, answered before any backend ran —
+            // a client error distinct from every serving cause.
+            return {
+              kind: "request-rejected",
+              endpointId: outcome.endpoint.id,
+              reason: served.reason,
+              detail: served.detail,
+            };
+          }
           return {
             kind: "serve-failed",
             endpointId: outcome.endpoint.id,
