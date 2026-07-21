@@ -31,12 +31,17 @@ export const SYNC_GRAPH_EDGE_STATUS = "disabled";
 export const ADAPTER_GRAPH_EDGE_STATUS = "proposed";
 
 /**
- * The `AdapterEndpoint.status` a Phase-3 endpoint is created with. There is no
- * Adapter Server Runtime until Phase 5, so an instantiated endpoint is NOT served:
- * `composition-required` is the enum value reflecting "binding(s) attached, an
- * aggregation/serving decision is still owed" (AI-2 criterion 4; the flow's
- * single-binding "activate immediately" is overridden by the requirement's
- * plan-vs-concept reconciliation note).
+ * The `AdapterEndpoint.status` a freshly-derived endpoint is **created** with: the
+ * neutral "binding(s) attached, nothing composed yet" state. It is only ever written
+ * when the ensure-exists creates the row; the CO-1 activation in
+ * {@link instantiateArtifacts} then promotes it — a first binding drives it to
+ * `active` (single/degraded/no-cache), a further binding leaves/returns it to
+ * `composition-required` for a human composition decision.
+ *
+ * This is where the Phase-3 deferral (AI-2 criterion 4 — "held only because no
+ * runtime existed") is superseded: with the Adapter Server Runtime present, a
+ * single-backend endpoint auto-activates (CO-1.2) instead of waiting for a
+ * composition that a lone backend never needs.
  */
 export const INSTANTIATED_ADAPTER_ENDPOINT_STATUS = "composition-required";
 

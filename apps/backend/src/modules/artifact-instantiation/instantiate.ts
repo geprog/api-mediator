@@ -76,7 +76,7 @@ export async function instantiateArtifacts(
     return { variant: "peer-peer", syncRules, graphEdge };
   }
 
-  // consumer-provider
+  // consumer-provider (CO-1: derive endpoints + auto-activate the first binding).
   const { endpointPlans, graphEdge } = deriveConsumerProviderArtifacts({
     mapping,
     operations,
@@ -85,25 +85,55 @@ export async function instantiateArtifacts(
   const adapterEndpoints: AdapterEndpoint[] = [];
   const adapterBindings: AdapterBinding[] = [];
   for (const plan of endpointPlans) {
-    // Ensure-exists: create on first coverage, reuse (never duplicate) after.
-    const endpoint = await ops.ensureAdapterEndpoint(plan.candidate);
-    adapterEndpoints.push(endpoint);
+    // CO-1.1: find-or-create the one endpoint per (consumerAppId, consumerOperationId).
+    // Ensure-exists creates it `composition-required` — the neutral "attached, nothing
+    // composed" state — then the first binding below promotes it to `active`.
+    let endpoint = await ops.ensureAdapterEndpoint(plan.candidate);
+    // "Already has a binding" (CO-1.3) = ANY existing binding row of this endpoint, in
+    // any status (`active`/`proposed`/`disabled`). Read once; track locally as this run
+    // attaches its own backends so a second backend in the SAME mapping is treated as a
+    // further binding, not another first one.
+    const existingBindings = await ops.listAdapterBindingsByEndpoint(endpoint.id);
+    let endpointHasBinding = existingBindings.length > 0;
     for (const backend of plan.backends) {
+      const alreadyAttached = existingBindings.some(
+        (binding) =>
+          binding.backendAppId === backend.backendAppId &&
+          binding.backendOperationId === backend.backendOperationId &&
+          binding.approvedMappingId === mapping.id,
+      );
+      if (alreadyAttached) {
+        // Idempotent re-run for THIS binding: its row already exists (CO-1.6). Never
+        // re-attach, re-activate, or downgrade it, and never re-run the endpoint
+        // transition — leave any operator state (e.g. a `disabled` binding, or an
+        // endpoint an operator later composed) exactly as it is.
+        continue;
+      }
+      // CO-1.2: the endpoint's FIRST binding auto-activates `primary`+`active`.
+      // CO-1.3: any FURTHER binding attaches `proposed`; the endpoint moves to
+      // `composition-required` while its prior active configuration keeps serving.
+      const isFirstBinding = !endpointHasBinding;
       const binding = adapterBindingSchema.parse({
         id: newId(),
         adapterEndpointId: endpoint.id,
         backendAppId: backend.backendAppId,
+        // CO-1.4: `backendOperationId` is the approved OperationMapping's target side
+        // (chosen in `deriveConsumerProviderArtifacts`), never free-form.
         backendOperationId: backend.backendOperationId,
         approvedMappingId: mapping.id,
-        // A freshly-attached binding is `proposed` (not composed/served — Phase 5),
-        // with the default single-binding role.
         role: "primary",
-        status: "proposed",
+        status: isFirstBinding ? "active" : "proposed",
       });
       adapterBindings.push(binding);
       await ops.insertAdapterBindingIfAbsent(binding);
+      endpoint = isFirstBinding
+        ? await ops.activateAdapterEndpointForSingleBinding(endpoint.id)
+        : await ops.markAdapterEndpointCompositionRequired(endpoint.id);
+      endpointHasBinding = true;
     }
+    adapterEndpoints.push(endpoint);
   }
+  // CO-1.5: upsert the adapter-dependency GraphEdge for the new/changed bindings.
   await ops.upsertGraphEdge(graphEdge);
   return { variant: "consumer-provider", adapterEndpoints, adapterBindings, graphEdge };
 }
