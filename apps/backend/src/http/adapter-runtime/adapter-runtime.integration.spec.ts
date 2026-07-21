@@ -136,6 +136,7 @@ describe("adapter runtime integration (requires Postgres)", () => {
   const createdAppIds: string[] = [];
   const createdSpecIds: string[] = [];
   let consumerAppId: string;
+  let servedConsumerAppId: string;
   let disabledEndpointId: string;
   let servingEndpointId: string;
   let ir: Ir;
@@ -225,7 +226,45 @@ describe("adapter runtime integration (requires Postgres)", () => {
       status: "active",
     };
     await artifacts.insertAdapterBindingIfAbsent(activeBinding);
-    // `/todos` (listTodos) intentionally has NO endpoint → not-yet-mapped.
+    // `/todos` (listTodos) on the `todo-widget` app intentionally has NO endpoint →
+    // not-yet-mapped. A SECOND consumer app declares the SAME `/todos` path but DOES
+    // have an active endpoint for it — the two-consumer same-path isolation case
+    // (RT-2.3): each request resolves within the caller's own app.
+    const servedConsumer = activeApp("served-consumer");
+    servedConsumerAppId = servedConsumer.id;
+    createdAppIds.push(servedConsumer.id);
+    await apps.create(servedConsumer);
+    const servedConsumerSpec = consumerSpecRow(servedConsumer.id, ir);
+    createdSpecIds.push(servedConsumerSpec.id);
+    await specs.create(servedConsumerSpec);
+    const servedMappingId = randomUUID();
+    await db.insert(approvedMapping).values({
+      id: servedMappingId,
+      sourceSpecId: servedConsumerSpec.id,
+      targetSpecId: backendSpec.id,
+      sourceAppId: servedConsumer.id,
+      targetAppId: backendApp.id,
+      variant: "consumer-provider",
+      approvedBy: "integration-test",
+      approvedAt: new Date(),
+      status: "active",
+    });
+    const servedEndpoint: AdapterEndpoint = {
+      id: randomUUID(),
+      consumerAppId: servedConsumer.id,
+      consumerOperationId: keyOf["listTodos"] ?? "todos/listTodos",
+      status: "active",
+    };
+    await artifacts.ensureAdapterEndpoint(servedEndpoint);
+    await artifacts.insertAdapterBindingIfAbsent({
+      id: randomUUID(),
+      adapterEndpointId: servedEndpoint.id,
+      backendAppId: backendApp.id,
+      backendOperationId: "tasks/listTasks",
+      approvedMappingId: servedMappingId,
+      role: "primary",
+      status: "active",
+    });
 
     const logger = createServerLogger(config);
     operator = buildServer({ config, db, logger });
@@ -325,6 +364,43 @@ describe("adapter runtime integration (requires Postgres)", () => {
   it("unattributable caller (no consumer-app seam) is rejected 401, not audited", async () => {
     const response = await fetch(adapterUrl("/todos"));
     expect(response.status).toBe(401);
+  });
+
+  it("RT-2.3: two consumers declaring the SAME path resolve within the caller's app — A's serve is never returned for B", async () => {
+    // A served consumer whose `/todos` IS bound, and the original consumer whose
+    // `/todos` is NOT — same verbatim path, resolved within the caller's own app.
+    const serveHandler: ServeHandler = {
+      serve: (input) =>
+        Promise.resolve({
+          kind: "served",
+          body: { servedFor: input.request.consumerAppId },
+          degraded: false,
+          contributingBackendAppIds: [],
+        }),
+    };
+    const runtime = buildAdapterRuntime({ db, logger: createServerLogger(config), serveHandler });
+    await runtime.mountManager.reconcile();
+
+    // A (served-consumer): its `/todos` endpoint is active → a real served 200.
+    const a = await runtime.app.inject({
+      method: "GET",
+      url: "/todos",
+      headers: withApp(servedConsumerAppId),
+    });
+    expect(a.statusCode).toBe(200);
+    expect(a.json<{ servedFor?: string }>().servedFor).toBe(servedConsumerAppId);
+
+    // B (todo-widget): the SAME `/todos` path, but B has no endpoint for it → B gets
+    // not-yet-mapped and NEVER A's served 200 or A's body.
+    const b = await runtime.app.inject({
+      method: "GET",
+      url: "/todos",
+      headers: withApp(consumerAppId),
+    });
+    expect(b.statusCode).toBe(501);
+    expect(b.headers[CAUSE_HEADER]).toBe("not-yet-mapped");
+    expect(b.body).not.toContain("servedFor");
+    await runtime.app.close();
   });
 
   // ── RT-5: one payload-free audit row per request ───────────────────────────

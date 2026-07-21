@@ -9,8 +9,17 @@ const ir: Ir = [
     name: "Todos",
     operations: [
       { operationId: "listTodos", method: "get", path: "/todos", parameters: [] },
-      // A literal segment that must beat the templated `/todos/{todoId}/complete`.
-      { operationId: "countTodos", method: "get", path: "/todos/count", parameters: [] },
+      // A same-length collision with the static route below, declared FIRST on
+      // purpose: `/todos/{id}` matches `/todos/active` too, so without the
+      // static-over-param precedence sort, route order alone would pick this param
+      // route for `/todos/active`. The precedence test proves the sort corrects that.
+      {
+        operationId: "getTodo",
+        method: "get",
+        path: "/todos/{id}",
+        parameters: [{ name: "id", location: "path", required: true }],
+      },
+      { operationId: "getActiveTodos", method: "get", path: "/todos/active", parameters: [] },
       {
         operationId: "completeTodo",
         method: "post",
@@ -49,7 +58,8 @@ describe("deriveRestRoutes", () => {
       })),
     ).toEqual([
       { method: "GET", path: "/todos", key: "todos/listTodos" },
-      { method: "GET", path: "/todos/count", key: "todos/countTodos" },
+      { method: "GET", path: "/todos/{id}", key: "todos/getTodo" },
+      { method: "GET", path: "/todos/active", key: "todos/getActiveTodos" },
       { method: "POST", path: "/todos/{todoId}/complete", key: "todos/completeTodo" },
       { method: "POST", path: "/lists/{listId}/todos", key: "lists/createTodo" },
     ]);
@@ -70,10 +80,17 @@ describe("matchRoute", () => {
     });
   });
 
-  it("prefers a static segment over a param segment at the same position", () => {
-    // `/todos/count` is static; `/todos/{todoId}/complete` is a different length, but
-    // this asserts the static route is chosen for the literal path.
-    expect(matchRoute(routes, "GET", "/todos/count")?.route.operationKey).toBe("todos/countTodos");
+  it("prefers a static segment over a param segment at the SAME position (same-length collision)", () => {
+    // Both `/todos/active` (static) and `/todos/{id}` (param) match `/todos/active`;
+    // the static route must win despite being declared second — this is the sole
+    // exercise of the static-over-param precedence sort.
+    expect(matchRoute(routes, "GET", "/todos/active")?.route.operationKey).toBe(
+      "todos/getActiveTodos",
+    );
+    // A value that only the param route matches still resolves to the param route.
+    const paramMatch = matchRoute(routes, "GET", "/todos/42");
+    expect(paramMatch?.route.operationKey).toBe("todos/getTodo");
+    expect(paramMatch?.pathParameters).toEqual({ id: "42" });
   });
 
   it("URL-decodes a captured parameter value", () => {
