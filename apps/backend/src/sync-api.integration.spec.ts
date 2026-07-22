@@ -20,6 +20,7 @@ import {
   createDb,
   credential,
   fieldMapping,
+  graphEdge,
   operationMapping,
   orderingQueue,
   pollSnapshot,
@@ -333,6 +334,10 @@ function testConfig(url: string): AppConfig {
 }
 
 async function clearRuntimeState(db: Database): Promise<void> {
+  // GR-2: the SA-1 enable/disable path now recomputes graph_edge rows (which FK to
+  // registered_app). Clear them before registered_app is deleted in clearAll, or the
+  // teardown FK-violates and poisons the shared integration DB.
+  await db.delete(graphEdge);
   await db.delete(orderingQueue);
   await db.delete(syncFieldState);
   await db.delete(pollSnapshot);
