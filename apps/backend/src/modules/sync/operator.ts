@@ -48,6 +48,7 @@ import {
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
 import { BadRequestError, NotFoundError } from "../../app-errors.js";
+import { GraphProjection } from "../graph/index.js";
 import type { EnableRuleGateResult } from "./background.js";
 import { pollScopeModeView, type PollScopeModeView } from "./poll-scope-mode.js";
 import { resolveRuleArtifacts, type RuleArtifactRepos, type RuleArtifacts } from "./resolution.js";
@@ -140,6 +141,15 @@ export interface SyncOperatorServiceDeps {
   readonly clock?: () => Date;
   readonly newId?: () => string;
   readonly readTraceContext?: () => ActiveTraceContext | null;
+  /**
+   * GR-2.2 — the incremental sync-edge graph projection. When present, a rule
+   * enable/disable recomputes the `sync` `GraphEdge` of its mapping's
+   * `(sourceApp → targetApp)` from the direction's current rule aggregate, so the
+   * landscape graph reflects the change. Optional: a service built without it (a
+   * Phase-1..4 test/harness) simply projects nothing — the recompute is a
+   * derived-projection side effect, never a precondition of the enable/disable.
+   */
+  readonly graphProjection?: GraphProjection;
 }
 
 // ── Views (service → route; the DTO mapper converts Date → ISO) ───────────────
@@ -327,6 +337,7 @@ export class SyncOperatorService {
   readonly #clock: () => Date;
   readonly #newId: () => string;
   readonly #readTraceContext: () => ActiveTraceContext | null;
+  readonly #graphProjection: GraphProjection | undefined;
 
   readonly #syncRules: SyncRuleRepository;
   readonly #mappingArtifacts: MappingArtifactsRepository;
@@ -341,6 +352,7 @@ export class SyncOperatorService {
     this.#clock = deps.clock ?? ((): Date => new Date());
     this.#newId = deps.newId ?? ((): string => randomUUID());
     this.#readTraceContext = deps.readTraceContext ?? getActiveTraceContext;
+    this.#graphProjection = deps.graphProjection;
 
     this.#syncRules = new SyncRuleRepository(deps.db);
     this.#mappingArtifacts = new MappingArtifactsRepository(deps.db);
@@ -490,6 +502,10 @@ export class SyncOperatorService {
         relatedMappingId: artifacts.mapping.id,
       }),
     );
+    // GR-2.2 — the rule is now `enabled`: recompute its sync edge from the direction's
+    // current rule aggregate (the edge reflects the enable). A derived-projection side
+    // effect, after the enable committed; never blocks or fails the enable.
+    await this.#recomputeSyncEdgeFor(artifacts.mapping);
     return {
       kind: "accepted",
       backfillRequired: result.backfillRequired,
@@ -514,7 +530,29 @@ export class SyncOperatorService {
         relatedMappingId: rule.approvedMappingId,
       }),
     );
+    // GR-2.2 — the rule is now `disabled`: recompute its sync edge from the direction's
+    // current rule aggregate (the last enabled rule going down pauses the edge; the
+    // last rule of the direction disappearing entirely removes it).
+    const mapping = await this.#repos.approvedMappings.getById(rule.approvedMappingId);
+    if (mapping !== undefined) {
+      await this.#recomputeSyncEdgeFor(mapping);
+    }
     return this.#reload(ruleId);
+  }
+
+  /**
+   * GR-2.2 — recompute the `sync` `GraphEdge` for a rule's mapping direction
+   * `(sourceApp → targetApp)` from the direction's current rule aggregate, when the
+   * graph projection is wired. A no-op when it is not (a Phase-1..4 harness). Runs in
+   * its own transaction: the triggering enable/disable has already committed, and the
+   * projection is idempotent, so an eventual recompute converges on the right edge —
+   * a projection side effect that never gates the operator action.
+   */
+  async #recomputeSyncEdgeFor(mapping: {
+    readonly sourceAppId: string;
+    readonly targetAppId: string;
+  }): Promise<void> {
+    await this.#graphProjection?.recomputeSyncEdge(mapping.sourceAppId, mapping.targetAppId);
   }
 
   /**
