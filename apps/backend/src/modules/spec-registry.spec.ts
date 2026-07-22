@@ -1,3 +1,4 @@
+import type { SpecDiff } from "@mediator/ir";
 import type {
   ApiSpec,
   ApprovedMapping,
@@ -15,6 +16,7 @@ import {
   UnknownAppError,
   carryForwardAnalysisExclusions,
   carryForwardResourceBinding,
+  computeAdditiveAnalysisScope,
   repinnedSpecPair,
 } from "./spec-registry.js";
 
@@ -109,6 +111,36 @@ function providerSpecWithRetypedField(): Record<string, unknown> {
     components: { schemas: { Issue: { properties: Record<string, { type: string }> } } };
   };
   doc.components.schemas.Issue.properties["title"] = { type: "integer" };
+  return doc;
+}
+
+/** The sample provider doc with a whole **new** `labels` resource group → additive diff (SL-3.1). */
+function providerSpecWithNewResourceGroup(): Record<string, unknown> {
+  const doc = structuredClone(providerSpecDocument()) as {
+    paths: Record<string, unknown>;
+    components: { schemas: Record<string, unknown> };
+  };
+  doc.paths["/labels"] = {
+    get: {
+      operationId: "listLabels",
+      tags: ["label"],
+      responses: {
+        "200": {
+          description: "ok",
+          content: {
+            "application/json": {
+              schema: { type: "array", items: { $ref: "#/components/schemas/Label" } },
+            },
+          },
+        },
+      },
+    },
+  };
+  doc.components.schemas["Label"] = {
+    type: "object",
+    properties: { id: { type: "integer" }, name: { type: "string" } },
+    required: ["id"],
+  };
   return doc;
 }
 
@@ -516,5 +548,205 @@ describe("SL-2 pure carry-forward / re-pin helpers", () => {
       scopePathBindings: [],
     };
     expect(carryForwardResourceBinding(prior, "new-spec", "new-binding", [])).toBeUndefined();
+  });
+});
+
+/**
+ * SL-3 — the scoped-delta trigger wired into the additive branch of `ingestNewVersion`:
+ * when the additive diff added genuinely-new **in-scope** elements, the intent to run a
+ * scoped delta analysis is recorded (a `mapping_detection_job` scope descriptor) in the
+ * same transaction; nothing is analyzed or approved here (the worker does that later).
+ */
+describe("SpecRegistry.ingestNewVersion scoped-delta trigger (SL-3)", () => {
+  async function seedV1(
+    store: InMemoryStore,
+    unitOfWork: FakeUnitOfWork,
+    registry: SpecRegistry,
+    analysisExclusions: string[] = [],
+  ): Promise<{ app: RegisteredApp; v1: ApiSpec }> {
+    const app = seedApp(store);
+    const v1 = await unitOfWork.run((tx) =>
+      registry.ingestSpec(app.id, providerSpecDocument(), "PROVIDER", analysisExclusions, tx),
+    );
+    return { app, v1 };
+  }
+
+  it("records a changed-resource scoped job when an optional field is added inside an existing resource (SL-3.2)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+    expect(store.scopedDetectionJobs[0]).toEqual({
+      apiSpecId: outcome.newSpec.id,
+      scope: {
+        kind: "additive-delta",
+        supersededSpecId: v1.id,
+        newResourceGroups: [],
+        changedResources: ["issues"],
+      },
+    });
+  });
+
+  it("records a new-resource-group scoped job when a whole new group is added (SL-3.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithNewResourceGroup(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("additive");
+
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+    expect(store.scopedDetectionJobs[0]).toEqual({
+      apiSpecId: outcome.newSpec.id,
+      scope: {
+        kind: "additive-delta",
+        supersededSpecId: v1.id,
+        newResourceGroups: ["labels"],
+        changedResources: [],
+      },
+    });
+  });
+
+  it("records NO scoped job when the additive element is inside an excluded group (SL-3.4)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app } = await seedV1(store, unitOfWork, registry, ["issues"]);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // The optional field landed inside the excluded `issues` group → nothing to analyze.
+    expect(store.scopedDetectionJobs).toEqual([]);
+  });
+
+  it("records NO scoped job on a breaking advance (SL-3 is the additive path only)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app } = await seedV1(store, unitOfWork, registry);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithRetypedField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+    expect(store.scopedDetectionJobs).toEqual([]);
+  });
+
+  it("leaves existing active mappings untouched while opening the delta review surface (SL-3.6)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+    const mapping: ApprovedMapping = {
+      id: "m1",
+      sourceSpecId: v1.id,
+      targetSpecId: "spec-counterpart-v1",
+      sourceAppId: app.id,
+      targetAppId: "app-counterpart",
+      variant: "peer-peer",
+      approvedBy: "reviewer:alice",
+      approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+      status: "active",
+      counterpartMappingId: "m2",
+    };
+    store.approvedMappings.set(mapping.id, mapping);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecWithOptionalField(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // SL-3.6 — the mapping stays active (re-pinned to v2 by SL-2), never stale; the delta
+    // is purely additional review surface recorded as a scoped job.
+    const advanced = store.approvedMappings.get("m1");
+    expect(advanced?.status).toBe("active");
+    expect(advanced?.sourceSpecId).toBe(outcome.newSpec.id);
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+  });
+});
+
+/**
+ * SL-3 pure policy: the structural scope derived from an additive `SpecDiff`, unit-tested
+ * directly so the two staging buckets and the exclusion filter are provable without a
+ * whole ingest round.
+ */
+describe("computeAdditiveAnalysisScope (SL-3 structural scope)", () => {
+  type SpecChange = SpecDiff["changes"][number];
+
+  function groupAdded(resourceRef: string): SpecChange {
+    return {
+      kind: "resource-group-added",
+      classification: "additive",
+      location: { level: "resource", resourceRef },
+      reason: "test",
+    };
+  }
+  function fieldAdded(resourceRef: string): SpecChange {
+    return {
+      kind: "field-added",
+      classification: "additive",
+      location: { level: "field", resourceRef, schemaName: "S", fieldName: "f" },
+      reason: "test",
+    };
+  }
+  function diffOf(changes: readonly SpecChange[]): SpecDiff {
+    return { classification: "additive", changes };
+  }
+
+  it("buckets a new resource group into newResourceGroups (SL-3.1)", () => {
+    expect(computeAdditiveAnalysisScope(diffOf([groupAdded("labels")]), "v1", [])).toEqual({
+      kind: "additive-delta",
+      supersededSpecId: "v1",
+      newResourceGroups: ["labels"],
+      changedResources: [],
+    });
+  });
+
+  it("buckets an additive change inside an existing resource into changedResources (SL-3.2)", () => {
+    expect(computeAdditiveAnalysisScope(diffOf([fieldAdded("issues")]), "v1", [])).toEqual({
+      kind: "additive-delta",
+      supersededSpecId: "v1",
+      newResourceGroups: [],
+      changedResources: ["issues"],
+    });
+  });
+
+  it("keeps a newly-added group out of changedResources even if it carries intra changes", () => {
+    expect(
+      computeAdditiveAnalysisScope(diffOf([groupAdded("labels"), fieldAdded("labels")]), "v1", []),
+    ).toEqual({
+      kind: "additive-delta",
+      supersededSpecId: "v1",
+      newResourceGroups: ["labels"],
+      changedResources: [],
+    });
+  });
+
+  it("drops excluded resources from both buckets (SL-3.4)", () => {
+    expect(
+      computeAdditiveAnalysisScope(diffOf([groupAdded("labels"), fieldAdded("issues")]), "v1", [
+        "labels",
+        "issues",
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when nothing genuinely-new is in scope", () => {
+    expect(computeAdditiveAnalysisScope(diffOf([]), "v1", [])).toBeUndefined();
   });
 });

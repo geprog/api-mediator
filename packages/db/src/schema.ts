@@ -392,6 +392,34 @@ export type DetectionJobStatus = (typeof DETECTION_JOB_STATUSES)[number];
 export const detectionJobStatusEnum = pgEnum("detection_job_status", DETECTION_JOB_STATUSES);
 
 /**
+ * The `jsonb`-persisted **scope descriptor** of a `mapping_detection_job` (the
+ * table's nullable `scope` column, below). It is what distinguishes the two job
+ * shapes the one table now carries:
+ *
+ * - `scope = null` — a **full** detection job (Phase-2 DT-1/DT-2): the worker runs
+ *   `runDetectionForSpec` over every candidate pair the spec introduces.
+ * - `scope != null` — a **scoped** additive-delta job (Phase-6 SL-3): the worker
+ *   runs an incremental analysis restricted to the genuinely-new in-scope elements
+ *   an additive `SpecDiff` added, producing a small delta `MappingProposal`.
+ *
+ * It is **infrastructure** (durability/scheduling), not a glossary entity — the
+ * structural scope the Spec Registry derives once from the additive `SpecDiff`
+ * (SL-1.6 "one classification, many consumers"), recorded in the ingest transaction
+ * and read by the worker outside it (DT-2). It carries only version-stable
+ * `resourceRef`s and spec ids — no IR payload, never a secret.
+ */
+export interface DetectionJobScope {
+  /** Discriminant — the reaction that recorded this scope (SL-3 additive delta). */
+  readonly kind: "additive-delta";
+  /** The prior (now-`superseded`) version this additive advance came from — the lineage side whose established shortlists SL-3.2 reuses. */
+  readonly supersededSpecId: string;
+  /** `resourceRef`s of the genuinely-new **in-scope** resource groups (SL-3.1) — a scoped shortlist + detail per counterpart. */
+  readonly newResourceGroups: readonly string[];
+  /** `resourceRef`s of existing in-scope resources that gained a new field/operation (SL-3.2) — a detail-only call against their already-shortlisted counterpart, stage 1 skipped. */
+  readonly changedResources: readonly string[];
+}
+
+/**
  * The lifecycle of an `ordering_queue` entry (below). Like `detection_job_status`
  * this is an **infrastructure** enum — the Sync Engine's per-key ordering substrate
  * (`docs/architecture/sync-engine.md` *Ordering and consistency*), not a glossary
@@ -855,6 +883,9 @@ export const mappingDetectionJob = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }),
     // NULL until the job reaches a terminal state (`completed`/`failed`).
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    // NULL for a full detection job (DT-1/DT-2); a {@link DetectionJobScope} for a
+    // scoped additive-delta job (SL-3). The column the worker branches on.
+    scope: jsonb("scope").$type<DetectionJobScope>(),
   },
   (table) => [
     // The worker's claim query: pending rows in arrival order. Partial so the vast

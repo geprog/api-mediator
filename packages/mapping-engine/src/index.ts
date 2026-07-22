@@ -45,16 +45,30 @@ export {
   type DetectionDeps,
   detectForSpec,
   resolveShortlist,
+  shortlistCall,
+  type ShortlistCallResult,
   type ShortlistOutcome,
 } from "./detection.js";
 
 export {
+  type AdditiveAnalysisScope,
+  analyzeAdditiveDelta,
+  type EstablishedResourcePair,
+} from "./scoped.js";
+
+export {
+  createDbPriorProposalSource,
   createDbProposalStore,
   createDbSpecSource,
+  deriveEstablishedPairs,
   type DetectionRunResult,
   type PersistableProposal,
+  type PriorProposalSource,
   type ProposalStore,
   runDetectionForSpec,
   type RunDetectionDeps,
+  runScopedAdditiveAnalysis,
+  type RunScopedDeps,
+  type ScopedAnalysisJob,
   type SpecSource,
 } from "./run.js";

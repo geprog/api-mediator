@@ -7,6 +7,7 @@ import type {
   MappingProposal,
   MappingProposalItem,
   NoCounterpartResource,
+  ResourceShortlist,
   ShortlistResult,
   ShortlistResultPair,
 } from "@mediator/domain";
@@ -118,6 +119,45 @@ function shortlistContext(
       };
 }
 
+/** One stage-1 shortlist call's validated result + its emitted per-call metrics. */
+export interface ShortlistCallResult {
+  readonly outcome: "success" | "failed";
+  /** The validated `ResourceShortlist`, present only on `outcome === "success"`. */
+  readonly value: ResourceShortlist | undefined;
+  readonly metrics: LlmCallMetrics;
+}
+
+/**
+ * The raw stage-1 call with corrective retries + metrics emission (TD-1/TD-3),
+ * factored so **both** the full `resolveShortlist` (in-scope summaries of the whole
+ * pair) and the SL-3 scoped shortlist (the new spec restricted to its new groups vs.
+ * a counterpart) share the exact same call/retry/metrics wiring — the filtering and
+ * no-counterpart enrichment that differ between the two live in their callers.
+ */
+export async function shortlistCall(
+  sourceSummary: ShortlistPromptContext["sourceSpecSummaryIR"],
+  targetSummary: ShortlistPromptContext["targetSpecSummaryIR"],
+  deps: DetectionDeps,
+): Promise<ShortlistCallResult> {
+  const result = await callWithRetry(
+    (correctiveFeedback) =>
+      deps.provider.shortlistResourcePairs(
+        shortlistContext(sourceSummary, targetSummary, deps.promptVersion, correctiveFeedback),
+      ),
+    () => deps.provider.lastUsage,
+    deps.maxRetries,
+    deps.monotonicNow,
+  );
+  const metrics = emitMetrics(deps, {
+    stage: "shortlist",
+    outcome: result.outcome,
+    attempts: result.attempts,
+    durationMs: result.durationMs,
+    usage: result.usage,
+  });
+  return { outcome: result.outcome, value: result.value, metrics };
+}
+
 /**
  * Run stage 1 for an unordered spec pair (TD-1) and mechanically enrich its result
  * (PP-3). Exactly **one** `shortlistResourcePairs` call is made per pair (plus any
@@ -137,23 +177,8 @@ export async function resolveShortlist(
   const sourceSummary = buildSpecSummaryIR(sourceGroups);
   const targetSummary = buildSpecSummaryIR(targetGroups);
 
-  const result = await callWithRetry(
-    (correctiveFeedback) =>
-      deps.provider.shortlistResourcePairs(
-        shortlistContext(sourceSummary, targetSummary, deps.promptVersion, correctiveFeedback),
-      ),
-    () => deps.provider.lastUsage,
-    deps.maxRetries,
-    deps.monotonicNow,
-  );
-
-  const metrics = emitMetrics(deps, {
-    stage: "shortlist",
-    outcome: result.outcome,
-    attempts: result.attempts,
-    durationMs: result.durationMs,
-    usage: result.usage,
-  });
+  const result = await shortlistCall(sourceSummary, targetSummary, deps);
+  const { metrics } = result;
 
   if (result.outcome === "failed" || result.value === undefined) {
     return { status: "failed", metrics };

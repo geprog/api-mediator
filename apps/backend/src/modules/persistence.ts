@@ -3,6 +3,7 @@ import { CredentialStore, DbCredentialPersistence } from "@mediator/credentials"
 import type {
   CredentialMetadata,
   Database,
+  DetectionJobScope,
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
   SourceScopeRefPatch,
@@ -11,6 +12,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  DetectionJobRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   tx,
@@ -126,6 +128,18 @@ export interface AuditTxRepo {
 }
 
 /**
+ * The scoped-detection-job enqueue the SL-3 additive reaction drives **inside the
+ * version-advance transaction**: it records the intent to run the scoped delta
+ * analysis (the `DetectionJobScope` descriptor), committing atomically with the
+ * re-pin/carry-forward. The slow LLM/network work runs later in the worker,
+ * outside this transaction (DT-2). Deliberately narrow — the reaction only records
+ * intent, exactly as the `SpecIngested` consumer records a full detection job.
+ */
+export interface DetectionJobTxRepo {
+  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void>;
+}
+
+/**
  * The repositories + event emit available inside one transaction. `emit` is
  * already bound to the open transaction (transactional outbox), so callers just
  * hand it a domain event.
@@ -138,6 +152,8 @@ export interface TxStores {
   // ── SL-2 additive re-pin ports (the spec-update lifecycle's reaction to a diff) ──
   readonly approvedMappings: ApprovedMappingTxRepo;
   readonly audit: AuditTxRepo;
+  // ── SL-3 scoped-delta trigger (records the scoped analysis job in-tx) ──
+  readonly detectionJobs: DetectionJobTxRepo;
   emit(event: DomainEventEnvelope): Promise<void>;
 }
 
@@ -186,6 +202,7 @@ export class DbUnitOfWork implements UnitOfWork {
         ),
         approvedMappings: new ApprovedMappingRepository(txn),
         audit: new AuditLogRepository(txn),
+        detectionJobs: new DetectionJobRepository(txn),
         emit: (event) => this.#eventBus.emit(event, txn),
       }),
     );

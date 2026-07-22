@@ -1,7 +1,12 @@
 import { and, eq, lt, notExists, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
-import { apiSpec, mappingDetectionJob, type DetectionJobStatus } from "../schema.js";
+import {
+  apiSpec,
+  mappingDetectionJob,
+  type DetectionJobScope,
+  type DetectionJobStatus,
+} from "../schema.js";
 
 /**
  * The durable `mapping_detection_job` record in domain-facing shape. Infrastructure
@@ -17,6 +22,8 @@ export interface DetectionJob {
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly finishedAt: Date | null;
+  /** `null` for a full detection job (DT-1/DT-2); a scope descriptor for a scoped SL-3 job. */
+  readonly scope: DetectionJobScope | null;
 }
 
 /** The minimum a worker needs about a job it just claimed. */
@@ -25,6 +32,12 @@ export interface ClaimedDetectionJob {
   readonly apiSpecId: string;
   /** The **post-increment** attempt count (the claim bumped `attempts`). */
   readonly attempts: number;
+  /**
+   * `null` → a **full** detection job (the worker runs `runDetectionForSpec`); a
+   * {@link DetectionJobScope} → a **scoped** SL-3 additive-delta job (the worker
+   * runs the scoped incremental analysis over the descriptor's new elements).
+   */
+  readonly scope: DetectionJobScope | null;
 }
 
 /**
@@ -41,6 +54,14 @@ export interface DetectionJobEnqueueOps {
    * reconciler enqueue to a single job.
    */
   enqueue(apiSpecId: string): Promise<void>;
+  /**
+   * Record intent to run a **scoped** additive-delta analysis for `apiSpecId`
+   * (SL-3), carrying the {@link DetectionJobScope} descriptor, idempotently under
+   * the same partial UNIQUE index as {@link enqueue}: a redelivered ingest / a
+   * re-derivation collapses to one job, so the delta proposal is produced once
+   * (SL-3.5). Recorded inside the additive version-advance transaction.
+   */
+  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void>;
 }
 
 /**
@@ -87,6 +108,7 @@ function mapRow(row: typeof mappingDetectionJob.$inferSelect): DetectionJob {
     createdAt: row.createdAt,
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
+    scope: row.scope ?? null,
   };
 }
 
@@ -106,6 +128,17 @@ export class DetectionJobRepository implements DetectionJobEnqueueOps, Detection
     await this.db
       .insert(mappingDetectionJob)
       .values({ apiSpecId, status: "pending" })
+      .onConflictDoNothing();
+  }
+
+  public async enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void> {
+    // Same idempotency as {@link enqueue} — the partial UNIQUE index over
+    // `(api_spec_id) WHERE status in ('pending','running')` collapses a redelivered
+    // ingest / a re-derivation to one job, so the scoped delta proposal is produced
+    // once (SL-3.5). The only difference from a full job is the carried `scope`.
+    await this.db
+      .insert(mappingDetectionJob)
+      .values({ apiSpecId, status: "pending", scope })
       .onConflictDoNothing();
   }
 
@@ -133,6 +166,7 @@ export class DetectionJobRepository implements DetectionJobEnqueueOps, Detection
         id: mappingDetectionJob.id,
         apiSpecId: mappingDetectionJob.apiSpecId,
         attempts: mappingDetectionJob.attempts,
+        scope: mappingDetectionJob.scope,
       })
       .from(mappingDetectionJob)
       .where(eq(mappingDetectionJob.status, "pending"))
@@ -147,7 +181,7 @@ export class DetectionJobRepository implements DetectionJobEnqueueOps, Detection
       .update(mappingDetectionJob)
       .set({ status: "running", startedAt: now, attempts })
       .where(eq(mappingDetectionJob.id, row.id));
-    return { id: row.id, apiSpecId: row.apiSpecId, attempts };
+    return { id: row.id, apiSpecId: row.apiSpecId, attempts, scope: row.scope ?? null };
   }
 
   public async markCompleted(id: string, finishedAt: Date): Promise<void> {

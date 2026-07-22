@@ -122,6 +122,7 @@ class FakeUnitOfWork implements UnitOfWork {
         repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
       },
       audit: { insert: (): Promise<void> => Promise.resolve() },
+      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
       emit: (): Promise<void> => Promise.resolve(),
     } satisfies TxStores;
     return work(stores);
