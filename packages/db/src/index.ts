@@ -84,6 +84,7 @@ export {
   syncRuleStatusEnum,
   targetDriftCheckEnum,
   transformKindEnum,
+  type DetectionJobScope,
   type DetectionJobStatus,
   type OrderingQueueStatus,
   type ResourceBindingRefKind,

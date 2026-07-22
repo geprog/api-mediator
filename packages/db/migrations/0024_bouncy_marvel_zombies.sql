@@ -1,0 +1,1 @@
+ALTER TABLE "mapping_detection_job" ADD COLUMN "scope" jsonb;

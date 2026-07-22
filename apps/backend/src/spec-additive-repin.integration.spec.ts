@@ -194,6 +194,9 @@ suite("SL-2 additive re-pin + carry-forward (requires Postgres)", () => {
       credentialStore: unusedCredentials,
       approvedMappings: new ApprovedMappingRepository(handle),
       audit: new AuditLogRepository(handle),
+      // SL-3's scoped-delta trigger is exercised in its own spec; this SL-2 re-pin
+      // test isolates the deterministic re-pin/carry-forward and records no job.
+      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
       emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
     };
   }

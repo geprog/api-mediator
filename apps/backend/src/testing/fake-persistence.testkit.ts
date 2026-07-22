@@ -4,6 +4,7 @@ import { RESOURCE_BINDING_REF_KINDS } from "@mediator/contracts";
 import type { CredentialMaterial } from "@mediator/credentials";
 import type {
   CredentialMetadata,
+  DetectionJobScope,
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
   SourceScopeRefPatch,
@@ -33,6 +34,7 @@ import type {
   BindingTxRepo,
   CredentialTxStore,
   SpecReader,
+  DetectionJobTxRepo,
   SpecTxRepo,
   TxStores,
   UnitOfWork,
@@ -89,6 +91,11 @@ export class InMemoryStore {
   public readonly approvedMappings = new Map<string, ApprovedMapping>();
   /** SL-2 — appended audit rows (the re-pin records `mapping-decision`/`system` entries). */
   public readonly auditLog: AuditLogEntry[] = [];
+  /** SL-3 — scoped detection jobs the additive reaction enqueued (recorded intent), so a test can assert the scoped analysis was triggered in-tx. */
+  public readonly scopedDetectionJobs: {
+    readonly apiSpecId: string;
+    readonly scope: DetectionJobScope;
+  }[] = [];
 }
 
 /**
@@ -346,6 +353,20 @@ class FakeAuditRepo implements AuditTxRepo {
 }
 
 /**
+ * Mirrors {@link DetectionJobRepository.enqueueScoped} at the port level: records the
+ * scoped-analysis intent so a test can assert the SL-3 trigger fired in-tx. The
+ * real repo is idempotent under the partial-unique index; the fake records each
+ * call (idempotency is proven against the real repo in the integration test).
+ */
+class FakeDetectionJobRepo implements DetectionJobTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+  public enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void> {
+    this.store.scopedDetectionJobs.push({ apiSpecId, scope });
+    return Promise.resolve();
+  }
+}
+
+/**
  * A {@link UnitOfWork} over the in-memory {@link InMemoryStore}. On a thrown
  * error it restores a snapshot taken before `work` ran, mimicking a transaction
  * rollback so atomicity (AR-1 crit 7) is unit-testable.
@@ -362,6 +383,7 @@ export class FakeUnitOfWork implements UnitOfWork {
       events: [...this.store.events],
       approvedMappings: new Map(this.store.approvedMappings),
       auditLog: [...this.store.auditLog],
+      scopedDetectionJobs: [...this.store.scopedDetectionJobs],
     };
     const stores: TxStores = {
       registeredApps: new FakeAppRepo(this.store),
@@ -370,6 +392,7 @@ export class FakeUnitOfWork implements UnitOfWork {
       credentialStore: new FakeCredentialStore(this.store),
       approvedMappings: new FakeApprovedMappingRepo(this.store),
       audit: new FakeAuditRepo(this.store),
+      detectionJobs: new FakeDetectionJobRepo(this.store),
       emit: (event) => {
         this.store.events.push(event);
         return Promise.resolve();
@@ -391,6 +414,7 @@ export class FakeUnitOfWork implements UnitOfWork {
     events: DomainEventEnvelope[];
     approvedMappings: Map<string, ApprovedMapping>;
     auditLog: AuditLogEntry[];
+    scopedDetectionJobs: { readonly apiSpecId: string; readonly scope: DetectionJobScope }[];
   }): void {
     replaceMap(this.store.apps, snapshot.apps);
     replaceMap(this.store.specs, snapshot.specs);
@@ -399,6 +423,7 @@ export class FakeUnitOfWork implements UnitOfWork {
     replaceArray(this.store.events, snapshot.events);
     replaceMap(this.store.approvedMappings, snapshot.approvedMappings);
     replaceArray(this.store.auditLog, snapshot.auditLog);
+    replaceArray(this.store.scopedDetectionJobs, snapshot.scopedDetectionJobs);
   }
 }
 

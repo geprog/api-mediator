@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { DetectionJobScope } from "@mediator/db";
 import type {
   ApiSpec,
   ApiSpecRole,
@@ -191,11 +192,17 @@ export class SpecRegistry {
    *    anything the new IR no longer resolves dropped. Nothing that executes changes,
    *    so no mapping is set `stale` and no human review is required.
    *
+   * 5. **Scoped delta trigger (SL-3)** — when the additive diff added genuinely-new
+   *    **in-scope** elements, the intent to run a **scoped** delta analysis is recorded
+   *    in this same transaction (a `mapping_detection_job` carrying a
+   *    {@link DetectionJobScope}); the analysis itself runs later in the worker, off this
+   *    transaction (DT-2). The delta becomes an **ordinary** `MappingProposal` reviewed
+   *    through the Phase-3 flow — nothing is auto-approved (SL-3.3).
+   *
    * Deliberately **out of scope here** (owned by later slices, so the boundary stays
-   * clean): the additive **delta proposal** for genuinely-new elements (SL-3) and any
-   * **breaking**-change reaction — a breaking diff advances the version but marks no
-   * mapping `stale`, re-pins nothing, and carries nothing forward (SL-4…SL-6). **No
-   * `SpecIngested` is emitted** on any branch (that event triggers a *full* detection
+   * clean): any **breaking**-change reaction — a breaking diff advances the version but
+   * marks no mapping `stale`, re-pins nothing, and carries nothing forward (SL-4…SL-6).
+   * **No `SpecIngested` is emitted** on any branch (that event triggers a *full* detection
    * analysis; the SL-2…SL-6 reactions are the diff's scoped consumers instead). After a
    * **breaking** advance an active mapping may still reference the now-`superseded`
    * prior version — the expected intermediate the breaking reactions resolve.
@@ -249,6 +256,24 @@ export class SpecRegistry {
       // rows commit with the version advance). It returns the new version reflecting the
       // carried-forward `analysisExclusions`.
       const repinnedNewSpec = await this.applyAdditiveReaction(supersededSpec, newSpec, tx);
+
+      // SL-3 — when the additive diff added genuinely-new **in-scope** elements, record
+      // (in this same transaction) the intent to run a **scoped** delta analysis. The
+      // slow LLM/network work runs later in the worker, off this dispatcher/ingest
+      // transaction (DT-2). The structural scope is derived once from the diff (SL-1.6),
+      // honoring the carried-forward `analysisExclusions` (SL-3.4: an excluded resource is
+      // never analyzed). No genuinely-new in-scope element → no scoped job (nothing to
+      // review). `enqueueScoped` is idempotent under the same partial-unique index as the
+      // full enqueue, so a redelivery produces the delta proposal once (SL-3.5).
+      const scope = computeAdditiveAnalysisScope(
+        diff,
+        supersededSpec.id,
+        repinnedNewSpec.analysisExclusions,
+      );
+      if (scope !== undefined) {
+        await tx.detectionJobs.enqueueScoped(repinnedNewSpec.id, scope);
+      }
+
       return { kind: "advanced", newSpec: repinnedNewSpec, supersededSpec, diff };
     }
 
@@ -318,6 +343,61 @@ export class SpecRegistry {
 
     return updated ?? { ...newSpec, analysisExclusions: carriedExclusions };
   }
+}
+
+// ── SL-3 pure helper (structural scope of the additive delta analysis) ─────────
+
+/**
+ * **SL-3 — the structural analysis scope derived from an additive `SpecDiff`.** Pure
+ * and total: it reads the one classification the diff already produced (SL-1.6 — no
+ * re-diffing) and buckets the genuinely-new **in-scope** elements into the two
+ * staging granularities the scoped analysis uses:
+ *
+ * - **`newResourceGroups`** — a `resource-group-added` change (SL-3.1): a scoped
+ *   stage-1 shortlist for the group against each counterpart, then a detail call per
+ *   shortlisted pair.
+ * - **`changedResources`** — any other additive change (a new operation, a new
+ *   optional field/parameter, a new schema, a gained response body) inside a resource
+ *   that already existed (SL-3.2): stage 1 is skipped and a detail call runs for the
+ *   already-shortlisted resource pair.
+ *
+ * Every excluded resource group (`analysisExclusions` on the new version, carried
+ * forward by SL-2) is dropped from **both** buckets — an excluded resource is never
+ * analyzed, so an additive element added to/inside it triggers nothing (SL-3.4).
+ * Returns `undefined` when nothing genuinely-new is in scope: there is no delta to
+ * review, so no scoped job is recorded. Only additive changes are considered (a
+ * breaking diff never reaches this reaction), and only version-stable `resourceRef`s
+ * are carried — never IR payload, never a secret.
+ */
+export function computeAdditiveAnalysisScope(
+  diff: SpecDiff,
+  supersededSpecId: string,
+  newSpecExclusions: readonly string[],
+): DetectionJobScope | undefined {
+  const excluded = new Set(newSpecExclusions);
+  const newResourceGroups: string[] = [];
+  const changedResourceSet = new Set<string>();
+
+  for (const change of diff.changes) {
+    if (change.classification !== "additive") continue; // additive branch only (defensive)
+    const { resourceRef } = change.location;
+    if (excluded.has(resourceRef)) continue; // SL-3.4 — excluded groups are never analyzed
+    if (change.kind === "resource-group-added") {
+      newResourceGroups.push(resourceRef);
+    } else {
+      changedResourceSet.add(resourceRef);
+    }
+  }
+
+  const newGroupSet = new Set(newResourceGroups);
+  // A newly-added group's internals are covered by SL-3.1, never SL-3.2 — keep the two
+  // buckets disjoint so a resource is analyzed exactly one way.
+  const changedResources = [...changedResourceSet].filter((ref) => !newGroupSet.has(ref));
+
+  if (newResourceGroups.length === 0 && changedResources.length === 0) {
+    return undefined;
+  }
+  return { kind: "additive-delta", supersededSpecId, newResourceGroups, changedResources };
 }
 
 // ── SL-2 pure helpers (the additive re-pin / carry-forward policy) ─────────────

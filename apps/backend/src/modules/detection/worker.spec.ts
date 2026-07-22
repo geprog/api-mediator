@@ -1,4 +1,9 @@
-import type { ClaimedDetectionJob, DetectionJobWorkerOps, TransactionScope } from "@mediator/db";
+import type {
+  ClaimedDetectionJob,
+  DetectionJobScope,
+  DetectionJobWorkerOps,
+  TransactionScope,
+} from "@mediator/db";
 import { describe, expect, it } from "vitest";
 
 import { DetectionWorker } from "./worker.js";
@@ -20,6 +25,7 @@ interface FakeJob {
   startedAt: Date | null;
   finishedAt: Date | null;
   lastError: string | null;
+  scope: DetectionJobScope | null;
 }
 
 /**
@@ -55,7 +61,12 @@ class FakeJobStore implements DetectionJobWorkerOps {
     job.attempts += 1;
     job.status = "running";
     job.startedAt = now;
-    return Promise.resolve({ id: job.id, apiSpecId: job.apiSpecId, attempts: job.attempts });
+    return Promise.resolve({
+      id: job.id,
+      apiSpecId: job.apiSpecId,
+      attempts: job.attempts,
+      scope: job.scope,
+    });
   }
 
   public markCompleted(id: string, finishedAt: Date): Promise<void> {
@@ -95,7 +106,11 @@ class FakeJobStore implements DetectionJobWorkerOps {
 const NOW = new Date("2026-07-11T12:00:00.000Z");
 const STALE_AFTER_MS = 60_000;
 
-function pendingJob(id: string, apiSpecId: string): FakeJob {
+function pendingJob(
+  id: string,
+  apiSpecId: string,
+  scope: DetectionJobScope | null = null,
+): FakeJob {
   return {
     id,
     apiSpecId,
@@ -104,6 +119,7 @@ function pendingJob(id: string, apiSpecId: string): FakeJob {
     startedAt: null,
     finishedAt: null,
     lastError: null,
+    scope,
   };
 }
 
@@ -126,16 +142,25 @@ function makeWorker(
   store: FakeJobStore,
   run: (apiSpecId: string) => Promise<void>,
   maxAttempts: number,
+  runScopedDetection?: (job: ClaimedDetectionJob) => Promise<void>,
 ): DetectionWorker<FakeScope> {
   return new DetectionWorker<FakeScope>({
     scope: new FakeScope(),
     jobs: () => store,
     runDetection: run,
+    ...(runScopedDetection !== undefined ? { runScopedDetection } : {}),
     maxAttempts,
     staleAfterMs: STALE_AFTER_MS,
     clock: () => NOW,
   });
 }
+
+const ADDITIVE_SCOPE: DetectionJobScope = {
+  kind: "additive-delta",
+  supersededSpecId: "spec-1-v1",
+  newResourceGroups: ["invoices"],
+  changedResources: [],
+};
 
 describe("DetectionWorker.runOnce", () => {
   it("claims a pending job, runs detection outside the tx, and marks it completed", async () => {
@@ -187,6 +212,7 @@ describe("DetectionWorker.runOnce", () => {
       startedAt: new Date("2026-07-11T11:00:00.000Z"), // older than NOW - staleAfterMs
       finishedAt: null,
       lastError: null,
+      scope: null,
     };
     const store = new FakeJobStore([staleJob]);
     const spy = runSpy(() => Promise.resolve());
@@ -201,6 +227,40 @@ describe("DetectionWorker.runOnce", () => {
     expect(store.jobs[0]?.attempts).toBe(2);
   });
 
+  it("routes a scoped job to the scoped runner (not full detection) and marks it completed", async () => {
+    const store = new FakeJobStore([pendingJob("job-1", "spec-1-v2", ADDITIVE_SCOPE)]);
+    const fullSpy = runSpy(() => Promise.resolve());
+    const scopedCalls: ClaimedDetectionJob[] = [];
+    const worker = makeWorker(store, fullSpy.run, 3, (job) => {
+      scopedCalls.push(job);
+      return Promise.resolve();
+    });
+
+    const result = await worker.runOnce();
+
+    expect(result).toStrictEqual({ claimed: true, outcome: "completed" });
+    // The scoped runner ran with the claimed job (incl. its scope); full detection did NOT.
+    expect(fullSpy.calls).toHaveLength(0);
+    expect(scopedCalls).toHaveLength(1);
+    expect(scopedCalls[0]?.apiSpecId).toBe("spec-1-v2");
+    expect(scopedCalls[0]?.scope).toStrictEqual(ADDITIVE_SCOPE);
+    expect(store.jobs[0]?.status).toBe("completed");
+  });
+
+  it("surfaces (does not silently complete) a scoped job when no scoped runner is wired", async () => {
+    const store = new FakeJobStore([pendingJob("job-1", "spec-1-v2", ADDITIVE_SCOPE)]);
+    const fullSpy = runSpy(() => Promise.resolve());
+    // No scoped runner wired, maxAttempts 1 → the misconfiguration parks the job `failed`.
+    const worker = makeWorker(store, fullSpy.run, 1);
+
+    const result = await worker.runOnce();
+
+    expect(result).toStrictEqual({ claimed: true, outcome: "failed" });
+    expect(fullSpy.calls).toHaveLength(0);
+    expect(store.jobs[0]?.status).toBe("failed");
+    expect(store.jobs[0]?.lastError).toContain("no scoped runner");
+  });
+
   it("does not reclaim a running job that is still within the stale window", async () => {
     const freshJob: FakeJob = {
       id: "job-1",
@@ -210,6 +270,7 @@ describe("DetectionWorker.runOnce", () => {
       startedAt: new Date("2026-07-11T11:59:30.000Z"), // newer than NOW - staleAfterMs
       finishedAt: null,
       lastError: null,
+      scope: null,
     };
     const store = new FakeJobStore([freshJob]);
     const spy = runSpy(() => Promise.resolve());

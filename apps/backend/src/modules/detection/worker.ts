@@ -1,4 +1,4 @@
-import type { DetectionJobWorkerOps, TransactionScope } from "@mediator/db";
+import type { ClaimedDetectionJob, DetectionJobWorkerOps, TransactionScope } from "@mediator/db";
 
 /**
  * The durable async detection worker (DT-2). It is the piece that keeps the slow
@@ -44,11 +44,20 @@ export interface DetectionWorkerDeps<TTx> {
   /** Binds the job ops to a transaction handle (production: `DetectionJobRepository`). */
   readonly jobs: (tx: TTx) => DetectionJobWorkerOps;
   /**
-   * Run detection for one spec — **outside** any transaction. Production wraps
+   * Run **full** detection for one spec — **outside** any transaction. Production wraps
    * `runDetectionForSpec(specId, deps)` (which opens its own per-proposal
-   * transactions) and emits the run's shortlist-yield telemetry.
+   * transactions) and emits the run's shortlist-yield telemetry. Driven for a job with
+   * no `scope` (the DT-1/DT-2 full-detection path).
    */
   readonly runDetection: (apiSpecId: string) => Promise<void>;
+  /**
+   * Run the **scoped** additive-delta analysis for a claimed job that carries a
+   * `scope` (SL-3) — also **outside** any transaction. When a scoped job is claimed
+   * this is required; production wraps `runScopedAdditiveAnalysis`. A claimed scoped
+   * job with no runner wired is a configuration error and is surfaced (never silently
+   * completed as if analyzed).
+   */
+  readonly runScopedDetection?: (job: ClaimedDetectionJob) => Promise<void>;
   /** Attempt ceiling: a job that fails this many claims is parked `failed`. */
   readonly maxAttempts?: number;
   /** A `running` job older than this (ms) is treated as a crash orphan and reclaimed. */
@@ -79,6 +88,7 @@ export class DetectionWorker<TTx> {
   readonly #scope: TransactionScope<TTx>;
   readonly #jobs: (tx: TTx) => DetectionJobWorkerOps;
   readonly #runDetection: (apiSpecId: string) => Promise<void>;
+  readonly #runScopedDetection: ((job: ClaimedDetectionJob) => Promise<void>) | undefined;
   readonly #maxAttempts: number;
   readonly #staleAfterMs: number;
   readonly #pollIntervalMs: number;
@@ -92,6 +102,7 @@ export class DetectionWorker<TTx> {
     this.#scope = deps.scope;
     this.#jobs = deps.jobs;
     this.#runDetection = deps.runDetection;
+    this.#runScopedDetection = deps.runScopedDetection;
     this.#maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.#staleAfterMs = deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
     this.#pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -111,8 +122,19 @@ export class DetectionWorker<TTx> {
 
     try {
       // OUTSIDE any transaction: the engine opens its own transaction per persisted
-      // proposal, so the dispatcher/claim transaction never spans the LLM work.
-      await this.#runDetection(claimed.apiSpecId);
+      // proposal, so the dispatcher/claim transaction never spans the LLM work. A job
+      // that carries a `scope` runs the scoped SL-3 delta analysis; otherwise the full
+      // DT-1/DT-2 detection.
+      if (claimed.scope !== null) {
+        if (this.#runScopedDetection === undefined) {
+          throw new Error(
+            "DetectionWorker: claimed a scoped detection job but no scoped runner is wired.",
+          );
+        }
+        await this.#runScopedDetection(claimed);
+      } else {
+        await this.#runDetection(claimed.apiSpecId);
+      }
       await this.#scope.transaction((tx) =>
         this.#jobs(tx).markCompleted(claimed.id, this.#clock()),
       );

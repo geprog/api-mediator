@@ -169,6 +169,13 @@
       "when": 1784637513851,
       "tag": "0023_plain_black_crow",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1784707885758,
+      "tag": "0024_bouncy_marvel_zombies",
+      "breakpoints": true
     }
   ]
 }

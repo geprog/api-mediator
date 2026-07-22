@@ -4,6 +4,7 @@ import {
   EventOutboxRepository,
   ProcessedEventRepository,
   tx,
+  type ClaimedDetectionJob,
   type Database,
   type DbTransaction,
 } from "@mediator/db";
@@ -16,9 +17,11 @@ import {
 } from "@mediator/event-bus";
 import { PROMPT_VERSION, type LLMMappingProvider } from "@mediator/llm";
 import {
+  createDbPriorProposalSource,
   createDbProposalStore,
   createDbSpecSource,
   runDetectionForSpec,
+  runScopedAdditiveAnalysis,
   type RunDetectionDeps,
 } from "@mediator/mapping-engine";
 import type { FastifyBaseLogger } from "fastify";
@@ -117,6 +120,30 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
     sink.onDetectionRun(result);
   };
 
+  // SL-3 — the scoped additive-delta analysis for a claimed job that carries a
+  // `scope`. Same off-transaction discipline and telemetry boundary as full
+  // detection; it only restricts which elements are analyzed. The prior-proposal
+  // source resolves the SL-3.2 "already-shortlisted" pairs from persisted shortlists.
+  const priorProposals = createDbPriorProposalSource(db);
+  const runScopedDetection = async (job: ClaimedDetectionJob): Promise<void> => {
+    const { scope } = job;
+    if (scope === null) {
+      throw new Error("runScopedDetection: claimed job carries no scope");
+    }
+    const result = await runScopedAdditiveAnalysis(
+      {
+        newSpecId: job.apiSpecId,
+        supersededSpecId: scope.supersededSpecId,
+        scope: {
+          newResourceGroups: scope.newResourceGroups,
+          changedResources: scope.changedResources,
+        },
+      },
+      { ...runDetectionDeps, priorProposals },
+    );
+    sink.onDetectionRun(result);
+  };
+
   // ── Consumer + dispatcher: enqueue-in-tx, no LLM ──────────────────────────
   const registry = new ConsumerRegistry<DbTransaction>();
   registry.register(
@@ -145,6 +172,7 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
     scope: db,
     jobs: (txn) => new DetectionJobRepository(txn),
     runDetection,
+    runScopedDetection,
     onError: (error) => {
       logger.error({ err: describeError(error) }, "detection worker pass failed");
     },

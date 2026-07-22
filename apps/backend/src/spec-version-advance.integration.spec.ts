@@ -118,6 +118,9 @@ suite("SL-1 SpecRegistry.ingestNewVersion (requires Postgres)", () => {
       credentialStore: unusedCredentials,
       approvedMappings: new ApprovedMappingRepository(handle),
       audit: new AuditLogRepository(handle),
+      // SL-1 isolates the version-advance + diff classification; the SL-3 scoped-delta
+      // trigger has its own spec, so record no job here.
+      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
       emit: () =>
         Promise.reject(new Error("ingestNewVersion must not emit SpecIngested on advance")),
     };
