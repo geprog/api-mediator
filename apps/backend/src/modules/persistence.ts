@@ -134,6 +134,15 @@ export interface CredentialTxStore {
 export interface ApprovedMappingTxRepo {
   /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
   listActiveBySpecId(specId: string): Promise<ApprovedMapping[]>;
+  /**
+   * SL-10.5 — the `suspended` mappings pinned to `specId` on either side. The **breaking**
+   * reaction classifies these alongside the `active` set: a manual operator hold does not
+   * stop a `SpecDiff` from classifying the mapping, so a suspended mapping referencing a
+   * changed element still goes `stale` (`suspended → stale`). The *additive* reaction does
+   * not read them — it only re-pins `active` mappings (`docs/architecture/data-model.md`
+   * `ApprovedMapping.sourceSpecId`).
+   */
+  listSuspendedBySpecId(specId: string): Promise<ApprovedMapping[]>;
   /** SL-2.1/2.2 — re-pin a mapping's spec ids only; every other column is untouched. */
   repinSpecs(
     id: string,
@@ -142,7 +151,8 @@ export interface ApprovedMappingTxRepo {
   ): Promise<ApprovedMapping | undefined>;
   /**
    * SL-4.1/4.2/4.3 — set **only** `status = "stale"`; the pinned spec ids (stays on the
-   * reviewed/superseded version), the counterpart, and the children are untouched.
+   * reviewed/superseded version), the counterpart, and the children are untouched. Reached
+   * from `active` and — SL-10.5 — from `suspended` (the more-blocking condition wins).
    */
   markStale(id: string): Promise<ApprovedMapping | undefined>;
 }

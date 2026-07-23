@@ -7,6 +7,7 @@ import AdapterHealthView from "../views/AdapterHealthView.vue";
 import AdapterTokenView from "../views/AdapterTokenView.vue";
 import AppDetailView from "../views/AppDetailView.vue";
 import AppListView from "../views/AppListView.vue";
+import ApprovedMappingsView from "../views/ApprovedMappingsView.vue";
 import ConflictResolutionView from "../views/ConflictResolutionView.vue";
 import ContainerLinkingView from "../views/ContainerLinkingView.vue";
 import HealthView from "../views/HealthView.vue";
@@ -36,6 +37,8 @@ const routes: readonly RouteRecordRaw[] = [
   { path: "/specs/:id", name: "spec-detail", component: SpecView },
   { path: "/proposals", name: "proposal-list", component: ProposalListView },
   { path: "/proposals/:id", name: "proposal-review", component: ProposalReviewView },
+  // SL-10 — the approved-mapping lifecycle: status + manual suspend/resume.
+  { path: "/mappings", name: "approved-mappings", component: ApprovedMappingsView },
   { path: "/sync", name: "sync-rules", component: SyncRulesView },
   { path: "/sync/rules/:id", name: "sync-rule", component: SyncRuleView },
   { path: "/sync/manual-links", name: "sync-manual-links", component: ManualLinkingView },

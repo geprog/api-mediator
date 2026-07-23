@@ -361,8 +361,8 @@ class FakeCredentialStore implements CredentialTxStore {
 
 /**
  * Mirrors {@link ApprovedMappingRepository}'s SL-2 methods: the `active` mappings pinned
- * to a spec id (either side), and a spec-ids-only re-pin that leaves every other column
- * byte-identical.
+ * to a spec id (either side), the `suspended` ones the SL-10.5 breaking classification also
+ * reads, and a spec-ids-only re-pin that leaves every other column byte-identical.
  */
 class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
   public constructor(private readonly store: InMemoryStore) {}
@@ -387,11 +387,21 @@ class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);
   }
+  public listSuspendedBySpecId(specId: string): Promise<ApprovedMapping[]> {
+    return Promise.resolve(
+      [...this.store.approvedMappings.values()].filter(
+        (mapping) =>
+          mapping.status === "suspended" &&
+          (mapping.sourceSpecId === specId || mapping.targetSpecId === specId),
+      ),
+    );
+  }
   public markStale(id: string): Promise<ApprovedMapping | undefined> {
     const existing = this.store.approvedMappings.get(id);
     if (existing === undefined) return Promise.resolve(undefined);
     // Only `status` changes — the pinned spec ids, counterpart, and children are untouched
     // (SL-4.2/4.3: a stale mapping stays pinned to its reviewed/superseded version).
+    // Reached from `active` and — SL-10.5 — from `suspended`; the real repo guards neither.
     const updated: ApprovedMapping = { ...existing, status: "stale" };
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);

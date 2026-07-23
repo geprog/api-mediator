@@ -1,5 +1,5 @@
 import type { ApprovedMapping } from "@mediator/domain";
-import { and, eq, or } from "drizzle-orm";
+import { and, desc, eq, or } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapApprovedMappingRow, toApprovedMappingInsert } from "../mappers/approved-mapping.js";
@@ -138,6 +138,93 @@ export class ApprovedMappingRepository {
       .where(eq(approvedMapping.id, id))
       .returning();
     return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
+   * **SL-10.1 — suspend an `active` mapping (the manual operator hold).** Sets **only**
+   * `status = "suspended"`; every other column is left byte-identical — the pinned
+   * `sourceSpecId`/`targetSpecId`, the `counterpartMappingId`, and the mapping's
+   * `FieldMapping`/`OperationMapping` children are all untouched, so resuming restores
+   * exactly the reviewed mapping (no re-backfill, no re-composition — SL-10.2).
+   *
+   * The transition is a **compare-and-set on `status = "active"`**: suspend applies only to
+   * an `active` mapping (`docs/architecture/data-model.md` `ApprovedMapping.status`), so a
+   * row that is concurrently `stale`/`superseded`/`archived`/already-`suspended` matches
+   * nothing and returns `undefined` rather than clobbering a more-blocking status.
+   * Suspension lives on the mapping **alone** (data-model `SyncRule.status`): its derived
+   * `SyncRule`s/`AdapterBinding`s keep their own `status` and pause/fail as a **derived**
+   * condition (the Scheduler holds a suspended-mapping rule; RP-3 fails a live call
+   * `mapping-suspended`). The manual counterpart of {@link markStale}.
+   */
+  public async markSuspended(id: string): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ status: "suspended" })
+      .where(and(eq(approvedMapping.id, id), eq(approvedMapping.status, "active")))
+      .returning();
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
+   * **SL-10.2 — resume a `suspended` mapping (the exact inverse of {@link markSuspended}).**
+   * Sets **only** `status = "active"`; the pinned spec ids, counterpart, and children are
+   * untouched, so the rules/bindings resume under their **stored** state.
+   *
+   * The transition is a **compare-and-set on `status = "suspended"`**: resume is valid only
+   * from `suspended` (data-model `ApprovedMapping.status` — "the operator lifts it by
+   * setting the mapping `active` again"). A mapping that went `suspended → stale` under a
+   * breaking change (SL-10.5) matches nothing here and returns `undefined`: the
+   * more-blocking condition wins, and only re-review/adoption returns it to `active` — never
+   * resume. Same for `superseded`/`archived`/already-`active`.
+   *
+   * NB the caller must first ensure no **other** mapping is `active` on the same directional
+   * spec pair — the partial `approved_mapping_active_direction_uq` index admits exactly one
+   * (see {@link getActiveByDirectionalSpecPair}) — so that collision surfaces as a clean
+   * state conflict rather than a constraint violation.
+   */
+  public async markActive(id: string): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ status: "active" })
+      .where(and(eq(approvedMapping.id, id), eq(approvedMapping.status, "suspended")))
+      .returning();
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
+   * **SL-10.5 — every `suspended` `ApprovedMapping` pinned to `specId`** on either side.
+   * The breaking reaction classifies these alongside the `active` set
+   * ({@link listActiveBySpecId}): suspension is a *manual* hold and does not stop a
+   * `SpecDiff` from classifying the mapping, so a suspended mapping that references a
+   * changed element still goes `stale` (`suspended → stale` — the more-blocking condition
+   * wins, and only re-review returns it to `active`).
+   */
+  public async listSuspendedBySpecId(specId: string): Promise<ApprovedMapping[]> {
+    const rows = await this.db
+      .select()
+      .from(approvedMapping)
+      .where(
+        and(
+          eq(approvedMapping.status, "suspended"),
+          or(eq(approvedMapping.sourceSpecId, specId), eq(approvedMapping.targetSpecId, specId)),
+        ),
+      );
+    return rows.map(mapApprovedMappingRow);
+  }
+
+  /**
+   * Every `ApprovedMapping`, most recently approved first — the SL-10 operator read
+   * surface (the suspend/resume control needs each mapping's current `status`). Metadata
+   * only; the mapping's reviewed children are read separately. Unbounded like the sibling
+   * `SyncRule`/`AdapterEndpoint` operator lists — the row count is bounded by the number of
+   * reviewed integrations in the landscape.
+   */
+  public async listAll(): Promise<ApprovedMapping[]> {
+    const rows = await this.db
+      .select()
+      .from(approvedMapping)
+      .orderBy(desc(approvedMapping.approvedAt));
+    return rows.map(mapApprovedMappingRow);
   }
 
   /**

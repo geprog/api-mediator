@@ -57,6 +57,15 @@ export {
 } from "./adapter-endpoints.js";
 
 export {
+  approvedMappingDtoSchema,
+  approvedMappingListResponseSchema,
+  approvedMappingTransitionResponseSchema,
+  type ApprovedMappingDto,
+  type ApprovedMappingListResponse,
+  type ApprovedMappingTransitionResponse,
+} from "./approved-mappings.js";
+
+export {
   cutoverAdapterTokenResponseSchema,
   issueAdapterTokenResponseSchema,
   type CutoverAdapterTokenResponse,

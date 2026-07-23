@@ -23,6 +23,12 @@ export const queryKeys = {
   ],
   /** Root of the sync-rules cache — invalidated wholesale after enable/disable/config. */
   syncRules: ["sync-rules"] as const,
+  /**
+   * Root of the approved-mapping cache (SL-10) — invalidated wholesale after a
+   * suspend/resume, since the transition also changes what the sync rules and adapter
+   * endpoints derived from that mapping do.
+   */
+  approvedMappings: ["approved-mappings"] as const,
   /** The sync audit log, keyed by its (serialized) filter. */
   syncEvents: (filterKey: string): readonly string[] => ["sync-events", filterKey],
   /** The ambiguous-match queue (SA-3.3). */

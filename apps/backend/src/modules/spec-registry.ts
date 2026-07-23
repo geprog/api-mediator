@@ -361,7 +361,9 @@ export class SpecRegistry {
    * audit rows, and graph recompute commit atomically with the advance.
    *
    * 1. **Precise mark-stale (SL-4.1) — the load-bearing invariant.** For every `active`
-   *    `ApprovedMapping` pinned to the now-`superseded` version, match its **referenced
+   *    **and** (SL-10.5) every `suspended` `ApprovedMapping` pinned to the now-`superseded`
+   *    version — a manual operator hold is independent of spec-driven staleness, so it never
+   *    makes the diff skip a mapping — match its **referenced
    *    elements on the changed side** ({@link mappingChangedSideRefs} — the side that
    *    pinned the superseded spec) against the diff's **breaking** change locations
    *    ({@link computeBreakingAffectedKeys}). A mapping that references a changed element
@@ -373,7 +375,11 @@ export class SpecRegistry {
    *    reference prefers `stale` (a false-stale is re-reviewable; a false-active silently
    *    serves a shape that changed).
    * 2. **Staleness lives on the mapping (SL-4.2/4.3).** {@link markStale} sets **only**
-   *    `status`; a stale mapping **stays pinned** to its reviewed (superseded) version
+   *    `status` — from `active`, and (SL-10.5) from `suspended`, where the more-blocking
+   *    `stale` wins and only re-review returns the mapping to `active` (resume no longer
+   *    applies). An unaffected `suspended` mapping keeps its hold and, like a stale one,
+   *    stays pinned; only `active` mappings are re-pinned. A stale mapping **stays pinned**
+   *    to its reviewed (superseded) version
    *    (re-review — SL-6 — produces its successor against the new version). Its derived
    *    `SyncRule`s/`AdapterBinding`s keep their own `status`; the rule pauses and the
    *    binding fails `mapping-stale` as **derived** conditions (nothing writes a rule/
@@ -415,7 +421,17 @@ export class SpecRegistry {
     const now = new Date();
     const affected = computeBreakingAffectedKeys(diff);
 
-    const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    // SL-10.5 — the breaking diff classifies `suspended` mappings alongside `active` ones: a
+    // manual operator hold is independent of spec-driven staleness, so it never makes the
+    // diff skip the mapping. A suspended mapping that references a changed element goes
+    // `suspended → stale` below (the more-blocking condition wins — it then needs re-review
+    // to reach `active`, and resume no longer applies); one that references nothing changed
+    // stays `suspended` and — like a `stale` mapping — stays pinned to the version it was
+    // reviewed against (only `active` mappings are re-pinned, data-model
+    // `ApprovedMapping.sourceSpecId`).
+    const activeMappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    const suspendedMappings = await tx.approvedMappings.listSuspendedBySpecId(supersededSpec.id);
+    const mappings = [...activeMappings, ...suspendedMappings];
     const staleMappings: ApprovedMapping[] = [];
     // SL-6 — one re-review descriptor per stale mapping (its id + the affected resource
     // pairs), collected in this same transaction to record the scoped re-review job below.
@@ -448,10 +464,13 @@ export class SpecRegistry {
             affected,
           ),
         });
-      } else {
+      } else if (mapping.status === "active") {
         // SL-4.1 — references no changed element → advance exactly as the additive case.
         await this.#repinMapping(mapping, supersededSpec, newSpec, tx, now);
       }
+      // SL-10.5 — an unaffected `suspended` mapping is left untouched: it keeps its hold and,
+      // like a `stale` one, stays pinned to the version it was reviewed against. Re-pinning is
+      // defined for `active` mappings only (data-model `ApprovedMapping.sourceSpecId`).
     }
 
     // SL-2.4 exclusions + SL-5.1 re-validated (retain-unconfirmed) binding carry-forward.

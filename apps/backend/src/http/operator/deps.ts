@@ -12,6 +12,10 @@ import type {
   ProposalReadService,
 } from "../../modules/approval/index.js";
 import type { AdapterTokenService } from "../../modules/adapter-token/index.js";
+import type {
+  ApprovedMappingReader,
+  ApprovedMappingSuspensionMutator,
+} from "./approved-mappings.routes.js";
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
@@ -60,6 +64,15 @@ export interface OperatorApiDeps {
    * real db/transaction, legitimately omits it and the route is simply not registered.
    */
   readonly adapterComposition?: AdapterCompositionService;
+  /**
+   * Phase-6 SL-10 — the manual suspend/resume of an `ApprovedMapping`, paired with the
+   * reader behind the operator list. Optional for the same reason as `adapterComposition`:
+   * the real composition root always provides both (so the routes are mounted in
+   * production), while the in-memory unit harness — which has no real db/transaction —
+   * legitimately omits them and the routes are simply not registered.
+   */
+  readonly approvedMappingSuspension?: ApprovedMappingSuspensionMutator;
+  readonly approvedMappingReader?: ApprovedMappingReader;
   /**
    * Phase-5 adapter **read** surface (AP-1 state, AP-5 health): the pooled reader over
    * `AdapterEndpoint`/`AdapterBinding` + the per-binding mapping/backend status the
