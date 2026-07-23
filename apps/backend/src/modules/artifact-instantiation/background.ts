@@ -13,10 +13,12 @@ import {
 } from "@mediator/db";
 import type { EventConsumer, Reconciler } from "@mediator/event-bus";
 
+import { GraphProjection } from "../graph/index.js";
 import {
   proposeScopeCorrespondences,
   type ScopeCorrespondenceProposalOps,
 } from "../scope-authoring.js";
+import type { AdapterSuccessorAdopter, SuccessorAdoptionDeps } from "./adopt.js";
 import {
   MappingApprovedInstantiationConsumer,
   type LoadedApprovedMapping,
@@ -47,6 +49,19 @@ export interface ArtifactInstantiationDeps {
    * pairs to the operator; omitted, no report is made (existing harnesses unaffected).
    */
   readonly reportScopeProposal?: ScopeProposalReporter;
+  /**
+   * SL-7/SL-8 — the successor-adoption wiring. When present, an approved mapping carrying a
+   * `predecessorMappingId` is adopted in place instead of freshly instantiated: the sync half
+   * re-points the predecessor's `SyncRule`s + supersedes it + transfers the counterpart +
+   * recomputes the sync `GraphEdge` (via {@link GraphProjection}) on the dispatcher
+   * transaction; the adapter half drives CO-7 `adoptSuccessor` in its own transaction via
+   * {@link AdapterSuccessorAdopter}. Omitted → no adoption (a Phase-1..5 harness), and a
+   * successor (which cannot arise before Phase 6) falls through to fresh instantiation.
+   */
+  readonly adoption?: {
+    readonly graphProjection: GraphProjection;
+    readonly adoptAdapter: AdapterSuccessorAdopter;
+  };
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
 }
@@ -87,6 +102,37 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
     correspondences: new ScopeCorrespondenceRepository(handle),
   });
 
+  // SL-7/SL-8 — the successor-adoption capability, bound to the dispatcher transaction. The
+  // sync half runs on the same handle as the artifact instantiation (so the re-point +
+  // supersede + counterpart transfer + sync GraphEdge recompute commit atomically with the
+  // `processed_event` ledger); the adapter half is driven in CO-7's own transaction.
+  const adoptionDeps = deps.adoption;
+  const adoption: SuccessorAdoptionDeps<DbTransaction> | undefined =
+    adoptionDeps === undefined
+      ? undefined
+      : {
+          syncOps: (handle) => ({
+            getApprovedMapping: (id) => new ApprovedMappingRepository(handle).getById(id),
+            repointSyncRulesToSuccessor: (supersededMappingId, successorMappingId) =>
+              new DownstreamArtifactRepository(handle).repointSyncRulesToSuccessor(
+                supersededMappingId,
+                successorMappingId,
+              ),
+            markSuperseded: async (id) => {
+              await new ApprovedMappingRepository(handle).markSuperseded(id);
+            },
+            setCounterpart: (id, counterpartMappingId) =>
+              new ApprovedMappingRepository(handle).setCounterpart(id, counterpartMappingId),
+            recomputeSyncEdge: (sourceAppId, targetAppId) =>
+              adoptionDeps.graphProjection.recomputeSyncEdgeWithin(
+                handle,
+                sourceAppId,
+                targetAppId,
+              ),
+          }),
+          adoptAdapter: adoptionDeps.adoptAdapter,
+        };
+
   const consumer = new MappingApprovedInstantiationConsumer<DbTransaction>({
     load,
     ops: (handle) => new DownstreamArtifactRepository(handle),
@@ -94,6 +140,7 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
     ...(deps.reportScopeProposal !== undefined
       ? { reportScopeProposal: deps.reportScopeProposal }
       : {}),
+    ...(adoption !== undefined ? { adoption } : {}),
     newId,
   });
 

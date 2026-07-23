@@ -141,8 +141,32 @@ export class ApprovedMappingRepository {
   }
 
   /**
+   * **SL-7.1 — mark the stale predecessor `superseded` on successor adoption.** Sets
+   * **only** `status = "superseded"`; every other column is left byte-identical — the
+   * pinned `sourceSpecId`/`targetSpecId` (it describes the old shape), its
+   * `FieldMapping`/`OperationMapping` children, and its `predecessorMappingId` chain are
+   * all retained for audit. A `superseded` mapping is never executed again: its derived
+   * `SyncRule`s/`AdapterBinding`s have been re-pointed to the successor
+   * ({@link import("./downstream-artifacts.js").DownstreamArtifactRepository.repointSyncRulesToSuccessor}
+   * / `repointAdapterBindingsToSuccessor`), so nothing is left pointing at it that would
+   * poll or serve. The adoption counterpart of {@link markStale}. Returns the updated
+   * mapping, or `undefined` when no row with `id` exists.
+   */
+  public async markSuperseded(id: string): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ status: "superseded" })
+      .where(eq(approvedMapping.id, id))
+      .returning();
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
    * Set (or clear) a mapping's `counterpartMappingId` — used to cross-link the
-   * reverse-direction mapping when both directions are approved (AS-6 criterion 2).
+   * reverse-direction mapping when both directions are approved (AS-6 criterion 2), and to
+   * **transfer** the pairing to a successor on adoption (SL-7.3): the link is defined over
+   * spec lineages, so a counterpart pointing at a now-`superseded` predecessor is updated
+   * to the successor that took over its slot.
    */
   public async setCounterpart(id: string, counterpartMappingId: string | null): Promise<void> {
     await this.db
