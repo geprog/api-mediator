@@ -6,11 +6,15 @@
  * we load config, create the database pool, wire the server via the composition
  * root, start listening, and install signal handlers for graceful shutdown.
  */
+import { randomUUID } from "node:crypto";
+
 import { loadConfig } from "@mediator/config";
 import { createDb } from "@mediator/db";
 
 import { buildServer, createServerLogger } from "./composition-root.js";
 import { loadRepoEnv } from "./env.js";
+import { AdapterCompositionService } from "./modules/adapter-composition/index.js";
+import { GraphProjection } from "./modules/graph/index.js";
 import {
   AdapterTelemetry,
   buildAdapterCacheInvalidation,
@@ -131,9 +135,28 @@ const adapterMountReactions = buildAdapterMountReactions(adapterRuntime.mountMan
 // SS-16 — surface "scoped but underivable" pairs (SS-18's typed skip reasons) to the
 // operator through the shared logger, so a pair that looks scoped yet could not derive a
 // `ScopeCorrespondence` is no longer silently dropped on the floor.
+// SL-7/SL-8 — the successor-adoption wiring for the `MappingApproved` consumer. The
+// AdapterCompositionService drives CO-7 `adoptSuccessor` (the adapter half) in its own
+// transaction, over the SAME shared response-cache invalidator the runtime serves from
+// (CH-5.4 — an adoption's cache drop evicts the very cache a live caller hits) and a
+// GraphProjection (the same seam every other trigger recomputes edges through). The sync half
+// recomputes the sync GraphEdge through the same projection instance.
+const graphProjection = new GraphProjection({ db, newId: randomUUID });
+const adapterComposition = new AdapterCompositionService({
+  db,
+  newId: randomUUID,
+  graphProjection,
+  cacheInvalidator: adapterCacheInvalidator,
+});
 const artifactInstantiation = buildArtifactInstantiation({
   db,
   reportScopeProposal: buildScopeProposalReporter(logger),
+  adoption: {
+    graphProjection,
+    adoptAdapter: async (input, actor) => {
+      await adapterComposition.adoptSuccessor(input, actor);
+    },
+  },
 });
 
 // The Phase-2 detection-trigger background: the Event Bus dispatcher (delivers

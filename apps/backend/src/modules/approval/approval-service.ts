@@ -22,6 +22,7 @@ import {
   type IdentityKeyConfirmation,
   type OperationOverride,
 } from "./assemble.js";
+import { carryForwardUnaffectedCorrespondences } from "./carry-forward.js";
 import type { ApprovalTxStores, ApprovalUnitOfWork } from "./persistence.js";
 import { serializeRef } from "./refs.js";
 import { refResolves } from "./target-ir.js";
@@ -298,7 +299,31 @@ export class ApprovalService {
       mapping = updated;
     }
 
-    await stores.artifacts.replaceChildren(mappingId, artifacts);
+    // SL-7.6 — for a **re-review** approval (`reReviewOf` set), the successor's persisted
+    // child set is the UNION of its own (scoped) re-reviewed content and the stale
+    // predecessor's correspondences for every resource pair the re-review did NOT touch. A
+    // naive replace-with-the-successor's-children would silently drop those unaffected
+    // correspondences on adoption; carrying them forward here (folded into the wholesale
+    // `replaceChildren`) keeps the successor covering everything the predecessor did — minus
+    // only the field pairs the re-review genuinely removed from a touched pair — and commits
+    // the successor *complete* before its `MappingApproved`, so adoption's adapter half
+    // re-validates composition against the full content. See `carry-forward.ts`.
+    const childArtifacts =
+      proposal.reReviewOf === undefined
+        ? artifacts
+        : carryForwardUnaffectedCorrespondences({
+            successorMappingId: mappingId,
+            reReviewed: artifacts,
+            predecessorFields: await stores.artifacts.listFieldMappings(proposal.reReviewOf),
+            predecessorOperations: await stores.artifacts.listOperationMappings(
+              proposal.reReviewOf,
+            ),
+            predecessorParameters: await stores.artifacts.listParameterMappings(
+              proposal.reReviewOf,
+            ),
+            newId: this.#newId,
+          });
+    await stores.artifacts.replaceChildren(mappingId, childArtifacts);
 
     // AS-6 criterion 2: opportunistically cross-link the reverse direction.
     if (variant === "peer-peer" && counterpart !== undefined) {

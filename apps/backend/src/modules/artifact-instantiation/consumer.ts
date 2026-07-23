@@ -11,6 +11,7 @@ import { parseMappingApproved, type DeliveredEvent, type EventConsumer } from "@
 
 import type { ScopeCorrespondenceProposalOps, ScopeProposalOutcome } from "../scope-authoring.js";
 import { proposeScopeCorrespondences } from "../scope-authoring.js";
+import { adoptSuccessor, type SuccessorAdoptionDeps } from "./adopt.js";
 import { instantiateArtifacts } from "./instantiate.js";
 
 /**
@@ -81,6 +82,14 @@ export interface MappingApprovedInstantiationConsumerDeps<TTx> {
    * surfaced to the operator (see {@link ScopeProposalReporter}). Omitted → no report.
    */
   readonly reportScopeProposal?: ScopeProposalReporter;
+  /**
+   * SL-7/SL-8 — the successor-adoption capability. When present, an approved mapping carrying
+   * a `predecessorMappingId` is **adopted in place** (its predecessor's re-pointed
+   * rules/bindings take over the successor's slot) instead of freshly instantiated. Optional:
+   * a Phase-3 harness that only exercises first-time instantiation omits it, in which case a
+   * successor (which cannot arise before Phase 6) would fall through to fresh instantiation.
+   */
+  readonly adoption?: SuccessorAdoptionDeps<TTx>;
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
 }
@@ -109,6 +118,7 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
   readonly #ops: DownstreamArtifactOpsFactory<TTx>;
   readonly #scopeProposalOps: ScopeCorrespondenceProposalOpsFactory<TTx> | undefined;
   readonly #reportScopeProposal: ScopeProposalReporter | undefined;
+  readonly #adoption: SuccessorAdoptionDeps<TTx> | undefined;
   readonly #newId: () => string;
 
   public constructor(deps: MappingApprovedInstantiationConsumerDeps<TTx>) {
@@ -116,6 +126,7 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
     this.#ops = deps.ops;
     this.#scopeProposalOps = deps.scopeProposalOps;
     this.#reportScopeProposal = deps.reportScopeProposal;
+    this.#adoption = deps.adoption;
     this.#newId = deps.newId ?? ((): string => randomUUID());
   }
 
@@ -132,6 +143,27 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
       // event is treated as handled (a no-op) rather than retried forever.
       return;
     }
+
+    // SL-7.2 — a mapping carrying a `predecessorMappingId` is a **successor** (its re-review
+    // proposal was approved): adopt it **in place** across everything derived from the stale
+    // predecessor — re-pointing the predecessor's rules/bindings, transferring the
+    // counterpart, and superseding the predecessor — instead of freshly instantiating brand
+    // new artifacts (which would restart the relationship and lose the sync operational
+    // state). Adoption runs ONLY here, as the ordinary consequence of the successor's
+    // `MappingApproved` (the safety promise; no adoption without human approval). The
+    // successor's carried-forward content (SL-7.6) is already committed from approval, so the
+    // adapter half re-validates against the complete content.
+    const predecessorMappingId = loaded.mapping.predecessorMappingId ?? undefined;
+    if (predecessorMappingId != null && this.#adoption !== undefined) {
+      await adoptSuccessor({
+        successor: loaded.mapping,
+        predecessorMappingId,
+        deps: this.#adoption,
+        tx,
+      });
+      return;
+    }
+
     await instantiateArtifacts({
       mapping: loaded.mapping,
       fields: loaded.fields,

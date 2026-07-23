@@ -368,6 +368,14 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
       .where(
         and(
           eq(approvedMapping.status, "active"),
+          // SL-7.2 — a **successor** (an approved mapping carrying `predecessorMappingId`)
+          // is *adopted* in place (its predecessor's re-pointed rules/bindings take over its
+          // slot), never freshly instantiated. So it is deliberately excluded from the
+          // fresh-instantiation reconciler: a successor whose adoption has not yet re-pointed
+          // its rules must NOT be given brand-new rules here (that would double-instantiate
+          // and bypass the re-point). Adoption is re-derived by the `MappingApproved`
+          // redelivery (and RC-3's adoption reconciliation later), not by this query.
+          sql`${approvedMapping.predecessorMappingId} is null`,
           notExists(
             this.db
               .select({ one: sql`1` })
@@ -462,6 +470,35 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
       .where(eq(adapterBinding.approvedMappingId, supersededMappingId))
       .returning();
     return rows.map(mapAdapterBindingRow);
+  }
+
+  /**
+   * **Successor adoption sync re-point (SL-7.1/7.2).** The sync-side mirror of
+   * {@link repointAdapterBindingsToSuccessor}: point every `SyncRule` currently on the
+   * `superseded` mapping at its `successor`, changing **only** `approvedMappingId`. Every
+   * other column — `status`, `cursor`, `lastSnapshotRef`, `backfillStatus`,
+   * `pollOperationRef`, `pollIntervalOverride`, and the rest of the rule's operational
+   * state — is left byte-identical, so the rule keeps its cursor, snapshot, backfill
+   * status, and enablement across the re-point (SL-8.1): the operational state describes
+   * the *relationship*, which persisted through re-review; only the correspondence content
+   * changed. Returns the re-pointed rows (now on the successor) for the caller to react to
+   * (recompute the sync `GraphEdge`).
+   *
+   * Idempotent by construction: a rule already on the successor no longer matches
+   * `superseded`, so re-adopting the same mapping re-points nothing and returns `[]` — a
+   * clean no-op. Bound to a transaction handle by the caller so the re-point, the
+   * predecessor's supersession, and the counterpart transfer commit together or not at all.
+   */
+  public async repointSyncRulesToSuccessor(
+    supersededMappingId: string,
+    successorMappingId: string,
+  ): Promise<SyncRule[]> {
+    const rows = await this.db
+      .update(syncRule)
+      .set({ approvedMappingId: successorMappingId })
+      .where(eq(syncRule.approvedMappingId, supersededMappingId))
+      .returning();
+    return rows.map(mapSyncRuleRow);
   }
 
   /**
