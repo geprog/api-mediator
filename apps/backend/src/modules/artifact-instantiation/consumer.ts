@@ -158,6 +158,9 @@ export class MappingApprovedInstantiationConsumer<TTx> implements EventConsumer<
       await adoptSuccessor({
         successor: loaded.mapping,
         predecessorMappingId,
+        // SL-8.5 — the successor's persisted fields (the SL-7.6 carry-forward union) let adoption
+        // detect which field pairs the successor added and enqueue their baseline seeding.
+        successorFields: loaded.fields,
         deps: this.#adoption,
         tx,
       });

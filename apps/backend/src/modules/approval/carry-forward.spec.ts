@@ -304,6 +304,108 @@ describe("carryForwardUnaffectedCorrespondences (SL-7.6)", () => {
     expect(merged.fieldMappings[0]?.id).toBe("s-f1");
   });
 
+  it("does NOT carry forward a TOUCHED pair that approved ZERO items (coverage from the affected-pairs list)", () => {
+    // Predecessor covered issues↔tasks and comments↔notes. The re-review TOUCHED both pairs, but
+    // the reviewer approved ZERO items for comments↔notes (e.g. its resource group came back
+    // `analysisFailed` and was approved anyway) → the successor has NO content for it. Deriving
+    // coverage from content alone would misclassify comments↔notes uncovered and resurrect the
+    // predecessor's fields for it; using the affected-pairs list treats it COVERED (genuinely
+    // dropped), so nothing is resurrected.
+    const predecessorFields: FieldMapping[] = [
+      field({
+        id: "p-f1",
+        mappingId: "pred",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+      field({
+        id: "p-f2",
+        mappingId: "pred",
+        sourcePath: "comments/body",
+        targetPath: "notes/text",
+      }),
+    ];
+    const reReviewed: MappingArtifacts = {
+      fieldMappings: [
+        field({
+          id: "s-f1",
+          mappingId: "succ",
+          sourcePath: "issues/title",
+          targetPath: "tasks/title",
+        }),
+      ],
+      operationMappings: [],
+      parameterMappings: [],
+    };
+
+    const merged = carryForwardUnaffectedCorrespondences({
+      successorMappingId: "succ",
+      reReviewed,
+      predecessorFields,
+      predecessorOperations: [],
+      predecessorParameters: [],
+      // BOTH pairs are in the affected-pairs list (the re-review touched both).
+      affectedPairs: [
+        { sourceResource: "issues", targetResource: "tasks" },
+        { sourceResource: "comments", targetResource: "notes" },
+      ],
+      newId: ids(),
+    });
+
+    // Only the re-reviewed issues↔tasks field survives; comments↔notes is NOT resurrected.
+    expect(merged.fieldMappings.map((f) => f.sourcePath)).toEqual(["issues/title"]);
+    expect(merged.fieldMappings.some((f) => f.sourcePath === "comments/body")).toBe(false);
+  });
+
+  it("carries an UNTOUCHED pair (absent from the affected-pairs list) forward whole", () => {
+    // The re-review touched ONLY issues↔tasks; comments↔notes is untouched — absent from the
+    // affected-pairs list AND from the successor's content — so it carries forward whole.
+    const predecessorFields: FieldMapping[] = [
+      field({
+        id: "p-f1",
+        mappingId: "pred",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+      field({
+        id: "p-f2",
+        mappingId: "pred",
+        sourcePath: "comments/body",
+        targetPath: "notes/text",
+      }),
+    ];
+    const reReviewed: MappingArtifacts = {
+      fieldMappings: [
+        field({
+          id: "s-f1",
+          mappingId: "succ",
+          sourcePath: "issues/title",
+          targetPath: "tasks/title",
+        }),
+      ],
+      operationMappings: [],
+      parameterMappings: [],
+    };
+
+    const merged = carryForwardUnaffectedCorrespondences({
+      successorMappingId: "succ",
+      reReviewed,
+      predecessorFields,
+      predecessorOperations: [],
+      predecessorParameters: [],
+      affectedPairs: [{ sourceResource: "issues", targetResource: "tasks" }],
+      newId: ids(),
+    });
+
+    expect(merged.fieldMappings.map((f) => f.sourcePath).sort()).toEqual([
+      "comments/body",
+      "issues/title",
+    ]);
+    expect(merged.fieldMappings.find((f) => f.sourcePath === "comments/body")?.mappingId).toBe(
+      "succ",
+    );
+  });
+
   it("leaves an ordinary (empty-predecessor) assembly untouched", () => {
     const reReviewed: MappingArtifacts = {
       fieldMappings: [

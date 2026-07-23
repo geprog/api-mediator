@@ -2,16 +2,19 @@ import {
   MAPPING_APPROVED_EVENT_TYPE,
   syncRuleSchema,
   type ApprovedMapping,
+  type FieldMapping,
   type SyncRule,
 } from "@mediator/domain";
 import type { DeliveredEvent } from "@mediator/event-bus";
 import { describe, expect, it } from "vitest";
 
-import type { AdoptionSyncOps, SuccessorAdoptionDeps } from "./adopt.js";
+import type { AddedFieldBaselineSeeder, AdoptionSyncOps, SuccessorAdoptionDeps } from "./adopt.js";
+import { canonicalResourcePairRef } from "./derive.js";
 import { MappingApprovedInstantiationConsumer, type LoadedApprovedMapping } from "./consumer.js";
 import {
   FakeDownstreamArtifactOps,
   approvedMappingFixture,
+  fieldMappingFixture,
   sequentialIds,
 } from "./fakes.testkit.js";
 
@@ -45,12 +48,16 @@ function rule(id: string, approvedMappingId: string, resourcePairRef: string): S
 class FakeAdoptionSyncOps implements AdoptionSyncOps {
   readonly mappings = new Map<string, ApprovedMapping>();
   readonly rulesByMapping = new Map<string, SyncRule[]>();
+  readonly fieldsByMapping = new Map<string, FieldMapping[]>();
   readonly superseded: string[] = [];
   readonly counterpartSets: { id: string; counterpart: string | null }[] = [];
   readonly syncEdgeRecomputes: { source: string; target: string }[] = [];
 
   getApprovedMapping(id: string): Promise<ApprovedMapping | undefined> {
     return Promise.resolve(this.mappings.get(id));
+  }
+  listFieldMappings(mappingId: string): Promise<readonly FieldMapping[]> {
+    return Promise.resolve(this.fieldsByMapping.get(mappingId) ?? []);
   }
   repointSyncRulesToSuccessor(
     supersededMappingId: string,
@@ -98,19 +105,30 @@ interface AdapterAdoptCall {
   readonly actor: string;
 }
 
+interface SeedCall {
+  readonly ruleId: string;
+  readonly successorMappingId: string;
+}
+
 function buildAdoption(syncOps: FakeAdoptionSyncOps): {
   readonly deps: SuccessorAdoptionDeps<FakeTx>;
   readonly adapterCalls: AdapterAdoptCall[];
+  readonly seedCalls: SeedCall[];
 } {
   const adapterCalls: AdapterAdoptCall[] = [];
+  const seedCalls: SeedCall[] = [];
+  const seedAddedFieldBaselines: AddedFieldBaselineSeeder = (input) => {
+    seedCalls.push(input);
+  };
   const deps: SuccessorAdoptionDeps<FakeTx> = {
     syncOps: () => syncOps,
     adoptAdapter: (input, actor) => {
       adapterCalls.push({ ...input, actor });
       return Promise.resolve();
     },
+    seedAddedFieldBaselines,
   };
-  return { deps, adapterCalls };
+  return { deps, adapterCalls, seedCalls };
 }
 
 /** A loader returning a fixed set of successors/first-time mappings by id. */
@@ -368,5 +386,166 @@ describe("successor adoption (SL-7/SL-8) via the MappingApproved consumer", () =
 
     await consumer.handle(mappingApprovedEvent("evt-1", "succ"), fakeTx);
     expect(ops.syncRules).toHaveLength(1);
+  });
+
+  it("SL-8.5 — enqueues an added-field baseline seed only for a re-pointed rule whose successor ADDS a field pair", async () => {
+    const syncOps = new FakeAdoptionSyncOps();
+    const issuesPair = canonicalResourcePairRef(
+      { appId: "a", resourceRef: "issues" },
+      { appId: "b", resourceRef: "tasks" },
+    );
+    const commentsPair = canonicalResourcePairRef(
+      { appId: "a", resourceRef: "comments" },
+      { appId: "b", resourceRef: "notes" },
+    );
+    syncOps.mappings.set("pred", {
+      ...approvedMappingFixture({
+        id: "pred",
+        variant: "peer-peer",
+        sourceAppId: "a",
+        targetAppId: "b",
+      }),
+      status: "stale",
+    });
+    // Predecessor covered issues↔tasks (title) and comments↔notes (body).
+    syncOps.fieldsByMapping.set("pred", [
+      fieldMappingFixture({
+        id: "p-f1",
+        mappingId: "pred",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+      fieldMappingFixture({
+        id: "p-f2",
+        mappingId: "pred",
+        sourcePath: "comments/body",
+        targetPath: "notes/text",
+      }),
+    ]);
+    syncOps.rulesByMapping.set("pred", [
+      rule("r-issues", "pred", issuesPair),
+      rule("r-comments", "pred", commentsPair),
+    ]);
+
+    const successor = {
+      ...approvedMappingFixture({
+        id: "succ",
+        variant: "peer-peer",
+        sourceAppId: "a",
+        targetAppId: "b",
+      }),
+      predecessorMappingId: "pred",
+    };
+    syncOps.mappings.set("succ", successor);
+    // The successor ADDS issues/body → tasks/description (a new pair in issues↔tasks); the
+    // issues/title pair and the whole comments↔notes pair are carried forward unchanged.
+    const successorFields: FieldMapping[] = [
+      fieldMappingFixture({
+        id: "s-f1",
+        mappingId: "succ",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+      fieldMappingFixture({
+        id: "s-f2",
+        mappingId: "succ",
+        sourcePath: "issues/body",
+        targetPath: "tasks/description",
+      }),
+      fieldMappingFixture({
+        id: "s-f3",
+        mappingId: "succ",
+        sourcePath: "comments/body",
+        targetPath: "notes/text",
+      }),
+    ];
+    const loaded: LoadedApprovedMapping = {
+      mapping: successor,
+      fields: successorFields,
+      operations: [],
+    };
+
+    const ops = new FakeDownstreamArtifactOps();
+    const { deps, seedCalls } = buildAdoption(syncOps);
+    const consumer = new MappingApprovedInstantiationConsumer<FakeTx>({
+      load: loaderFor(new Map([["succ", loaded]])),
+      ops: () => ops,
+      adoption: deps,
+      newId: sequentialIds("id"),
+    });
+
+    await consumer.handle(mappingApprovedEvent("evt-1", "succ"), fakeTx);
+
+    // ONLY the issues rule (whose pair gained a field) is seeded — the comments rule (no added
+    // pair) enqueues nothing — and the seed resolves against the successor mapping.
+    expect(seedCalls).toEqual([{ ruleId: "r-issues", successorMappingId: "succ" }]);
+    // Adoption still re-pointed both rules + superseded the predecessor (the seed is additive).
+    expect(syncOps.superseded).toEqual(["pred"]);
+  });
+
+  it("SL-8.5 — a successor that adds NO field pair enqueues no baseline seed", async () => {
+    const syncOps = new FakeAdoptionSyncOps();
+    const issuesPair = canonicalResourcePairRef(
+      { appId: "a", resourceRef: "issues" },
+      { appId: "b", resourceRef: "tasks" },
+    );
+    syncOps.mappings.set("pred", {
+      ...approvedMappingFixture({
+        id: "pred",
+        variant: "peer-peer",
+        sourceAppId: "a",
+        targetAppId: "b",
+      }),
+      status: "stale",
+    });
+    syncOps.fieldsByMapping.set("pred", [
+      fieldMappingFixture({
+        id: "p-f1",
+        mappingId: "pred",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+    ]);
+    syncOps.rulesByMapping.set("pred", [rule("r-issues", "pred", issuesPair)]);
+
+    const successor = {
+      ...approvedMappingFixture({
+        id: "succ",
+        variant: "peer-peer",
+        sourceAppId: "a",
+        targetAppId: "b",
+      }),
+      predecessorMappingId: "pred",
+    };
+    syncOps.mappings.set("succ", successor);
+    // The successor covers the SAME field pair (its identity `(sourcePath, targetPath, phase)` is
+    // unchanged — e.g. only a transform tweak) → nothing added → no seed.
+    const successorFields: FieldMapping[] = [
+      fieldMappingFixture({
+        id: "s-f1",
+        mappingId: "succ",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+      }),
+    ];
+    const loaded: LoadedApprovedMapping = {
+      mapping: successor,
+      fields: successorFields,
+      operations: [],
+    };
+
+    const ops = new FakeDownstreamArtifactOps();
+    const { deps, seedCalls } = buildAdoption(syncOps);
+    const consumer = new MappingApprovedInstantiationConsumer<FakeTx>({
+      load: loaderFor(new Map([["succ", loaded]])),
+      ops: () => ops,
+      adoption: deps,
+      newId: sequentialIds("id"),
+    });
+
+    await consumer.handle(mappingApprovedEvent("evt-1", "succ"), fakeTx);
+
+    expect(seedCalls).toEqual([]);
+    expect(syncOps.superseded).toEqual(["pred"]);
   });
 });

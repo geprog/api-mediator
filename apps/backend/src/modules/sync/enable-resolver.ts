@@ -1,4 +1,4 @@
-import type { FieldMapping, IrRefTarget, SourceScopeRef } from "@mediator/domain";
+import type { ApprovedMapping, FieldMapping, IrRefTarget, SourceScopeRef } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import type { ScopeLinkStore } from "@mediator/db";
 import type {
@@ -133,12 +133,70 @@ export async function resolveEnableRuleInput(
   return { ok: true, input: { enablement, backfill, pollSeed } };
 }
 
+/** The SL-8.5 seeding-backfill resolution: the link-only run input, or an `unresolved` reason. */
+export interface SeedBackfillResolution {
+  ok: true;
+  backfill: BackfillRunInput;
+}
+export interface SeedBackfillUnresolved {
+  ok: false;
+  reason: string;
+}
+
+/**
+ * **SL-8.5 — resolve the LINK-ONLY seeding backfill for an adopted successor's added field
+ * pairs.** Successor adoption re-points a rule to a successor mapping that may **add** a field
+ * pair the stale predecessor lacked; that added pair has no `SyncFieldState` baseline over the
+ * pre-existing `RecordLink`s, so Conflict Detection would read its absence as `drifted` →
+ * target-wins-withhold, and the field would never propagate. This resolves the backfill that
+ * seeds it: a link-only pass over the **existing** links (the same agree/disagree seeding
+ * enablement's BE-4 backfill performs), which — because `SyncFieldStateStore.seed` never erases
+ * an existing baseline — seeds ONLY the added fields (every already-seeded pair a no-op).
+ *
+ * It resolves the rule's artifacts against the **successor** mapping (committed at approval), so
+ * the seed reads the successor's fields / new spec version / carried-forward bindings **without**
+ * waiting for the adoption transaction's `approvedMappingId` re-point to commit. It reuses the
+ * SAME {@link buildBackfillRunInput} the enablement path builds — **forced to `link-only`**, so a
+ * rule whose configured `backfillMode` is `push` still only SEEDS, never a push re-write (SL-8.5
+ * "no full re-backfill"). The go-live poll seed / enablement gate are deliberately NOT built:
+ * this is a seed pass over an already-enabled rule, not a re-enable — cursor/snapshot/enablement
+ * are untouched.
+ */
+export async function resolveAddedFieldSeedBackfill(
+  ruleId: string,
+  successorMapping: ApprovedMapping,
+  repos: RuleArtifactRepos,
+  scopeLinks: ScopeLinkStore,
+  correspondences: ScopeLinkGateDeps["correspondences"],
+  relister?: EnumerationRelister,
+): Promise<SeedBackfillResolution | SeedBackfillUnresolved> {
+  const artifacts = await resolveRuleArtifacts(ruleId, repos, successorMapping);
+  if (artifacts === undefined) {
+    return {
+      ok: false,
+      reason: `rule ${ruleId} did not resolve against successor mapping ${successorMapping.id} to executable state`,
+    };
+  }
+  const backfill = await buildBackfillRunInput(
+    artifacts,
+    repos,
+    scopeLinks,
+    correspondences,
+    relister,
+    { forceLinkOnly: true },
+  );
+  return { ok: true, backfill };
+}
+
 async function buildBackfillRunInput(
   artifacts: RuleArtifacts,
   repos: RuleArtifactRepos,
   scopeLinks: ScopeLinkStore,
   correspondences: ScopeLinkGateDeps["correspondences"],
   relister: EnumerationRelister | undefined,
+  // SL-8.5 — force `link-only` regardless of the rule's configured `backfillMode`, so the
+  // added-field baseline SEED never becomes a push re-write ("no full re-backfill").
+  options: { readonly forceLinkOnly?: boolean } = {},
 ): Promise<BackfillRunInput> {
   const identityField = findIdentityField(artifacts.fieldMappings) ?? PLACEHOLDER_IDENTITY;
   const operations = resolveTargetOperations(
@@ -191,7 +249,7 @@ async function buildBackfillRunInput(
     resolveScopeRef,
   });
 
-  if ((artifacts.rule.backfillMode ?? "link-only") !== "push") {
+  if (options.forceLinkOnly === true || (artifacts.rule.backfillMode ?? "link-only") !== "push") {
     return { mode: "link-only", context: linkOnly, ...(fanOut !== undefined ? { fanOut } : {}) };
   }
 

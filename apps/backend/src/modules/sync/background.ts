@@ -70,7 +70,7 @@ import type { FastifyBaseLogger } from "fastify";
 
 import { RepoCounterpartBackfillModeLookup } from "./counterpart-backfill-mode.js";
 import { createCredentialApplier } from "./credential-applier.js";
-import { resolveEnableRuleInput } from "./enable-resolver.js";
+import { resolveAddedFieldSeedBackfill, resolveEnableRuleInput } from "./enable-resolver.js";
 import { RepoPollPlanResolver } from "./poll-plan-resolver.js";
 import { RepoSyncPipelineContextLoader } from "./pipeline-context-loader.js";
 import { RepoContainerParkSink, RepoPreLinkScopeResolver } from "./pre-link-scope.js";
@@ -168,6 +168,21 @@ export interface SyncBackground {
     ruleId: string,
     options?: { readonly backfillSkipped?: boolean },
   ): Promise<EnableRuleGateResult>;
+  /**
+   * SL-8.5 — enqueue a **background, scoped, link-only** backfill that seeds the baselines of the
+   * field pairs an adopted successor **added**, over the rule's EXISTING `RecordLink`s. Called
+   * (fire-and-forget) by successor adoption for each re-pointed rule whose successor adds a field
+   * pair. It resolves the backfill against the **successor** mapping (committed at approval), so it
+   * is independent of when the adoption transaction's re-point commits; it forces `link-only` (never
+   * a push re-write — SL-8.5 "no full re-backfill") and leaves enablement/cursor/snapshot untouched
+   * (a seed pass, not a re-enable). Idempotent: `SyncFieldStateStore.seed` never erases an existing
+   * baseline, so a re-run seeds only the still-unseeded added fields. Returns immediately; the
+   * background run is awaited by {@link SyncBackground.awaitBackfills} / graceful `stop()`.
+   */
+  seedAddedFieldBaselines(input: {
+    readonly ruleId: string;
+    readonly successorMappingId: string;
+  }): void;
   /** Disable a rule: stop polling (status → `disabled`); retain cursor/snapshot/links/field-state — never reset. */
   disableRule(ruleId: string): Promise<void>;
   /** The deterministic poll trigger (SP-5): one poll cycle for a rule (detect → enqueue → advance). */
@@ -564,6 +579,61 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     await runBracketedEnable(ruleId, resolved.input);
   };
 
+  /**
+   * SL-8.5 — the added-field baseline seeding pass. Resolves the LINK-ONLY backfill against the
+   * **successor** mapping (committed at approval — so it does not race the adoption tx's re-point)
+   * and runs it in the background over the rule's EXISTING `RecordLink`s, seeding the added field
+   * pairs' baselines (`SyncFieldStateStore.seed` never erases, so already-seeded pairs are no-ops).
+   * It is deliberately NOT a `RuleEnabler.enable`: no enablement gate, no cursor/snapshot seed, no
+   * status flip — the rule is already enabled and this is only a seed pass. It is NOT in-flight
+   * bracketed either: the reconciler only re-triggers a `backfillStatus = running` backfill, and
+   * this never sets `running`, so it is invisible to the sweep (a lost seed is re-derived by
+   * adoption redelivery, not the backfill reconciler). The run is tracked so graceful `stop()` /
+   * {@link awaitBackfills} await it; its rejection is handled (a transient fault degrades
+   * timeliness, never the process).
+   */
+  const seedAddedFieldBaselines = (input: {
+    readonly ruleId: string;
+    readonly successorMappingId: string;
+  }): void => {
+    const run = (async (): Promise<void> => {
+      const successor = await approvedMappings.getById(input.successorMappingId);
+      if (successor === undefined) {
+        logger.warn(
+          { ruleId: input.ruleId, successorMappingId: input.successorMappingId },
+          "added-field baseline seed: successor mapping not found — skipping",
+        );
+        return;
+      }
+      const resolved = await resolveAddedFieldSeedBackfill(
+        input.ruleId,
+        successor,
+        ruleArtifactRepos,
+        scopeLinks,
+        scopeCorrespondences,
+        // SS-17.4 — a per-scope-enumerated rule's seeding fans out over its scope set, same as enable.
+        scopeDiscovery,
+      );
+      if (!resolved.ok) {
+        logger.warn(
+          { ruleId: input.ruleId, reason: resolved.reason },
+          "added-field baseline seed: rule did not resolve — skipping",
+        );
+        return;
+      }
+      await backfillRunner.run(resolved.backfill);
+    })();
+    // `trackBackgroundRun` attaches its own `.catch(onError)` (so the run can never float as an
+    // unhandled rejection) and returns the original run for `awaitBackfills`/`stop()` to await;
+    // this fire-and-forget enqueue does not await it, so the returned promise is explicitly voided.
+    void trackBackgroundRun(run, activeBackfills, (error) => {
+      logger.error(
+        { ruleId: input.ruleId, err: describeError(error) },
+        "added-field baseline seed backfill failed",
+      );
+    });
+  };
+
   // SS-11.7 — the sweep re-trigger for a lost/crashed enablement discovery pass. NOT a
   // second scheduler: it registers on the SHARED reconciliation sweep (like the backfill
   // reconciler) and re-triggers the idempotent pass only for a scoped, confirmed pair
@@ -648,6 +718,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
 
   return {
     enableRule,
+    seedAddedFieldBaselines,
     disableRule,
     pollOnce: (ruleId: string): Promise<PollRunOutcome> => poller.pollOnce(ruleId),
     runScheduleOnce: (): Promise<void> => tickOnce(),
