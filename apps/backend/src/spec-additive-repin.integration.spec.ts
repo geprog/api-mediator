@@ -197,6 +197,19 @@ suite("SL-2 additive re-pin + carry-forward (requires Postgres)", () => {
       // SL-3's scoped-delta trigger is exercised in its own spec; this SL-2 re-pin
       // test isolates the deterministic re-pin/carry-forward and records no job.
       detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      // SL-4 breaking-reaction ports — this additive spec never reaches the breaking branch.
+      mappingArtifacts: {
+        listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
+        listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
+      },
+      downstreamArtifacts: {
+        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+      },
+      graph: {
+        recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
+        recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
+      },
+      cacheInvalidator: { invalidateEndpoint: (): void => {} },
       emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
     };
   }

@@ -13,6 +13,8 @@ import {
   ApprovedMappingRepository,
   AuditLogRepository,
   DetectionJobRepository,
+  DownstreamArtifactRepository,
+  MappingArtifactsRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   tx,
@@ -21,15 +23,20 @@ import type { KeyProvider } from "@mediator/credentials";
 import type { CredentialStoreLogger } from "@mediator/credentials";
 import type { EventBus } from "@mediator/event-bus";
 import type {
+  AdapterBinding,
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
   ApprovedMapping,
   AuditLogEntry,
   DomainEventEnvelope,
+  FieldMapping,
+  OperationMapping,
   RegisteredApp,
   ResourceBinding,
 } from "@mediator/domain";
+
+import { GraphProjection } from "./graph/index.js";
 
 /**
  * The persistence seam for the registration API slice.
@@ -106,10 +113,11 @@ export interface CredentialTxStore {
 }
 
 /**
- * The `ApprovedMapping` operations the SL-2 additive re-pin needs inside the
- * version-advance transaction: read the `active` mappings pinned to the superseded
- * version and re-pin each to the new one. Deliberately narrow — the additive
- * reaction changes **only** the pinned spec version, never mapping content or state.
+ * The `ApprovedMapping` operations the SL-2 additive re-pin and the SL-4 breaking
+ * reaction need inside the version-advance transaction: read the `active` mappings
+ * pinned to the superseded version, and either re-pin each to the new one (a mapping
+ * referencing no changed element) or mark it `stale` (one referencing a changed
+ * element). Deliberately narrow — neither reaction touches mapping content.
  */
 export interface ApprovedMappingTxRepo {
   /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
@@ -120,6 +128,61 @@ export interface ApprovedMappingTxRepo {
     sourceSpecId: string,
     targetSpecId: string,
   ): Promise<ApprovedMapping | undefined>;
+  /**
+   * SL-4.1/4.2/4.3 — set **only** `status = "stale"`; the pinned spec ids (stays on the
+   * reviewed/superseded version), the counterpart, and the children are untouched.
+   */
+  markStale(id: string): Promise<ApprovedMapping | undefined>;
+}
+
+/**
+ * SL-4.1 — the mapping's approved children the breaking reaction reads to decide whether
+ * the mapping **references a changed element**: each `FieldMapping` path and each
+ * `OperationMapping` operation ref (per side). Deliberately read-only and narrow — the
+ * reaction never mutates the children, only matches their refs against the `SpecDiff`.
+ */
+export interface MappingArtifactsTxReader {
+  listFieldMappings(mappingId: string): Promise<FieldMapping[]>;
+  listOperationMappings(mappingId: string): Promise<OperationMapping[]>;
+}
+
+/**
+ * SL-4.6 / XI-2 — the downstream adapter artifacts a stale consumer-provider mapping
+ * derived, read so the coupled cache drop can target **every** `AdapterEndpoint` whose
+ * binding's mapping went stale. Read-only; the reaction never mutates a binding (its
+ * `status` is its own — SL-4.2).
+ */
+export interface DownstreamArtifactTxReader {
+  listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]>;
+}
+
+/**
+ * SL-4.6 / GR-2/GR-3 — recompute an affected app-pair's `GraphEdge` **within the
+ * version-advance transaction**, so the projection commits atomically with the stale
+ * transition and no stale graph edge masks the pause. Keyed by the stable `(app pair)`
+ * (GR-1.4), never by a mapping/rule/binding id. In production these delegate to the
+ * shared {@link GraphProjection}'s `recompute*EdgeWithin(handle, …)` seam bound to the
+ * open transaction handle — the SAME seam CO-6 uses (no parallel mechanism).
+ */
+export interface GraphEdgeRecompute {
+  /** A peer-peer mapping going stale → recompute its `(sourceApp → targetApp)` sync edge. */
+  recomputeSyncEdge(sourceAppId: string, targetAppId: string): Promise<void>;
+  /** A consumer-provider mapping going stale → recompute its `(consumerApp → backendApp)` adapter edge. */
+  recomputeAdapterEdge(consumerAppId: string, backendAppId: string): Promise<void>;
+}
+
+/**
+ * XI-2 / CH-5.3 — the by-endpoint cache-drop seam
+ * (`CacheInvalidator.invalidateEndpoint`), the SAME one CO-6 recomposition drives
+ * (CH-5.6: one mechanism, two key kinds). A local port (a low-level module must not
+ * import the HTTP/serve layer), structurally satisfied by the shared
+ * `ResponseCacheInvalidator` the composition root wires in. Coarse and
+ * correctness-safe: a no-op for an endpoint with nothing cached, and it must **never**
+ * fail the triggering transition (a missed drop only costs a spurious hit until
+ * `cacheTtl`).
+ */
+export interface EndpointCacheInvalidator {
+  invalidateEndpoint(endpointId: string): void;
 }
 
 /** Appends audit-log rows within the current transaction (SL-2.1 records each re-pin). */
@@ -149,11 +212,16 @@ export interface TxStores {
   readonly apiSpecs: SpecTxRepo;
   readonly resourceBindings: BindingTxRepo;
   readonly credentialStore: CredentialTxStore;
-  // ── SL-2 additive re-pin ports (the spec-update lifecycle's reaction to a diff) ──
+  // ── SL-2 additive re-pin / SL-4 breaking stale-mark ports ──
   readonly approvedMappings: ApprovedMappingTxRepo;
   readonly audit: AuditTxRepo;
   // ── SL-3 scoped-delta trigger (records the scoped analysis job in-tx) ──
   readonly detectionJobs: DetectionJobTxRepo;
+  // ── SL-4 breaking reaction: match refs, drop caches, recompute graph edges ──
+  readonly mappingArtifacts: MappingArtifactsTxReader;
+  readonly downstreamArtifacts: DownstreamArtifactTxReader;
+  readonly graph: GraphEdgeRecompute;
+  readonly cacheInvalidator: EndpointCacheInvalidator;
   emit(event: DomainEventEnvelope): Promise<void>;
 }
 
@@ -166,27 +234,42 @@ export interface UnitOfWork {
 
 /**
  * The real {@link UnitOfWork}: opens a `@mediator/db` transaction and builds a
- * {@link TxStores} whose repositories, credential store, and event emit all run
- * on that one transaction handle. A per-transaction {@link CredentialStore} is
- * constructed here so `CredentialStore.store` participates in the same atomic
- * unit as the app + specs (AR-1 crit 7 / CR-1).
+ * {@link TxStores} whose repositories, credential store, event emit, and (SL-4)
+ * graph-recompute all run on that one transaction handle. A per-transaction
+ * {@link CredentialStore} is constructed here so `CredentialStore.store` participates
+ * in the same atomic unit as the app + specs (AR-1 crit 7 / CR-1).
+ *
+ * The `graph` port binds the shared {@link GraphProjection}'s `recompute*EdgeWithin`
+ * seam to the open handle, so the SL-4 breaking reaction's edge recompute commits
+ * atomically with the stale transition. The `cacheInvalidator` is the process-level,
+ * non-transactional by-endpoint cache-drop seam (XI-2 / CH-5.3); when none is wired
+ * (a Phase-1..3 harness with no adapter runtime) it defaults to a no-op.
  */
 export class DbUnitOfWork implements UnitOfWork {
   readonly #db: Database;
   readonly #keyProvider: KeyProvider;
   readonly #eventBus: EventBus;
   readonly #credentialLogger: CredentialStoreLogger | undefined;
+  readonly #graphProjection: GraphProjection;
+  readonly #cacheInvalidator: EndpointCacheInvalidator;
 
   public constructor(
     db: Database,
     keyProvider: KeyProvider,
     eventBus: EventBus,
     credentialLogger?: CredentialStoreLogger,
+    cacheInvalidator?: EndpointCacheInvalidator,
+    graphProjection?: GraphProjection,
   ) {
     this.#db = db;
     this.#keyProvider = keyProvider;
     this.#eventBus = eventBus;
     this.#credentialLogger = credentialLogger;
+    // GraphProjection is stateless (db + a newId seam); default one if the caller wires
+    // none. A no-injected-invalidator service simply drops no cache (XI-2 is coarse and
+    // correctness-safe, so an un-wired cache is bounded staleness, never incorrectness).
+    this.#graphProjection = graphProjection ?? new GraphProjection({ db });
+    this.#cacheInvalidator = cacheInvalidator ?? { invalidateEndpoint: (): void => {} };
   }
 
   public run<T>(work: (stores: TxStores) => Promise<T>): Promise<T> {
@@ -203,6 +286,15 @@ export class DbUnitOfWork implements UnitOfWork {
         approvedMappings: new ApprovedMappingRepository(txn),
         audit: new AuditLogRepository(txn),
         detectionJobs: new DetectionJobRepository(txn),
+        mappingArtifacts: new MappingArtifactsRepository(txn),
+        downstreamArtifacts: new DownstreamArtifactRepository(txn),
+        graph: {
+          recomputeSyncEdge: (sourceAppId, targetAppId) =>
+            this.#graphProjection.recomputeSyncEdgeWithin(txn, sourceAppId, targetAppId),
+          recomputeAdapterEdge: (consumerAppId, backendAppId) =>
+            this.#graphProjection.recomputeAdapterEdgeWithin(txn, consumerAppId, backendAppId),
+        },
+        cacheInvalidator: this.#cacheInvalidator,
         emit: (event) => this.#eventBus.emit(event, txn),
       }),
     );

@@ -121,6 +121,20 @@ suite("SL-1 SpecRegistry.ingestNewVersion (requires Postgres)", () => {
       // SL-1 isolates the version-advance + diff classification; the SL-3 scoped-delta
       // trigger has its own spec, so record no job here.
       detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      // SL-4 breaking-reaction ports — these SL-1 fixtures seed no mappings, so the
+      // breaking branch finds nothing to stale even when the diff classifies breaking.
+      mappingArtifacts: {
+        listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
+        listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
+      },
+      downstreamArtifacts: {
+        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+      },
+      graph: {
+        recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
+        recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
+      },
+      cacheInvalidator: { invalidateEndpoint: (): void => {} },
       emit: () =>
         Promise.reject(new Error("ingestNewVersion must not emit SpecIngested on advance")),
     };

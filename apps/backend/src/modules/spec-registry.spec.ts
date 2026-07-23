@@ -1,8 +1,11 @@
-import type { SpecDiff } from "@mediator/ir";
+import type { SpecChange, SpecDiff } from "@mediator/ir";
 import type {
+  AdapterBinding,
   ApiSpec,
   ApprovedMapping,
+  FieldMapping,
   Ir,
+  OperationMapping,
   RegisteredApp,
   ResourceBinding,
 } from "@mediator/domain";
@@ -17,6 +20,9 @@ import {
   carryForwardAnalysisExclusions,
   carryForwardResourceBinding,
   computeAdditiveAnalysisScope,
+  computeBreakingAffectedKeys,
+  mappingChangedSideRefs,
+  mappingReferencesChangedElement,
   repinnedSpecPair,
 } from "./spec-registry.js";
 
@@ -422,11 +428,13 @@ describe("SpecRegistry.ingestNewVersion additive reaction (SL-2)", () => {
     expect(store.auditLog).toEqual([]);
   });
 
-  it("does not run the reaction on a breaking advance (out of SL-2 scope)", async () => {
+  it("re-pins (never stales) a mapping referencing NO changed element on a breaking advance (SL-4.1)", async () => {
     const store = new InMemoryStore();
     const unitOfWork = new FakeUnitOfWork(store);
     const registry = new SpecRegistry();
     const { app, v1 } = await seedV1(store, unitOfWork, registry);
+    // A mapping with NO FieldMapping/OperationMapping children references no element, so
+    // even a breaking `title` retype leaves it unaffected — it advances exactly as SL-2.
     seedMapping(store, peerMapping("m1", v1.id, COUNTERPART_SPEC, "m2"));
 
     const outcome = await unitOfWork.run((tx) =>
@@ -435,9 +443,13 @@ describe("SpecRegistry.ingestNewVersion additive reaction (SL-2)", () => {
     if (outcome.kind !== "advanced") throw new Error("expected advanced");
     expect(outcome.diff.classification).toBe("breaking");
 
-    // A breaking advance re-pins nothing and audits nothing (SL-4…SL-6 own that path).
-    expect(store.approvedMappings.get("m1")?.sourceSpecId).toBe(v1.id);
-    expect(store.auditLog).toEqual([]);
+    // SL-4.1 — referencing no changed element → re-pinned to v2 (active), not stale.
+    expect(store.approvedMappings.get("m1")?.sourceSpecId).toBe(outcome.newSpec.id);
+    expect(store.approvedMappings.get("m1")?.status).toBe("active");
+    // And the re-pin is audited exactly as the additive case (SL-2).
+    const repins = store.auditLog.filter((entry) => entry.type === "mapping-decision");
+    expect(repins).toHaveLength(1);
+    expect(repins[0]?.details).toContain("re-pinned");
   });
 });
 
@@ -748,5 +760,637 @@ describe("computeAdditiveAnalysisScope (SL-3 structural scope)", () => {
 
   it("returns undefined when nothing genuinely-new is in scope", () => {
     expect(computeAdditiveAnalysisScope(diffOf([]), "v1", [])).toBeUndefined();
+  });
+});
+
+/**
+ * SL-4 — the breaking reaction wired into the breaking branch of `ingestNewVersion`:
+ * mark ONLY the mappings that reference a changed element `stale` (staying pinned to
+ * their reviewed/superseded version), re-pin the rest exactly as SL-2, and — coupled —
+ * recompute the affected `GraphEdge`s and drop each stale endpoint's cache.
+ */
+describe("SpecRegistry.ingestNewVersion breaking reaction (SL-4)", () => {
+  const APP_ID = "app-1";
+  const PEER_APP_B = "app-peer-b";
+  const PEER_APP_C = "app-peer-c";
+  const CONSUMER_APP = "app-consumer";
+  const PEER_SPEC_B = "spec-peer-b";
+  const PEER_SPEC_C = "spec-peer-c";
+  const CONSUMER_SPEC = "spec-consumer";
+
+  /** The sample provider doc with `title` retyped integer → a breaking `field-type-changed` in `issues`. */
+  function retypedTitleDoc(): Record<string, unknown> {
+    return providerSpecWithRetypedField();
+  }
+
+  async function seedV1(
+    store: InMemoryStore,
+    unitOfWork: FakeUnitOfWork,
+    registry: SpecRegistry,
+  ): Promise<{ app: RegisteredApp; v1: ApiSpec }> {
+    const app = seedApp(store);
+    const v1 = await unitOfWork.run((tx) =>
+      registry.ingestSpec(app.id, providerSpecDocument(), "PROVIDER", [], tx),
+    );
+    return { app, v1 };
+  }
+
+  function peerPeer(
+    id: string,
+    sourceSpecId: string,
+    targetSpecId: string,
+    targetAppId: string,
+  ): ApprovedMapping {
+    return {
+      id,
+      sourceSpecId,
+      targetSpecId,
+      sourceAppId: APP_ID,
+      targetAppId,
+      variant: "peer-peer",
+      approvedBy: "reviewer:alice",
+      approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+      status: "active",
+    };
+  }
+
+  function consumerProvider(id: string, backendSpecId: string): ApprovedMapping {
+    return {
+      id,
+      // Consumer = source, backend/provider = target (data-model.md).
+      sourceSpecId: CONSUMER_SPEC,
+      targetSpecId: backendSpecId,
+      sourceAppId: CONSUMER_APP,
+      targetAppId: APP_ID,
+      variant: "consumer-provider",
+      approvedBy: "reviewer:alice",
+      approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+      status: "active",
+    };
+  }
+
+  function seedFieldMapping(
+    store: InMemoryStore,
+    mappingId: string,
+    sourcePath: string,
+    targetPath: string,
+    extra: Partial<FieldMapping> = {},
+  ): void {
+    store.fieldMappings.push({
+      id: `${mappingId}-fm-${String(store.fieldMappings.length)}`,
+      mappingId,
+      sourcePath,
+      targetPath,
+      transform: "rename",
+      ...extra,
+    });
+  }
+
+  function seedOperationMapping(
+    store: InMemoryStore,
+    mappingId: string,
+    sourceOperationRef: string,
+    targetOperationRef: string,
+  ): void {
+    store.operationMappings.push({
+      id: `${mappingId}-om-${String(store.operationMappings.length)}`,
+      mappingId,
+      sourceOperationRef,
+      targetOperationRef,
+      action: "read",
+    });
+  }
+
+  function seedBinding(store: InMemoryStore, mappingId: string, endpointId: string): void {
+    const binding: AdapterBinding = {
+      id: `${mappingId}-bind-${endpointId}`,
+      adapterEndpointId: endpointId,
+      backendAppId: APP_ID,
+      backendOperationId: "issues/getIssue",
+      approvedMappingId: mappingId,
+      role: "primary",
+      status: "active",
+    };
+    store.adapterBindings.push(binding);
+  }
+
+  it("stales ONLY the mapping referencing the changed element and re-pins the rest (SL-4.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // Two peer-peer mappings pinned to v1 (different targets → distinct active spec pairs):
+    // one references the changed `issues.title`, one references only an unchanged resource.
+    store.approvedMappings.set("m-issues", peerPeer("m-issues", v1.id, PEER_SPEC_B, PEER_APP_B));
+    seedFieldMapping(store, "m-issues", "issues/title", "issues/title");
+    store.approvedMappings.set("m-labels", peerPeer("m-labels", v1.id, PEER_SPEC_C, PEER_APP_C));
+    seedFieldMapping(store, "m-labels", "labels/name", "labels/name");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+    const v2Id = outcome.newSpec.id;
+
+    // SL-4.1/4.3 — the issues mapping is stale AND stays pinned to the superseded v1.
+    const staled = store.approvedMappings.get("m-issues");
+    expect(staled?.status).toBe("stale");
+    expect(staled?.sourceSpecId).toBe(v1.id);
+    expect(staled?.targetSpecId).toBe(PEER_SPEC_B);
+
+    // SL-4.1 — the labels mapping references no changed element → re-pinned to v2, active.
+    const repinned = store.approvedMappings.get("m-labels");
+    expect(repinned?.status).toBe("active");
+    expect(repinned?.sourceSpecId).toBe(v2Id);
+  });
+
+  it("keeps the stale mapping's derived-status intent on the mapping alone and audits the transition (SL-4.2/4.5)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    store.approvedMappings.set("m-issues", peerPeer("m-issues", v1.id, PEER_SPEC_B, PEER_APP_B));
+    seedFieldMapping(store, "m-issues", "issues/title", "issues/title");
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+
+    // The stale transition is queryable in the audit log (system-attributed, no secret).
+    const staleRows = store.auditLog.filter(
+      (entry) => entry.type === "mapping-decision" && entry.relatedMappingId === "m-issues",
+    );
+    expect(staleRows).toHaveLength(1);
+    expect(staleRows[0]?.actor).toBe("system");
+    expect(staleRows[0]?.status).toBeUndefined();
+    expect(staleRows[0]?.details).toContain("stale");
+    expect(staleRows[0]?.details).toContain(v1.id); // stays pinned to the superseded version.
+  });
+
+  it("recomputes the sync GraphEdge for a stale PROVIDER-side peer-peer mapping, not for the re-pinned one (SL-4.4/4.6)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    store.approvedMappings.set("m-issues", peerPeer("m-issues", v1.id, PEER_SPEC_B, PEER_APP_B));
+    seedFieldMapping(store, "m-issues", "issues/title", "issues/title");
+    store.approvedMappings.set("m-labels", peerPeer("m-labels", v1.id, PEER_SPEC_C, PEER_APP_C));
+    seedFieldMapping(store, "m-labels", "labels/name", "labels/name");
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+
+    // Only the stale mapping's (sourceApp → targetApp) sync edge recomputes; a peer-peer
+    // mapping has no adapter bindings so nothing is cache-invalidated.
+    expect(store.graphRecomputes).toEqual([
+      { type: "sync", sourceAppId: app.id, targetAppId: PEER_APP_B },
+    ]);
+    expect(store.cacheInvalidations).toEqual([]);
+  });
+
+  it("stales a CONSUMER-provider mapping backed by the changed spec, drops its endpoint cache + recomputes the adapter edge (SL-4.4/4.6)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // A consumer-provider mapping whose BACKEND (target) spec is the changed provider v1,
+    // reading `issues.title` via a RESPONSE-phase field. Response-phase INVERTS the
+    // convention (`serve-context.ts`/`response-mapping.ts`): `sourcePath` is the backend
+    // field (`issues/title`), `targetPath` the consumer field (`con-issues/title`).
+    store.approvedMappings.set("m-adapter", consumerProvider("m-adapter", v1.id));
+    seedOperationMapping(store, "m-adapter", "con-issues/getConIssue", "issues/getIssue");
+    seedFieldMapping(store, "m-adapter", "issues/title", "con-issues/title", { phase: "response" });
+    seedBinding(store, "m-adapter", "endpoint-issues");
+
+    // An unaffected consumer-provider mapping (reads only the unchanged backend `labels`).
+    store.approvedMappings.set("m-adapter-safe", consumerProvider("m-adapter-safe", v1.id));
+    seedFieldMapping(store, "m-adapter-safe", "labels/name", "con-labels/name", {
+      phase: "response",
+    });
+    seedBinding(store, "m-adapter-safe", "endpoint-labels");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // The issues-backed mapping is stale and stays pinned; the labels one re-pins to v2.
+    expect(store.approvedMappings.get("m-adapter")?.status).toBe("stale");
+    expect(store.approvedMappings.get("m-adapter")?.targetSpecId).toBe(v1.id);
+    expect(store.approvedMappings.get("m-adapter-safe")?.status).toBe("active");
+    expect(store.approvedMappings.get("m-adapter-safe")?.targetSpecId).toBe(outcome.newSpec.id);
+
+    // XI-2 — ONLY the stale mapping's endpoint cache drops (never the unaffected endpoint).
+    expect(store.cacheInvalidations).toEqual(["endpoint-issues"]);
+    // GR-3 — the (consumer → backend) adapter edge recomputes for the stale mapping only.
+    expect(store.graphRecomputes).toEqual([
+      { type: "adapter-dependency", sourceAppId: CONSUMER_APP, targetAppId: app.id },
+    ]);
+    // SL-4.2 — the binding keeps its OWN status (staleness lives on the mapping alone).
+    const binding = store.adapterBindings.find((b) => b.approvedMappingId === "m-adapter");
+    expect(binding?.status).toBe("active");
+  });
+
+  it("never fails the transition when a cache drop throws (XI-2.5)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    store.approvedMappings.set("m-adapter", consumerProvider("m-adapter", v1.id));
+    // Response-phase → `sourcePath` is the backend (`issues/title`) field (see above).
+    seedFieldMapping(store, "m-adapter", "issues/title", "con-issues/title", { phase: "response" });
+    seedBinding(store, "m-adapter", "endpoint-issues");
+    store.failCacheInvalidation = true; // every invalidateEndpoint throws.
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+
+    // The stale transition still committed despite the cache-drop throw.
+    expect(outcome.kind).toBe("advanced");
+    expect(store.approvedMappings.get("m-adapter")?.status).toBe("stale");
+    expect(store.cacheInvalidations).toEqual([]); // the throw prevented recording, but did not roll back.
+  });
+
+  /** A minimal CONSUMER-role doc: a `con-issues` resource whose `title` is the given type. */
+  function consumerDoc(titleType: "string" | "integer"): Record<string, unknown> {
+    return {
+      openapi: "3.0.0",
+      info: { title: "Consumer", version: "1.0.0" },
+      paths: {
+        "/con-issues": {
+          get: {
+            operationId: "listConIssues",
+            tags: ["con-issue"],
+            responses: {
+              "200": {
+                description: "ok",
+                content: {
+                  "application/json": {
+                    schema: { type: "array", items: { $ref: "#/components/schemas/ConIssue" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          ConIssue: {
+            type: "object",
+            properties: {
+              id: { type: "integer" },
+              title: { type: titleType },
+              updated: { type: "string" },
+            },
+            required: ["id"],
+          },
+        },
+      },
+    };
+  }
+
+  it("stales a consumer-provider mapping when its CONSUMER spec breaks (SL-4.4, the source-side path)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    seedApp(store, { id: CONSUMER_APP, name: "consumer" });
+    const conV1 = await unitOfWork.run((tx) =>
+      registry.ingestSpec(CONSUMER_APP, consumerDoc("string"), "CONSUMER", [], tx),
+    );
+
+    // A consumer-provider mapping whose SOURCE (consumer) spec is the one that breaks.
+    const mapping: ApprovedMapping = {
+      id: "m-consumer",
+      sourceSpecId: conV1.id,
+      targetSpecId: "backend-spec",
+      sourceAppId: CONSUMER_APP,
+      targetAppId: APP_ID,
+      variant: "consumer-provider",
+      approvedBy: "reviewer:alice",
+      approvedAt: new Date("2026-07-20T00:00:00.000Z"),
+      status: "active",
+    };
+    store.approvedMappings.set(mapping.id, mapping);
+    // A request-phase field reading the consumer's `con-issues.title` → references the change.
+    seedFieldMapping(store, "m-consumer", "con-issues/title", "issues/title", { phase: "request" });
+    seedBinding(store, "m-consumer", "endpoint-consumer");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(CONSUMER_APP, consumerDoc("integer"), "CONSUMER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+
+    // SL-4.4 — the consumer's adapter mapping is stale and stays pinned to the consumer v1.
+    expect(store.approvedMappings.get("m-consumer")?.status).toBe("stale");
+    expect(store.approvedMappings.get("m-consumer")?.sourceSpecId).toBe(conV1.id);
+    // Its adapter edge (consumer → backend) recomputes and its endpoint cache drops.
+    expect(store.graphRecomputes).toEqual([
+      { type: "adapter-dependency", sourceAppId: CONSUMER_APP, targetAppId: APP_ID },
+    ]);
+    expect(store.cacheInvalidations).toEqual(["endpoint-consumer"]);
+  });
+});
+
+/**
+ * SL-4 pure mark-stale matching policy — the load-bearing invariant, unit-tested directly
+ * so the precision (field vs operation granularity, cross-resource, changed-side selection)
+ * is provable without a whole ingest round. "Get the matching right and test it hard."
+ */
+describe("SL-4 pure mark-stale matching", () => {
+  function change(
+    kind: SpecChange["kind"],
+    location: SpecChange["location"],
+    classification: SpecChange["classification"] = "breaking",
+  ): SpecChange {
+    return { kind, classification, location, reason: "test" };
+  }
+  function breakingDiff(changes: readonly SpecChange[]): SpecDiff {
+    return { classification: "breaking", changes };
+  }
+
+  const SUPERSEDED = "spec-old";
+  const sourceMapping = { sourceSpecId: SUPERSEDED, targetSpecId: "spec-other" };
+  const targetMapping = { sourceSpecId: "spec-other", targetSpecId: SUPERSEDED };
+
+  describe("computeBreakingAffectedKeys", () => {
+    it("buckets a field/schema change into fieldResources and ignores additive changes", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("field-type-changed", {
+            level: "field",
+            resourceRef: "issues",
+            schemaName: "Issue",
+            fieldName: "title",
+          }),
+          change("schema-removed", { level: "schema", resourceRef: "orders", schemaName: "Order" }),
+          // An additive change never contributes (only breaking changes break a ref).
+          change(
+            "field-added",
+            { level: "field", resourceRef: "labels", schemaName: "Label", fieldName: "color" },
+            "additive",
+          ),
+        ]),
+      );
+      expect([...keys.fieldResources].sort()).toEqual(["issues", "orders"]);
+      expect([...keys.resources]).toEqual([]);
+      expect([...keys.operations]).toEqual([]);
+    });
+
+    it("buckets a resource-group removal into resources and an operation/parameter change into operations", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("resource-group-removed", { level: "resource", resourceRef: "issues" }),
+          change("operation-removed", {
+            level: "operation",
+            resourceRef: "orders",
+            operationId: "deleteOrder",
+          }),
+          change("parameter-removed", {
+            level: "parameter",
+            resourceRef: "orders",
+            operationId: "getOrder",
+            parameterName: "id",
+            parameterLocation: "path",
+          }),
+        ]),
+      );
+      expect([...keys.resources]).toEqual(["issues"]);
+      expect([...keys.operations].sort()).toEqual(["orders/deleteOrder", "orders/getOrder"]);
+    });
+  });
+
+  describe("mappingChangedSideRefs — changed-side selection", () => {
+    const fields: FieldMapping[] = [
+      {
+        id: "f1",
+        mappingId: "m",
+        sourcePath: "issues/title",
+        targetPath: "tickets/subject",
+        transform: "aggregate",
+        transformConfig: { additionalInputPaths: ["issues/summary"] },
+      },
+    ];
+    const operations: OperationMapping[] = [
+      {
+        id: "o1",
+        mappingId: "m",
+        sourceOperationRef: "issues/getIssue",
+        targetOperationRef: "tickets/getTicket",
+        action: "update",
+        targetIdParamRef: "tickets/updateTicket#id",
+      },
+    ];
+
+    it("reads the SOURCE refs (incl. additionalInputPaths) when the source pinned the superseded spec", () => {
+      const refs = mappingChangedSideRefs(sourceMapping, SUPERSEDED, fields, operations);
+      expect([...refs.fieldRefs].sort()).toEqual(["issues/summary", "issues/title"]);
+      expect(refs.operationRefs).toEqual(["issues/getIssue"]);
+      expect(refs.paramRefs).toEqual([]);
+    });
+
+    it("reads the TARGET refs (incl. targetIdParamRef) when the target pinned the superseded spec", () => {
+      const refs = mappingChangedSideRefs(targetMapping, SUPERSEDED, fields, operations);
+      expect(refs.fieldRefs).toEqual(["tickets/subject"]);
+      expect(refs.operationRefs).toEqual(["tickets/getTicket"]);
+      expect(refs.paramRefs).toEqual(["tickets/updateTicket#id"]);
+    });
+
+    // A consumer-provider RESPONSE-phase field INVERTS the field-ref convention: `sourcePath`
+    // (+ additionalInputPaths) is the backend/target-spec read, `targetPath` the consumer/
+    // source-spec write. Getting this wrong silently under-marks a provider response-body break.
+    const responseFields: FieldMapping[] = [
+      {
+        id: "rf1",
+        mappingId: "m",
+        sourcePath: "issues/title", // backend (target-spec) read
+        targetPath: "con-issues/subject", // consumer (source-spec) write
+        transform: "aggregate",
+        transformConfig: { additionalInputPaths: ["issues/summary"] }, // backend reads too
+        phase: "response",
+      },
+    ];
+    const cpOperations: OperationMapping[] = [
+      {
+        id: "ro1",
+        mappingId: "m",
+        sourceOperationRef: "con-issues/getConIssue", // consumer op
+        targetOperationRef: "issues/getIssue", // backend op
+        action: "read",
+      },
+    ];
+
+    it("response-phase: a BACKEND (target-spec) break reads sourcePath + additionalInputPaths (the inverted backend refs)", () => {
+      const refs = mappingChangedSideRefs(targetMapping, SUPERSEDED, responseFields, cpOperations);
+      // NOT the consumer `con-issues/subject` — the backend fields the transform reads.
+      expect([...refs.fieldRefs].sort()).toEqual(["issues/summary", "issues/title"]);
+      expect(refs.operationRefs).toEqual(["issues/getIssue"]);
+    });
+
+    it("response-phase: a CONSUMER (source-spec) break reads targetPath (the inverted consumer ref)", () => {
+      const refs = mappingChangedSideRefs(sourceMapping, SUPERSEDED, responseFields, cpOperations);
+      // NOT the backend `issues/title` — the consumer response field the mapping produces.
+      expect(refs.fieldRefs).toEqual(["con-issues/subject"]);
+      expect(refs.operationRefs).toEqual(["con-issues/getConIssue"]);
+    });
+  });
+
+  describe("mappingReferencesChangedElement", () => {
+    it("field-level break: stales a mapping referencing that resource, not one in another resource", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("field-type-changed", {
+            level: "field",
+            resourceRef: "issues",
+            schemaName: "Issue",
+            fieldName: "title",
+          }),
+        ]),
+      );
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["issues/title"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+      // A same-resource but different field is (conservatively) stale — resource granularity
+      // for field changes: a false-stale is re-reviewable, a false-active is silent breakage.
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["issues/summary"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+      // A mapping referencing only a DIFFERENT resource is provably unaffected → not stale.
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["labels/name"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(false);
+    });
+
+    it("operation-level break: matches the EXACT operation, leaving a sibling operation and a plain field ref active", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("operation-removed", {
+            level: "operation",
+            resourceRef: "issues",
+            operationId: "deleteIssue",
+          }),
+        ]),
+      );
+      // The mapping that maps the removed operation → stale.
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: [], operationRefs: ["issues/deleteIssue"], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+      // A mapping using a SIBLING operation of the same resource stays active (exact match).
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: [], operationRefs: ["issues/getIssue"], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(false);
+      // A mapping only READING a field of that resource is unaffected by a sibling op removal.
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["issues/title"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(false);
+    });
+
+    it("parameter break matches its owning operation via a parameter ref prefix", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("parameter-type-changed", {
+            level: "parameter",
+            resourceRef: "issues",
+            operationId: "updateIssue",
+            parameterName: "id",
+            parameterLocation: "path",
+          }),
+        ]),
+      );
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: [], operationRefs: [], paramRefs: ["issues/updateIssue#id"] },
+          keys,
+        ),
+      ).toBe(true);
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: [], operationRefs: [], paramRefs: ["issues/createIssue#id"] },
+          keys,
+        ),
+      ).toBe(false);
+    });
+
+    it("resource-group removal breaks EVERY ref into that resource (field and operation)", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("resource-group-removed", { level: "resource", resourceRef: "issues" }),
+        ]),
+      );
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["issues/title"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: [], operationRefs: ["issues/listIssues"], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["labels/name"], operationRefs: ["labels/listLabels"], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(false);
+    });
+
+    it("a mapping spanning a changed and an unchanged resource is stale (references the changed one)", () => {
+      const keys = computeBreakingAffectedKeys(
+        breakingDiff([
+          change("field-removed", {
+            level: "field",
+            resourceRef: "issues",
+            schemaName: "Issue",
+            fieldName: "title",
+          }),
+        ]),
+      );
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["labels/name", "issues/title"], operationRefs: [], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(true);
+    });
+
+    it("no breaking change affects nothing (an empty/additive diff never stales)", () => {
+      const keys = computeBreakingAffectedKeys(breakingDiff([]));
+      expect(
+        mappingReferencesChangedElement(
+          { fieldRefs: ["issues/title"], operationRefs: ["issues/getIssue"], paramRefs: [] },
+          keys,
+        ),
+      ).toBe(false);
+    });
   });
 });

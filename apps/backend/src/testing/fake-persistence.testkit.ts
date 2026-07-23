@@ -10,12 +10,15 @@ import type {
   SourceScopeRefPatch,
 } from "@mediator/db";
 import type {
+  AdapterBinding,
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
   ApprovedMapping,
   AuditLogEntry,
   DomainEventEnvelope,
+  FieldMapping,
+  OperationMapping,
   RegisteredApp,
   ResourceBinding,
   ScopeCorrespondence,
@@ -33,6 +36,10 @@ import type {
   BindingReader,
   BindingTxRepo,
   CredentialTxStore,
+  DownstreamArtifactTxReader,
+  EndpointCacheInvalidator,
+  GraphEdgeRecompute,
+  MappingArtifactsTxReader,
   SpecReader,
   DetectionJobTxRepo,
   SpecTxRepo,
@@ -87,15 +94,34 @@ export class InMemoryStore {
    * to make `scope-link` a selectable kind for a resource (SS-18.4).
    */
   public readonly scopeCorrespondences = new Map<string, ScopeCorrespondence>();
-  /** SL-2 — `ApprovedMapping`s keyed by id, so the additive re-pin can find + advance them. */
+  /** SL-2/SL-4 — `ApprovedMapping`s keyed by id, so the additive re-pin / breaking stale-mark can find + advance them. */
   public readonly approvedMappings = new Map<string, ApprovedMapping>();
-  /** SL-2 — appended audit rows (the re-pin records `mapping-decision`/`system` entries). */
+  /** SL-2/SL-4 — appended audit rows (re-pin + stale records are `mapping-decision`/`system` entries). */
   public readonly auditLog: AuditLogEntry[] = [];
   /** SL-3 — scoped detection jobs the additive reaction enqueued (recorded intent), so a test can assert the scoped analysis was triggered in-tx. */
   public readonly scopedDetectionJobs: {
     readonly apiSpecId: string;
     readonly scope: DetectionJobScope;
   }[] = [];
+  /** SL-4 — a mapping's approved `FieldMapping`/`OperationMapping` children, read by the breaking reaction to match referenced elements against the diff. */
+  public readonly fieldMappings: FieldMapping[] = [];
+  public readonly operationMappings: OperationMapping[] = [];
+  /** SL-4.6 — the adapter bindings a consumer-provider mapping derived, read to target the coupled cache drop. */
+  public readonly adapterBindings: AdapterBinding[] = [];
+  /** SL-4.6 — the `GraphEdge` recomputes the breaking reaction requested (spy surface for tests). */
+  public readonly graphRecomputes: {
+    readonly type: "sync" | "adapter-dependency";
+    readonly sourceAppId: string;
+    readonly targetAppId: string;
+  }[] = [];
+  /** SL-4.6 / XI-2 — the `AdapterEndpoint` ids whose cache the breaking reaction dropped (spy surface for tests). */
+  public readonly cacheInvalidations: string[] = [];
+  /**
+   * SL-4.6 / XI-2.5 — when `true`, {@link FakeEndpointCacheInvalidator} throws on every
+   * `invalidateEndpoint`, so a test can prove the coarse cache drop NEVER fails the
+   * triggering transition (it is guarded by `invalidateEndpointSafely`).
+   */
+  public failCacheInvalidation = false;
 }
 
 /**
@@ -342,6 +368,66 @@ class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);
   }
+  public markStale(id: string): Promise<ApprovedMapping | undefined> {
+    const existing = this.store.approvedMappings.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    // Only `status` changes — the pinned spec ids, counterpart, and children are untouched
+    // (SL-4.2/4.3: a stale mapping stays pinned to its reviewed/superseded version).
+    const updated: ApprovedMapping = { ...existing, status: "stale" };
+    this.store.approvedMappings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+}
+
+/** Mirrors {@link MappingArtifactsRepository}'s SL-4 reads: a mapping's approved field/operation children. */
+class FakeMappingArtifactsRepo implements MappingArtifactsTxReader {
+  public constructor(private readonly store: InMemoryStore) {}
+  public listFieldMappings(mappingId: string): Promise<FieldMapping[]> {
+    return Promise.resolve(this.store.fieldMappings.filter((f) => f.mappingId === mappingId));
+  }
+  public listOperationMappings(mappingId: string): Promise<OperationMapping[]> {
+    return Promise.resolve(this.store.operationMappings.filter((o) => o.mappingId === mappingId));
+  }
+}
+
+/** Mirrors {@link DownstreamArtifactRepository.listAdapterBindingsByMapping} for the SL-4.6 coupled cache drop. */
+class FakeDownstreamArtifactRepo implements DownstreamArtifactTxReader {
+  public constructor(private readonly store: InMemoryStore) {}
+  public listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]> {
+    return Promise.resolve(
+      this.store.adapterBindings.filter((b) => b.approvedMappingId === mappingId),
+    );
+  }
+}
+
+/** Records the GR-2/GR-3 edge recomputes the breaking reaction requested (no real projection here). */
+class FakeGraphRecompute implements GraphEdgeRecompute {
+  public constructor(private readonly store: InMemoryStore) {}
+  public recomputeSyncEdge(sourceAppId: string, targetAppId: string): Promise<void> {
+    this.store.graphRecomputes.push({ type: "sync", sourceAppId, targetAppId });
+    return Promise.resolve();
+  }
+  public recomputeAdapterEdge(consumerAppId: string, backendAppId: string): Promise<void> {
+    this.store.graphRecomputes.push({
+      type: "adapter-dependency",
+      sourceAppId: consumerAppId,
+      targetAppId: backendAppId,
+    });
+    return Promise.resolve();
+  }
+}
+
+/** Records the XI-2 by-endpoint cache drops the breaking reaction requested (spy surface). */
+class FakeEndpointCacheInvalidator implements EndpointCacheInvalidator {
+  public constructor(private readonly store: InMemoryStore) {}
+  public invalidateEndpoint(endpointId: string): void {
+    if (this.store.failCacheInvalidation) {
+      // XI-2.5 — the reaction's `invalidateEndpointSafely` must swallow this so the
+      // stale transition still commits (a missed drop only costs a spurious hit).
+      throw new Error("simulated cache-drop failure");
+    }
+    this.store.cacheInvalidations.push(endpointId);
+  }
 }
 
 class FakeAuditRepo implements AuditTxRepo {
@@ -384,6 +470,11 @@ export class FakeUnitOfWork implements UnitOfWork {
       approvedMappings: new Map(this.store.approvedMappings),
       auditLog: [...this.store.auditLog],
       scopedDetectionJobs: [...this.store.scopedDetectionJobs],
+      fieldMappings: [...this.store.fieldMappings],
+      operationMappings: [...this.store.operationMappings],
+      adapterBindings: [...this.store.adapterBindings],
+      graphRecomputes: [...this.store.graphRecomputes],
+      cacheInvalidations: [...this.store.cacheInvalidations],
     };
     const stores: TxStores = {
       registeredApps: new FakeAppRepo(this.store),
@@ -393,6 +484,10 @@ export class FakeUnitOfWork implements UnitOfWork {
       approvedMappings: new FakeApprovedMappingRepo(this.store),
       audit: new FakeAuditRepo(this.store),
       detectionJobs: new FakeDetectionJobRepo(this.store),
+      mappingArtifacts: new FakeMappingArtifactsRepo(this.store),
+      downstreamArtifacts: new FakeDownstreamArtifactRepo(this.store),
+      graph: new FakeGraphRecompute(this.store),
+      cacheInvalidator: new FakeEndpointCacheInvalidator(this.store),
       emit: (event) => {
         this.store.events.push(event);
         return Promise.resolve();
@@ -415,6 +510,11 @@ export class FakeUnitOfWork implements UnitOfWork {
     approvedMappings: Map<string, ApprovedMapping>;
     auditLog: AuditLogEntry[];
     scopedDetectionJobs: { readonly apiSpecId: string; readonly scope: DetectionJobScope }[];
+    fieldMappings: FieldMapping[];
+    operationMappings: OperationMapping[];
+    adapterBindings: AdapterBinding[];
+    graphRecomputes: InMemoryStore["graphRecomputes"][number][];
+    cacheInvalidations: string[];
   }): void {
     replaceMap(this.store.apps, snapshot.apps);
     replaceMap(this.store.specs, snapshot.specs);
@@ -424,6 +524,11 @@ export class FakeUnitOfWork implements UnitOfWork {
     replaceMap(this.store.approvedMappings, snapshot.approvedMappings);
     replaceArray(this.store.auditLog, snapshot.auditLog);
     replaceArray(this.store.scopedDetectionJobs, snapshot.scopedDetectionJobs);
+    replaceArray(this.store.fieldMappings, snapshot.fieldMappings);
+    replaceArray(this.store.operationMappings, snapshot.operationMappings);
+    replaceArray(this.store.adapterBindings, snapshot.adapterBindings);
+    replaceArray(this.store.graphRecomputes, snapshot.graphRecomputes);
+    replaceArray(this.store.cacheInvalidations, snapshot.cacheInvalidations);
   }
 }
 

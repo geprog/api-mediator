@@ -120,6 +120,27 @@ export class ApprovedMappingRepository {
   }
 
   /**
+   * **SL-4.1/4.2/4.3 — mark a mapping `stale`.** Sets **only** `status = "stale"`;
+   * every other column is left byte-identical — in particular the pinned
+   * `sourceSpecId`/`targetSpecId` are **untouched** (a stale mapping stays pinned to
+   * the version it was reviewed against, SL-4.3 — it describes the old shape), and the
+   * `counterpartMappingId` and the mapping's `FieldMapping`/`OperationMapping` children
+   * are unchanged. Staleness lives on the mapping **alone** (SL-4.2): its derived
+   * `SyncRule`s/`AdapterBinding`s keep their own `status` and pause/fail as a derived
+   * condition (the Scheduler holds a stale-mapping rule; RP-3 fails a live call
+   * `mapping-stale`). The breaking-diff counterpart of the additive {@link repinSpecs}.
+   * Returns the updated mapping, or `undefined` when no row with `id` exists.
+   */
+  public async markStale(id: string): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ status: "stale" })
+      .where(eq(approvedMapping.id, id))
+      .returning();
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
    * Set (or clear) a mapping's `counterpartMappingId` — used to cross-link the
    * reverse-direction mapping when both directions are approved (AS-6 criterion 2).
    */

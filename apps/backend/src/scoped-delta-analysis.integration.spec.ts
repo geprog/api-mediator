@@ -250,6 +250,19 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
       approvedMappings: new ApprovedMappingRepository(handle),
       audit: new AuditLogRepository(handle),
       detectionJobs: new DetectionJobRepository(handle),
+      // SL-4 breaking-reaction ports — this SL-3 additive spec never reaches the breaking branch.
+      mappingArtifacts: {
+        listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
+        listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
+      },
+      downstreamArtifacts: {
+        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+      },
+      graph: {
+        recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
+        recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
+      },
+      cacheInvalidator: { invalidateEndpoint: (): void => {} },
       emit: () => Promise.reject(new Error("advance must not emit")),
     };
   }

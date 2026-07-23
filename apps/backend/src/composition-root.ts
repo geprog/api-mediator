@@ -141,14 +141,26 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       logger.info(fields, message);
     },
   };
-  const unitOfWork = new DbUnitOfWork(db, keyProvider, eventBus, credentialLogger);
   const specRegistry = new SpecRegistry();
   const specReader = new ApiSpecRepository(db);
   // Phase-6 GR-2/GR-3 — the incremental materialized-graph reactor, shared by the sync
-  // operator (rule enable/disable → sync edge) and the adapter composition service
-  // (recompose/enable-disable/adopt → adapter-dependency edge), so both keep the
-  // landscape `GraphEdge` projection current from the same seam.
+  // operator (rule enable/disable → sync edge), the adapter composition service
+  // (recompose/enable-disable/adopt → adapter-dependency edge), and the Spec Registry's
+  // SL-4 breaking reaction (mapping → stale → recompute the affected edge), so all keep
+  // the landscape `GraphEdge` projection current from the same seam.
   const graphProjection = new GraphProjection({ db, newId: randomUUID });
+  // Phase-6 SL-4 / XI-2 / GR-2/GR-3 — the version-advance transaction's `graph` +
+  // `cacheInvalidator` ports come from the SAME seams the adapter runtime and composition
+  // service use: the breaking reaction recomputes edges inside the tx and drops each stale
+  // endpoint's cache through the shared by-endpoint invalidator (CH-5.6, one mechanism).
+  const unitOfWork = new DbUnitOfWork(
+    db,
+    keyProvider,
+    eventBus,
+    credentialLogger,
+    deps.cacheInvalidator,
+    graphProjection,
+  );
 
   // ── Phase-3 Review & Approval slice (RA-1..RA-5) ───────────────────────────
   // Kept in one clearly-scoped block to minimize conflict with the concurrent
