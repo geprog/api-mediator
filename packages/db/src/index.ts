@@ -84,9 +84,13 @@ export {
   syncRuleStatusEnum,
   targetDriftCheckEnum,
   transformKindEnum,
+  type AdditiveDeltaScope,
   type DetectionJobScope,
   type DetectionJobStatus,
   type OrderingQueueStatus,
+  type ReReviewResourcePair,
+  type ReReviewScope,
+  type ReReviewStaleMappingScope,
   type ResourceBindingRefKind,
 } from "./schema.js";
 

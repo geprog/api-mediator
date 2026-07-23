@@ -27,12 +27,16 @@ export function mapApprovedMappingRow(row: ApprovedMappingRow): ApprovedMapping 
     status: row.status,
     // NULL → absent (never a present null — keeps the CP refinement satisfiable).
     counterpartMappingId: row.counterpartMappingId ?? undefined,
+    // SL-6/SL-7 — NULL → absent (an ordinary mapping); a stored id round-trips (a
+    // successor whose `stale` predecessor SL-7 adoption re-points).
+    predecessorMappingId: row.predecessorMappingId ?? undefined,
   });
 }
 
 /**
- * Domain → insert. An absent (or `null`) `counterpartMappingId` becomes a NULL
- * column; a present value is written verbatim.
+ * Domain → insert. An absent (or `null`) `counterpartMappingId` /
+ * `predecessorMappingId` becomes a NULL column; a present value is written verbatim
+ * (the SL-6 successor is inserted with `predecessorMappingId` set).
  */
 export function toApprovedMappingInsert(mapping: ApprovedMapping): ApprovedMappingInsert {
   return {
@@ -46,5 +50,6 @@ export function toApprovedMappingInsert(mapping: ApprovedMapping): ApprovedMappi
     approvedAt: mapping.approvedAt,
     status: mapping.status,
     counterpartMappingId: mapping.counterpartMappingId ?? null,
+    predecessorMappingId: mapping.predecessorMappingId ?? null,
   };
 }

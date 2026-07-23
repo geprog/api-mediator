@@ -393,22 +393,29 @@ export const detectionJobStatusEnum = pgEnum("detection_job_status", DETECTION_J
 
 /**
  * The `jsonb`-persisted **scope descriptor** of a `mapping_detection_job` (the
- * table's nullable `scope` column, below). It is what distinguishes the two job
- * shapes the one table now carries:
+ * table's nullable `scope` column, below). It is the discriminated union that
+ * distinguishes the job shapes the one table carries:
  *
  * - `scope = null` — a **full** detection job (Phase-2 DT-1/DT-2): the worker runs
  *   `runDetectionForSpec` over every candidate pair the spec introduces.
- * - `scope != null` — a **scoped** additive-delta job (Phase-6 SL-3): the worker
- *   runs an incremental analysis restricted to the genuinely-new in-scope elements
- *   an additive `SpecDiff` added, producing a small delta `MappingProposal`.
+ * - `kind = "additive-delta"` — a **scoped** additive-delta job (Phase-6 SL-3): the
+ *   worker runs an incremental analysis restricted to the genuinely-new in-scope
+ *   elements an additive `SpecDiff` added, producing a small delta `MappingProposal`.
+ * - `kind = "re-review"` — a **scoped** breaking re-review job (Phase-6 SL-6): the
+ *   worker runs a **detail-only** re-analysis (no shortlist) per affected resource
+ *   pair of each `stale` mapping, with the stale mapping's approved content passed as
+ *   `priorFeedback`, producing each stale mapping's **successor** re-review proposal.
  *
  * It is **infrastructure** (durability/scheduling), not a glossary entity — the
- * structural scope the Spec Registry derives once from the additive `SpecDiff`
- * (SL-1.6 "one classification, many consumers"), recorded in the ingest transaction
+ * structural scope the Spec Registry derives **once** from the `SpecDiff` (SL-1.6
+ * "one classification, many consumers"), recorded in the ingest/advance transaction
  * and read by the worker outside it (DT-2). It carries only version-stable
- * `resourceRef`s and spec ids — no IR payload, never a secret.
+ * `resourceRef`s, spec ids, and `ApprovedMapping` ids — no IR payload, never a secret.
  */
-export interface DetectionJobScope {
+export type DetectionJobScope = AdditiveDeltaScope | ReReviewScope;
+
+/** SL-3 — the scoped additive-delta job descriptor (a `resource-group-added` / in-scope additive diff). */
+export interface AdditiveDeltaScope {
   /** Discriminant — the reaction that recorded this scope (SL-3 additive delta). */
   readonly kind: "additive-delta";
   /** The prior (now-`superseded`) version this additive advance came from — the lineage side whose established shortlists SL-3.2 reuses. */
@@ -417,6 +424,36 @@ export interface DetectionJobScope {
   readonly newResourceGroups: readonly string[];
   /** `resourceRef`s of existing in-scope resources that gained a new field/operation (SL-3.2) — a detail-only call against their already-shortlisted counterpart, stage 1 skipped. */
   readonly changedResources: readonly string[];
+}
+
+/**
+ * SL-6 — the scoped breaking re-review job descriptor: one job per breaking
+ * version-advance, carrying a descriptor for **each** mapping the advance marked
+ * `stale`. The worker re-reviews each stale mapping (detail-only, `priorFeedback`)
+ * to produce its **successor** proposal — many stale mappings, one job (the same
+ * per-spec partial-unique index that makes SL-3's enqueue idempotent).
+ */
+export interface ReReviewScope {
+  /** Discriminant — the reaction that recorded this scope (SL-6 breaking re-review). */
+  readonly kind: "re-review";
+  /** The prior (now-`superseded`) version on the changed side — every stale mapping stays pinned to it (SL-4.3); the worker advances it to the new version for the successor's pins. */
+  readonly supersededSpecId: string;
+  /** One descriptor per mapping this breaking advance marked `stale` (SL-4.1). */
+  readonly staleMappings: readonly ReReviewStaleMappingScope[];
+}
+
+/** SL-6 — the per-stale-mapping descriptor: the mapping to re-review and its affected resource pairs. */
+export interface ReReviewStaleMappingScope {
+  /** The `stale` `ApprovedMapping` this re-review produces the successor of (the SL-7 adoption link). */
+  readonly staleMappingId: string;
+  /** The resource pairs the breaking change actually touched (SL-6.1) — one detail call each, in the mapping's `source → target` orientation. */
+  readonly affectedPairs: readonly ReReviewResourcePair[];
+}
+
+/** SL-6 — one affected resource pair of a stale mapping, in `source → target` orientation (version-stable `resourceRef`s). */
+export interface ReReviewResourcePair {
+  readonly sourceResource: string;
+  readonly targetResource: string;
 }
 
 /**
@@ -765,6 +802,14 @@ export const mappingProposal = pgTable(
     shortlistResult: jsonb("shortlist_result").$type<ShortlistResult>(),
     status: mappingProposalStatusEnum("status").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // SL-6 — nullable: on a **breaking re-review** proposal, the `stale`
+    // `ApprovedMapping` this proposal re-reviews (the predecessor). NULL on every
+    // ordinary (Phase-2/SL-3) proposal. Approving a proposal that carries it stamps
+    // the resulting **successor** mapping's `predecessor_mapping_id`, so SL-7
+    // adoption can find "the successor of this stale mapping". Forward self-package
+    // reference to `approved_mapping` (declared below); no cascade — a stale
+    // predecessor is retained for audit, so its re-review proposal keeps pinning it.
+    reReviewOf: uuid("re_review_of").references((): AnyPgColumn => approvedMapping.id),
   },
   (table) => [
     // "proposals produced for this spec" (as source of a directional analysis).
@@ -952,6 +997,15 @@ export const approvedMapping = pgTable(
     status: approvedMappingStatusEnum("status").notNull(),
     // Nullable self-reference: peer-peer reverse-direction link (AS-6). No cascade.
     counterpartMappingId: uuid("counterpart_mapping_id").references(
+      (): AnyPgColumn => approvedMapping.id,
+    ),
+    // SL-6/SL-7 — nullable self-reference: on a **successor** mapping, the `stale`
+    // predecessor it re-reviews and (on SL-7 adoption) supersedes. Set when a
+    // re-review proposal (`mapping_proposal.re_review_of`) is approved; NULL on every
+    // ordinary mapping. This is the durable link SL-7 adoption reads both ways —
+    // successor → predecessor (its own column) and predecessor → successor (a lookup
+    // by this column). No cascade: a superseded predecessor is retained for audit.
+    predecessorMappingId: uuid("predecessor_mapping_id").references(
       (): AnyPgColumn => approvedMapping.id,
     ),
   },

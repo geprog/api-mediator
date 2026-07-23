@@ -15,6 +15,7 @@ import {
   buildGeneratedBy,
   type LLMMappingProvider,
   type MappingPromptContext,
+  type PriorMappingFeedback,
   type ShortlistPromptContext,
 } from "@mediator/llm";
 
@@ -222,16 +223,36 @@ function findGroup(spec: ApiSpec, resourceRef: string): IrResourceGroup | undefi
   return spec.parsedIR.find((group) => group.resourceRef === resourceRef);
 }
 
+/**
+ * A per-resource-pair lookup of the `priorFeedback` a scoped **re-review** analysis
+ * (SL-6) threads into the detail call: the stale mapping's approved correspondences
+ * for that resource pair, so the model reproduces the unaffected ones intact and
+ * review concentrates on the break (SL-6.2). Absent for a first-time / additive
+ * analysis, which passes no prior feedback.
+ */
+export type PriorFeedbackLookup = (
+  sourceResourceRef: string,
+  targetResourceRef: string,
+) => readonly PriorMappingFeedback[] | undefined;
+
 function detailContext(
   sourceResourceIR: IrResourceGroup,
   targetResourceIR: IrResourceGroup,
   variant: CandidateSpecPair["variant"],
   promptVersion: string,
   correctiveFeedback: string | undefined,
+  priorFeedback: readonly PriorMappingFeedback[] | undefined,
 ): MappingPromptContext {
-  return correctiveFeedback === undefined
-    ? { sourceResourceIR, targetResourceIR, variant, promptVersion }
-    : { sourceResourceIR, targetResourceIR, variant, promptVersion, correctiveFeedback };
+  // Build with exactOptionalPropertyTypes-safe conditional spreads: an optional key
+  // is present only when it carries a value (never a present `undefined`).
+  return {
+    sourceResourceIR,
+    targetResourceIR,
+    variant,
+    promptVersion,
+    ...(correctiveFeedback !== undefined ? { correctiveFeedback } : {}),
+    ...(priorFeedback !== undefined && priorFeedback.length > 0 ? { priorFeedback } : {}),
+  };
 }
 
 /**
@@ -247,12 +268,18 @@ function detailContext(
  *   `shortlistResult` while every other pair is still analyzed (detail blast
  *   radius). The candidate pairs + no-counterpart set are stored in the shared
  *   canonical orientation, identical across both directions (PP-3 crit 5).
+ *
+ * `priorFeedbackFor` (optional) supplies the SL-6 re-review `priorFeedback` per
+ * resource pair — the stale mapping's approved content for that pair — threaded into
+ * the detail call so unaffected correspondences come back intact. First-time /
+ * additive analyses omit it (no prior feedback).
  */
 export async function analyzeCandidate(
   candidate: CandidateSpecPair,
   specs: { readonly source: ApiSpec; readonly target: ApiSpec },
   shortlist: ShortlistOutcome,
   deps: DetectionDeps,
+  priorFeedbackFor?: PriorFeedbackLookup,
 ): Promise<CandidateAnalysisResult> {
   if (specs.source.id !== candidate.sourceSpecId || specs.target.id !== candidate.targetSpecId) {
     throw new Error("analyzeCandidate: specs do not match the candidate's source/target");
@@ -294,6 +321,7 @@ export async function analyzeCandidate(
       continue;
     }
 
+    const priorFeedback = priorFeedbackFor?.(sourceResourceRef, targetResourceRef);
     const result = await callWithRetry(
       (correctiveFeedback) =>
         deps.provider.generateMappingProposal(
@@ -303,6 +331,7 @@ export async function analyzeCandidate(
             candidate.variant,
             deps.promptVersion,
             correctiveFeedback,
+            priorFeedback,
           ),
         ),
       () => deps.provider.lastUsage,

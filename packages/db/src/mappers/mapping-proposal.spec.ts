@@ -44,6 +44,7 @@ function proposalRow(overrides: Partial<MappingProposalRow> = {}): MappingPropos
     shortlistResult,
     status: "pending",
     createdAt,
+    reReviewOf: null,
     ...overrides,
   };
 }
@@ -74,6 +75,19 @@ describe("mapMappingProposalRow", () => {
     // The key is present (nullable), never omitted — distinct from the item mapper.
     expect("shortlistResult" in proposal).toBe(true);
   });
+
+  it("collapses a NULL re_review_of to an absent key (an ordinary proposal)", () => {
+    const proposal = mapMappingProposalRow(proposalRow({ reReviewOf: null }));
+
+    // SL-6 — the optional re-review link is stripped when absent (unlike shortlistResult).
+    expect("reReviewOf" in proposal).toBe(false);
+  });
+
+  it("maps a stored re_review_of to the domain `reReviewOf` (a re-review proposal)", () => {
+    const proposal = mapMappingProposalRow(proposalRow({ reReviewOf: "stale-mapping-1" }));
+
+    expect(proposal.reReviewOf).toBe("stale-mapping-1");
+  });
 });
 
 describe("toMappingProposalInsert", () => {
@@ -96,7 +110,24 @@ describe("toMappingProposalInsert", () => {
       shortlistResult,
       status: "pending",
       createdAt,
+      // SL-6 — an ordinary proposal has no re-review link → NULL column.
+      reReviewOf: null,
     });
+  });
+
+  it("writes a re-review proposal's reReviewOf to the column (SL-6)", () => {
+    const proposal: MappingProposal = {
+      id: "prop-rr",
+      sourceSpecId: "spec-source",
+      targetSpecId: "spec-target",
+      generatedBy,
+      shortlistResult,
+      status: "pending",
+      createdAt,
+      reReviewOf: "stale-mapping-1",
+    };
+
+    expect(toMappingProposalInsert(proposal).reReviewOf).toBe("stale-mapping-1");
   });
 
   it("passes a null shortlistResult through unchanged (failed proposal)", () => {
@@ -133,6 +164,34 @@ describe("toMappingProposalInsert", () => {
       shortlistResult: insert.shortlistResult ?? null,
       status: insert.status,
       createdAt: insert.createdAt ?? createdAt,
+      reReviewOf: insert.reReviewOf ?? null,
+    });
+
+    expect(roundTripped).toStrictEqual(proposal);
+  });
+
+  it("round-trips a re-review proposal's reReviewOf through insert → row → domain (SL-6)", () => {
+    const proposal: MappingProposal = {
+      id: "prop-rr2",
+      sourceSpecId: "spec-source",
+      targetSpecId: "spec-target",
+      generatedBy,
+      shortlistResult,
+      status: "pending",
+      createdAt,
+      reReviewOf: "stale-mapping-2",
+    };
+
+    const insert = toMappingProposalInsert(proposal);
+    const roundTripped = mapMappingProposalRow({
+      id: insert.id ?? "prop-rr2",
+      sourceSpecId: insert.sourceSpecId,
+      targetSpecId: insert.targetSpecId,
+      generatedBy: insert.generatedBy,
+      shortlistResult: insert.shortlistResult ?? null,
+      status: insert.status,
+      createdAt: insert.createdAt ?? createdAt,
+      reReviewOf: insert.reReviewOf ?? null,
     });
 
     expect(roundTripped).toStrictEqual(proposal);

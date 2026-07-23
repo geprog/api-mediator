@@ -20,8 +20,10 @@ import {
   createDbPriorProposalSource,
   createDbProposalStore,
   createDbSpecSource,
+  createDbStaleMappingSource,
   runDetectionForSpec,
   runScopedAdditiveAnalysis,
+  runScopedReReviewAnalysis,
   type RunDetectionDeps,
 } from "@mediator/mapping-engine";
 import type { FastifyBaseLogger } from "fastify";
@@ -120,26 +122,44 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
     sink.onDetectionRun(result);
   };
 
-  // SL-3 — the scoped additive-delta analysis for a claimed job that carries a
-  // `scope`. Same off-transaction discipline and telemetry boundary as full
-  // detection; it only restricts which elements are analyzed. The prior-proposal
-  // source resolves the SL-3.2 "already-shortlisted" pairs from persisted shortlists.
+  // The scoped analysis for a claimed job that carries a `scope`. Same off-transaction
+  // discipline and telemetry boundary as full detection; it only restricts which elements
+  // are analyzed, branching on the scope's `kind`:
+  //  - SL-3 `additive-delta` — the prior-proposal source resolves the SL-3.2
+  //    "already-shortlisted" pairs from persisted shortlists;
+  //  - SL-6 `re-review` — the stale-mapping source supplies each stale mapping's approved
+  //    content (`priorFeedback`) for its detail-only successor re-analysis.
   const priorProposals = createDbPriorProposalSource(db);
+  const staleMappingSource = createDbStaleMappingSource(db);
   const runScopedDetection = async (job: ClaimedDetectionJob): Promise<void> => {
     const { scope } = job;
     if (scope === null) {
       throw new Error("runScopedDetection: claimed job carries no scope");
     }
-    const result = await runScopedAdditiveAnalysis(
+    if (scope.kind === "additive-delta") {
+      const result = await runScopedAdditiveAnalysis(
+        {
+          newSpecId: job.apiSpecId,
+          supersededSpecId: scope.supersededSpecId,
+          scope: {
+            newResourceGroups: scope.newResourceGroups,
+            changedResources: scope.changedResources,
+          },
+        },
+        { ...runDetectionDeps, priorProposals },
+      );
+      sink.onDetectionRun(result);
+      return;
+    }
+    // SL-6 — the scoped breaking re-review: a detail-only successor proposal per stale
+    // mapping, with the stale mapping's approved content as `priorFeedback`.
+    const result = await runScopedReReviewAnalysis(
       {
         newSpecId: job.apiSpecId,
         supersededSpecId: scope.supersededSpecId,
-        scope: {
-          newResourceGroups: scope.newResourceGroups,
-          changedResources: scope.changedResources,
-        },
+        staleMappings: scope.staleMappings,
       },
-      { ...runDetectionDeps, priorProposals },
+      { ...runDetectionDeps, staleMappings: staleMappingSource },
     );
     sink.onDetectionRun(result);
   };

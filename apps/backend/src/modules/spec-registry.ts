@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import type { DetectionJobScope } from "@mediator/db";
+import type {
+  DetectionJobScope,
+  ReReviewResourcePair,
+  ReReviewScope,
+  ReReviewStaleMappingScope,
+} from "@mediator/db";
 import type {
   ApiSpec,
   ApiSpecRole,
@@ -220,10 +225,18 @@ export class SpecRegistry {
    *    resource pair's `ScopeCorrespondence` / `ScopeLink`s are re-validated — every
    *    consequence a paused rule (a **derived** condition; nothing writes a rule status).
    *
-   * Deliberately **out of scope here** (owned by sibling slices): producing each stale
-   * mapping's **successor** re-review proposal (**SL-6**). **No `SpecIngested` is emitted**
-   * on any branch (that event triggers a *full* detection analysis; the SL-2…SL-6 reactions
-   * are the diff's scoped consumers instead).
+   * 7. **Scoped re-review trigger (SL-6)** — when the breaking diff marked mappings `stale`
+   *    (step 6), the intent to run each stale mapping's **scoped re-review** is recorded in
+   *    this same transaction: **one** `mapping_detection_job` carrying a `re-review`
+   *    {@link DetectionJobScope} with a per-stale-mapping descriptor (its id + the affected
+   *    resource pairs). The detail-only LLM analysis runs later in the worker, off this
+   *    transaction (DT-2), producing each stale mapping's **successor** proposal for ordinary
+   *    Phase-3 re-review — nothing is auto-approved.
+   *
+   * **No `SpecIngested` is emitted** on any branch (that event triggers a *full* detection
+   * analysis; the SL-2…SL-6 reactions are the diff's scoped consumers instead). Deliberately
+   * **out of scope here** (owned by SL-7/SL-8): **adopting** an approved successor
+   * (re-pointing rules/bindings, superseding the stale row).
    */
   public async ingestNewVersion(
     appId: string,
@@ -380,6 +393,13 @@ export class SpecRegistry {
    *    stale endpoint's cache (XI-2) and recomputes each affected `(app pair)` `GraphEdge`
    *    (GR-2/GR-3), so no cache or graph masks the pause.
    *
+   * 5. **Record the scoped re-review (SL-6.1).** For each stale mapping, its affected
+   *    resource pairs are computed here ({@link computeReReviewAffectedPairs}) and, if any
+   *    mapping went stale, **one** `re-review` scoped `mapping_detection_job` is recorded in
+   *    this same transaction (`enqueueScoped`). The worker later runs the detail-only
+   *    re-analysis with the stale content as `priorFeedback`, producing each successor
+   *    proposal — off this transaction (DT-2), nothing auto-approved (SL-6.3).
+   *
    * SL-4 and SL-5 run on the **same** breaking diff in the **one** transaction and are
    * consistent (SL-5.6): a rule can pause for a stale mapping (SL-4), an unconfirmed ref
    * (SL-5), or both; SL-5 never un-stales an SL-4 mapping and never writes a rule status.
@@ -397,6 +417,9 @@ export class SpecRegistry {
 
     const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
     const staleMappings: ApprovedMapping[] = [];
+    // SL-6 — one re-review descriptor per stale mapping (its id + the affected resource
+    // pairs), collected in this same transaction to record the scoped re-review job below.
+    const reReviewDescriptors: ReReviewStaleMappingScope[] = [];
     // SL-5.2 — peer-peer mappings whose SOURCE was the changed spec: their `SyncRule`s pin a
     // source `pollOperationRef` we must re-validate (stale AND re-pinned alike — the poll-op
     // safety net is independent of mapping-staleness, so a stale rule can pause for both).
@@ -413,6 +436,18 @@ export class SpecRegistry {
         await tx.approvedMappings.markStale(mapping.id);
         await tx.audit.insert(staleAuditEntry(mapping, supersededSpec, newSpec, now));
         staleMappings.push(mapping);
+        // SL-6.1 — the resource pairs the break actually touched, for the scoped
+        // detail-only re-review (computed here from the one classification — SL-1.6).
+        reReviewDescriptors.push({
+          staleMappingId: mapping.id,
+          affectedPairs: computeReReviewAffectedPairs(
+            mapping,
+            supersededSpec.id,
+            fields,
+            operations,
+            affected,
+          ),
+        });
       } else {
         // SL-4.1 — references no changed element → advance exactly as the additive case.
         await this.#repinMapping(mapping, supersededSpec, newSpec, tx, now);
@@ -439,6 +474,22 @@ export class SpecRegistry {
     // SL-4.6 — coupled cache drop (XI-2) + graph recompute (GR-2/GR-3) for the stale set,
     // AFTER the stale status is written so the graph aggregate reads the paused/stale state.
     await this.#reactToStaleTransitions(staleMappings, tx);
+
+    // SL-6.1 — record (in this same transaction) the intent to run the scoped **re-review**
+    // analysis for every stale mapping: one `mapping_detection_job` carrying the `re-review`
+    // {@link DetectionJobScope}. The slow detail-only LLM work runs later in the worker, off
+    // this advance transaction (DT-2), producing each stale mapping's successor proposal for
+    // ordinary Phase-3 re-review — nothing auto-approved (SL-6.3). No stale mapping → no job.
+    // `enqueueScoped` is idempotent under the same per-spec partial-unique index as the full
+    // enqueue, so a redelivered advance produces the successor proposals once (SL-6.6).
+    if (reReviewDescriptors.length > 0) {
+      const scope: ReReviewScope = {
+        kind: "re-review",
+        supersededSpecId: supersededSpec.id,
+        staleMappings: reReviewDescriptors,
+      };
+      await tx.detectionJobs.enqueueScoped(newSpec.id, scope);
+    }
 
     return updatedNewSpec;
   }
@@ -891,6 +942,71 @@ export function mappingReferencesChangedElement(
     if (affected.operations.has(operationPrefixOfParamRef(paramRef))) return true;
   }
   return false;
+}
+
+/**
+ * **SL-6.1 — the affected resource pairs of a `stale` mapping**: the resource pairs the
+ * breaking change actually touched, each of which the scoped re-review re-analyzes with a
+ * detail-only call (no shortlist). Pure. Groups the mapping's approved
+ * `FieldMapping`/`OperationMapping` children into their **proposal-oriented** resource pairs
+ * (`source-spec resource → target-spec resource`, applying the same response-phase inversion
+ * as {@link mappingChangedSideRefs} — a consumer-provider response field's `sourcePath` is
+ * the target-spec field), then keeps a pair when *that pair's* refs reference a changed
+ * element ({@link mappingReferencesChangedElement}) — the exact predicate that made the
+ * mapping stale, re-applied at pair granularity.
+ *
+ * The mapping is only reached here because it references a changed element, so at least one
+ * group matches; the empty fallback (return **every** pair) is belt-and-suspenders so a
+ * stale mapping's re-review is never scoped down to nothing (SL-6.5). Carries only
+ * version-stable `resourceRef`s — never IR payload, never a secret.
+ */
+export function computeReReviewAffectedPairs(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
+  supersededSpecId: string,
+  fields: readonly FieldMapping[],
+  operations: readonly OperationMapping[],
+  affected: BreakingAffectedKeys,
+): ReReviewResourcePair[] {
+  interface Group {
+    readonly pair: ReReviewResourcePair;
+    readonly fields: FieldMapping[];
+    readonly operations: OperationMapping[];
+  }
+  const groups = new Map<string, Group>();
+  const bucket = (sourceResource: string, targetResource: string): Group => {
+    // A JSON tuple is a collision-free key (never a NUL byte).
+    const key = JSON.stringify([sourceResource, targetResource]);
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { pair: { sourceResource, targetResource }, fields: [], operations: [] };
+      groups.set(key, group);
+    }
+    return group;
+  };
+
+  for (const field of fields) {
+    // Response-phase (consumer-provider) fields invert source/target — see mappingChangedSideRefs.
+    const inverted = field.phase === "response";
+    const sourceResource = resourceOfRef(inverted ? field.targetPath : field.sourcePath);
+    const targetResource = resourceOfRef(inverted ? field.sourcePath : field.targetPath);
+    bucket(sourceResource, targetResource).fields.push(field);
+  }
+  for (const operation of operations) {
+    bucket(
+      resourceOfRef(operation.sourceOperationRef),
+      resourceOfRef(operation.targetOperationRef),
+    ).operations.push(operation);
+  }
+
+  const affectedPairs: ReReviewResourcePair[] = [];
+  for (const group of groups.values()) {
+    const refs = mappingChangedSideRefs(mapping, supersededSpecId, group.fields, group.operations);
+    if (mappingReferencesChangedElement(refs, affected)) {
+      affectedPairs.push(group.pair);
+    }
+  }
+  // A stale mapping always has ≥1 affected pair; fall back to all pairs if not (SL-6.5).
+  return affectedPairs.length > 0 ? affectedPairs : [...groups.values()].map((group) => group.pair);
 }
 
 /** The `resourceRef/operationId` form of an operation change location (mirrors the approval serializer). */

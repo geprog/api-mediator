@@ -47,6 +47,15 @@ export const approvedMappingSchema = z
     // between the same two spec lineages once both are approved. The refinement
     // below makes a present value on a consumer-provider mapping unrepresentable.
     counterpartMappingId: z.string().nullable().optional(),
+    // SL-6/SL-7 — the `stale` predecessor this mapping is the **successor** of, set
+    // when its re-review proposal (`MappingProposal.reReviewOf`) is approved; absent
+    // on every ordinary mapping. Applies to **both** variants (a breaking change
+    // stales peer-peer and consumer-provider mappings alike), so — unlike
+    // `counterpartMappingId` — it carries no variant refinement. It is the durable
+    // link SL-7 adoption reads both ways (successor → predecessor here; predecessor
+    // → successor by looking a mapping up by this field). See `docs/glossary.md`
+    // `Successor mapping`.
+    predecessorMappingId: z.string().nullable().optional(),
   })
   .superRefine((mapping, ctx) => {
     if (mapping.variant === "consumer-provider" && mapping.counterpartMappingId !== undefined) {
