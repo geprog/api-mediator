@@ -438,4 +438,59 @@ describe("Phase-3 approval persistence integration (requires Postgres)", () => {
     await db.delete(approvedMapping).where(eq(approvedMapping.id, doomedId));
     expect(await new MappingArtifactsRepository(db).listFieldMappings(doomedId)).toStrictEqual([]);
   });
+
+  // ── SL-10 — the manual suspend / resume transitions ────────────────────────
+
+  it("suspends and resumes a mapping as a compare-and-set on the expected prior status (SL-10)", async () => {
+    const repo = new ApprovedMappingRepository(db);
+    // Its own directional pair (`thirdSpecId → targetSpecId`, claimed by no other row here),
+    // so the partial active-direction unique index is free.
+    const heldId = randomUUID();
+    const held: ApprovedMapping = {
+      ...mainMapping,
+      id: heldId,
+      sourceSpecId: thirdSpecId,
+      targetSpecId,
+      counterpartMappingId: null,
+    };
+    await tx(db, (txn) => new ApprovedMappingRepository(txn).insert(held));
+
+    // SL-10.1 — `active → suspended`, and ONLY `status` moves.
+    const suspended = await repo.markSuspended(heldId);
+    expect(suspended?.status).toBe("suspended");
+    expect(suspended?.sourceSpecId).toBe(thirdSpecId);
+    expect(suspended?.targetSpecId).toBe(targetSpecId);
+    expect(suspended?.approvedBy).toBe(held.approvedBy);
+
+    // The compare-and-set guard: suspending a non-`active` row matches nothing.
+    expect(await repo.markSuspended(heldId)).toBeUndefined();
+    expect((await repo.getById(heldId))?.status).toBe("suspended");
+
+    // SL-10.5 — the suspended row is what the breaking classification reads.
+    const suspendedForSpec = await repo.listSuspendedBySpecId(thirdSpecId);
+    expect(suspendedForSpec.map((row) => row.id)).toContain(heldId);
+    // ...and it is NOT in the active set the additive re-pin advances.
+    expect((await repo.listActiveBySpecId(thirdSpecId)).map((row) => row.id)).not.toContain(heldId);
+
+    // SL-10.2 — `suspended → active`, the exact inverse.
+    expect((await repo.markActive(heldId))?.status).toBe("active");
+    // Resume is valid only from `suspended` — an already-active row matches nothing.
+    expect(await repo.markActive(heldId)).toBeUndefined();
+
+    // SL-10.5 — `markStale` reaches `stale` from `suspended` too (the more-blocking wins),
+    // after which resume no longer applies.
+    await repo.markSuspended(heldId);
+    expect((await repo.markStale(heldId))?.status).toBe("stale");
+    expect(await repo.markActive(heldId)).toBeUndefined();
+    expect((await repo.getById(heldId))?.status).toBe("stale");
+
+    await db.delete(approvedMapping).where(eq(approvedMapping.id, heldId));
+  });
+
+  it("lists every ApprovedMapping for the SL-10 operator read surface", async () => {
+    const all = await new ApprovedMappingRepository(db).listAll();
+    expect(all.map((row) => row.id)).toContain(mappingId);
+    // Metadata rows only — the reviewed children are read separately.
+    expect(all.every((row) => typeof row.status === "string")).toBe(true);
+  });
 });

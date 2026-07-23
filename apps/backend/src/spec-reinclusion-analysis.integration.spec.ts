@@ -236,6 +236,13 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
         listActiveBySpecId: unused("approvedMappings"),
         repinSpecs: unused("approvedMappings"),
         markStale: unused("approvedMappings"),
+        // SL-10's suspension ports: rejecting here too, so AC3 (re-inclusion is
+        // analysis-only) stays structurally enforced -- touching any of them fails the tx.
+        getById: unused("approvedMappings"),
+        getActiveByDirectionalSpecPair: unused("approvedMappings"),
+        markSuspended: unused("approvedMappings"),
+        markActive: unused("approvedMappings"),
+        listSuspendedBySpecId: unused("approvedMappings"),
       },
       mappingArtifacts: {
         listFieldMappings: unused("mappingArtifacts"),

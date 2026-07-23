@@ -118,7 +118,12 @@ class FakeUnitOfWork implements UnitOfWork {
       },
       credentialStore: { store: (): Promise<never> => Promise.reject(new Error("unused")) },
       approvedMappings: {
+        getById: (): Promise<undefined> => Promise.resolve(undefined),
+        getActiveByDirectionalSpecPair: (): Promise<undefined> => Promise.resolve(undefined),
+        markSuspended: (): Promise<undefined> => Promise.resolve(undefined),
+        markActive: (): Promise<undefined> => Promise.resolve(undefined),
         listActiveBySpecId: (): Promise<never[]> => Promise.resolve([]),
+        listSuspendedBySpecId: (): Promise<never[]> => Promise.resolve([]),
         repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
         markStale: (): Promise<undefined> => Promise.resolve(undefined),
       },

@@ -1105,6 +1105,87 @@ describe("SpecRegistry.ingestNewVersion breaking reaction (SL-4)", () => {
     expect(store.cacheInvalidations).toEqual(["endpoint-consumer"]);
   });
 
+  // ── SL-10.5 — a manual hold never makes the breaking diff skip a mapping ──
+
+  it("stales a SUSPENDED mapping referencing the changed element (suspended → stale, SL-10.5)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // A manually suspended mapping that references the changed `issues.title`.
+    const suspended: ApprovedMapping = {
+      ...peerPeer("m-suspended", v1.id, PEER_SPEC_B, PEER_APP_B),
+      status: "suspended",
+    };
+    store.approvedMappings.set(suspended.id, suspended);
+    seedFieldMapping(store, "m-suspended", "issues/title", "issues/title");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+
+    // The two conditions are independent: suspension did not stop the diff classifying it,
+    // and the more-blocking `stale` wins. It reaches `active` only through re-review now —
+    // resume no longer applies (a single `status` enum, not two coexisting markers).
+    const marked = store.approvedMappings.get("m-suspended");
+    expect(marked?.status).toBe("stale");
+    // SL-4.3 — still pinned to the version it was reviewed against.
+    expect(marked?.sourceSpecId).toBe(v1.id);
+  });
+
+  it("records the re-review successor job for a suspended-then-stale mapping (SL-10.5 / SL-6.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    store.approvedMappings.set("m-suspended", {
+      ...peerPeer("m-suspended", v1.id, PEER_SPEC_B, PEER_APP_B),
+      status: "suspended",
+    });
+    seedFieldMapping(store, "m-suspended", "issues/title", "issues/title");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // A suspended mapping that goes stale gets its successor proposal like any other (SL-6.1).
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+    const job = store.scopedDetectionJobs[0];
+    if (job?.scope.kind !== "re-review") throw new Error("expected a re-review scope");
+    expect(job.scope.staleMappings.map((entry) => entry.staleMappingId)).toEqual(["m-suspended"]);
+  });
+
+  it("leaves an UNAFFECTED suspended mapping suspended and pinned (SL-10.5)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // Suspended, and references only an unchanged resource.
+    store.approvedMappings.set("m-labels", {
+      ...peerPeer("m-labels", v1.id, PEER_SPEC_C, PEER_APP_C),
+      status: "suspended",
+    });
+    seedFieldMapping(store, "m-labels", "labels/name", "labels/name");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+
+    // The hold is untouched — the breaking flow never lifts a suspension. Like a stale
+    // mapping it stays pinned; re-pinning is defined for `active` mappings only.
+    const untouched = store.approvedMappings.get("m-labels");
+    expect(untouched?.status).toBe("suspended");
+    expect(untouched?.sourceSpecId).toBe(v1.id);
+  });
+
   // ── SL-6 — the scoped re-review trigger wired into the breaking branch ──
   it("records ONE re-review job carrying a descriptor per stale mapping, in the breaking tx (SL-6.1)", async () => {
     const store = new InMemoryStore();

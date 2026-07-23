@@ -133,8 +133,32 @@ export interface CredentialTxStore {
  * element). Deliberately narrow — neither reaction touches mapping content.
  */
 export interface ApprovedMappingTxRepo {
+  /** One mapping by id — the SL-10 transition's existence + status guard. */
+  getById(id: string): Promise<ApprovedMapping | undefined>;
+  /**
+   * SL-10.2 — the single `active` mapping of a directional spec pair, if any. Resume
+   * re-claims that slot (the partial `approved_mapping_active_direction_uq` index admits
+   * one), so it must first see whether another mapping took it during the hold.
+   */
+  getActiveByDirectionalSpecPair(
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined>;
+  /** SL-10.1 — compare-and-set `active → suspended`; `undefined` when the row was not `active`. */
+  markSuspended(id: string): Promise<ApprovedMapping | undefined>;
+  /** SL-10.2 — compare-and-set `suspended → active`; `undefined` when the row was not `suspended`. */
+  markActive(id: string): Promise<ApprovedMapping | undefined>;
   /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
   listActiveBySpecId(specId: string): Promise<ApprovedMapping[]>;
+  /**
+   * SL-10.5 — the `suspended` mappings pinned to `specId` on either side. The **breaking**
+   * reaction classifies these alongside the `active` set: a manual operator hold does not
+   * stop a `SpecDiff` from classifying the mapping, so a suspended mapping referencing a
+   * changed element still goes `stale` (`suspended → stale`). The *additive* reaction does
+   * not read them — it only re-pins `active` mappings (`docs/architecture/data-model.md`
+   * `ApprovedMapping.sourceSpecId`).
+   */
+  listSuspendedBySpecId(specId: string): Promise<ApprovedMapping[]>;
   /** SL-2.1/2.2 — re-pin a mapping's spec ids only; every other column is untouched. */
   repinSpecs(
     id: string,
@@ -143,7 +167,8 @@ export interface ApprovedMappingTxRepo {
   ): Promise<ApprovedMapping | undefined>;
   /**
    * SL-4.1/4.2/4.3 — set **only** `status = "stale"`; the pinned spec ids (stays on the
-   * reviewed/superseded version), the counterpart, and the children are untouched.
+   * reviewed/superseded version), the counterpart, and the children are untouched. Reached
+   * from `active` and — SL-10.5 — from `suspended` (the more-blocking condition wins).
    */
   markStale(id: string): Promise<ApprovedMapping | undefined>;
 }

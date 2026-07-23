@@ -376,12 +376,74 @@ class FakeCredentialStore implements CredentialTxStore {
 }
 
 /**
+ * A **pg-shaped** unique-constraint violation (SQLSTATE `23505`) — the exact error shape
+ * `node-postgres` raises, so a fake that hits a mirrored partial-unique index exercises the
+ * production error-detection path rather than a test-only sentinel.
+ */
+function uniqueViolation(constraint: string): Error & { code: string; constraint: string } {
+  return Object.assign(
+    new Error(`duplicate key value violates unique constraint "${constraint}"`),
+    { code: "23505", constraint },
+  );
+}
+
+/**
  * Mirrors {@link ApprovedMappingRepository}'s SL-2 methods: the `active` mappings pinned
- * to a spec id (either side), and a spec-ids-only re-pin that leaves every other column
- * byte-identical.
+ * to a spec id (either side), the `suspended` ones the SL-10.5 breaking classification also
+ * reads, a spec-ids-only re-pin that leaves every other column byte-identical, and the
+ * SL-10 status transitions — including their compare-and-set guards and the
+ * `approved_mapping_active_direction_uq` partial-unique index resume re-claims.
  */
 class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
   public constructor(private readonly store: InMemoryStore) {}
+  public getById(id: string): Promise<ApprovedMapping | undefined> {
+    return Promise.resolve(this.store.approvedMappings.get(id));
+  }
+  public getActiveByDirectionalSpecPair(
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined> {
+    // Mirrors the real query: the partial-unique index guarantees at most one `active` row
+    // per directional pair, so the first match is the only one.
+    return Promise.resolve(
+      [...this.store.approvedMappings.values()].find(
+        (mapping) =>
+          mapping.status === "active" &&
+          mapping.sourceSpecId === sourceSpecId &&
+          mapping.targetSpecId === targetSpecId,
+      ),
+    );
+  }
+  /** Mirrors the real compare-and-set: no row matches unless it is currently `active`. */
+  public markSuspended(id: string): Promise<ApprovedMapping | undefined> {
+    const existing = this.store.approvedMappings.get(id);
+    if (existing === undefined || existing.status !== "active") return Promise.resolve(undefined);
+    const updated: ApprovedMapping = { ...existing, status: "suspended" };
+    this.store.approvedMappings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+  /** Mirrors the real compare-and-set: no row matches unless it is currently `suspended`. */
+  public markActive(id: string): Promise<ApprovedMapping | undefined> {
+    const existing = this.store.approvedMappings.get(id);
+    if (existing === undefined || existing.status !== "suspended") {
+      return Promise.resolve(undefined);
+    }
+    // Mirrors `approved_mapping_active_direction_uq`: at most one `active` row per
+    // directional pair, so re-claiming an occupied slot throws exactly as Postgres would.
+    const incumbent = [...this.store.approvedMappings.values()].find(
+      (mapping) =>
+        mapping.id !== id &&
+        mapping.status === "active" &&
+        mapping.sourceSpecId === existing.sourceSpecId &&
+        mapping.targetSpecId === existing.targetSpecId,
+    );
+    if (incumbent !== undefined) {
+      return Promise.reject(uniqueViolation("approved_mapping_active_direction_uq"));
+    }
+    const updated: ApprovedMapping = { ...existing, status: "active" };
+    this.store.approvedMappings.set(id, updated);
+    return Promise.resolve(updated);
+  }
   public listActiveBySpecId(specId: string): Promise<ApprovedMapping[]> {
     return Promise.resolve(
       [...this.store.approvedMappings.values()].filter(
@@ -403,11 +465,21 @@ class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);
   }
+  public listSuspendedBySpecId(specId: string): Promise<ApprovedMapping[]> {
+    return Promise.resolve(
+      [...this.store.approvedMappings.values()].filter(
+        (mapping) =>
+          mapping.status === "suspended" &&
+          (mapping.sourceSpecId === specId || mapping.targetSpecId === specId),
+      ),
+    );
+  }
   public markStale(id: string): Promise<ApprovedMapping | undefined> {
     const existing = this.store.approvedMappings.get(id);
     if (existing === undefined) return Promise.resolve(undefined);
     // Only `status` changes — the pinned spec ids, counterpart, and children are untouched
     // (SL-4.2/4.3: a stale mapping stays pinned to its reviewed/superseded version).
+    // Reached from `active` and — SL-10.5 — from `suspended`; the real repo guards neither.
     const updated: ApprovedMapping = { ...existing, status: "stale" };
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);

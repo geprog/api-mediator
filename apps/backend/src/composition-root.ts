@@ -4,6 +4,7 @@ import type { AppConfig } from "@mediator/config";
 import { EnvKeyProvider, type CredentialStoreLogger } from "@mediator/credentials";
 import {
   ApiSpecRepository,
+  ApprovedMappingRepository,
   MappingProposalRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
@@ -25,6 +26,7 @@ import {
 import { DbAdapterRequestHistoryReader, DbAdapterStateReader } from "./modules/adapter-state.js";
 import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
+import { ApprovedMappingSuspensionService } from "./modules/approved-mapping-suspension.js";
 import {
   ApprovalService,
   DbApprovalUnitOfWork,
@@ -237,6 +239,19 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
       graphProjection,
       ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
     }),
+    // Phase-6 SL-10 — the manual `ApprovedMapping` hold: `active → suspended` and back.
+    // Wired with the SAME shared seams the SL-4 stale transition uses, so a suspend/resume
+    // drops the affected endpoints' cached entries (XI-2/CH-5.3) and recomputes the affected
+    // `GraphEdge`s (GR-2/GR-3) — neither cache nor graph may mask a suspended relationship.
+    approvedMappingSuspension: new ApprovedMappingSuspensionService({
+      // The SAME `TxStores` seam the Spec Registry runs on, so the resume catch-up reuses
+      // SL-2's re-pin and SL-4/SL-6's mark-stale + re-review paths verbatim.
+      unitOfWork,
+      newId: randomUUID,
+      ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
+    }),
+    // The SL-10 read surface behind `GET /api/approved-mappings` (metadata only).
+    approvedMappingReader: new ApprovedMappingRepository(db),
     // Phase-5 adapter read surface (AP-1 state, AP-5 history + health): pooled, read-only,
     // metadata only. `DbAdapterStateReader` composes the composition/mapping/app/spec repos
     // behind the AP-1/AP-5.3 derivation; `DbAdapterRequestHistoryReader` reads the

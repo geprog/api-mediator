@@ -361,7 +361,9 @@ export class SpecRegistry {
    * audit rows, and graph recompute commit atomically with the advance.
    *
    * 1. **Precise mark-stale (SL-4.1) — the load-bearing invariant.** For every `active`
-   *    `ApprovedMapping` pinned to the now-`superseded` version, match its **referenced
+   *    **and** (SL-10.5) every `suspended` `ApprovedMapping` pinned to the now-`superseded`
+   *    version — a manual operator hold is independent of spec-driven staleness, so it never
+   *    makes the diff skip a mapping — match its **referenced
    *    elements on the changed side** ({@link mappingChangedSideRefs} — the side that
    *    pinned the superseded spec) against the diff's **breaking** change locations
    *    ({@link computeBreakingAffectedKeys}). A mapping that references a changed element
@@ -373,7 +375,11 @@ export class SpecRegistry {
    *    reference prefers `stale` (a false-stale is re-reviewable; a false-active silently
    *    serves a shape that changed).
    * 2. **Staleness lives on the mapping (SL-4.2/4.3).** {@link markStale} sets **only**
-   *    `status`; a stale mapping **stays pinned** to its reviewed (superseded) version
+   *    `status` — from `active`, and (SL-10.5) from `suspended`, where the more-blocking
+   *    `stale` wins and only re-review returns the mapping to `active` (resume no longer
+   *    applies). An unaffected `suspended` mapping keeps its hold and, like a stale one,
+   *    stays pinned; only `active` mappings are re-pinned. A stale mapping **stays pinned**
+   *    to its reviewed (superseded) version
    *    (re-review — SL-6 — produces its successor against the new version). Its derived
    *    `SyncRule`s/`AdapterBinding`s keep their own `status`; the rule pauses and the
    *    binding fails `mapping-stale` as **derived** conditions (nothing writes a rule/
@@ -415,7 +421,17 @@ export class SpecRegistry {
     const now = new Date();
     const affected = computeBreakingAffectedKeys(diff);
 
-    const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    // SL-10.5 — the breaking diff classifies `suspended` mappings alongside `active` ones: a
+    // manual operator hold is independent of spec-driven staleness, so it never makes the
+    // diff skip the mapping. A suspended mapping that references a changed element goes
+    // `suspended → stale` below (the more-blocking condition wins — it then needs re-review
+    // to reach `active`, and resume no longer applies); one that references nothing changed
+    // stays `suspended` and — like a `stale` mapping — stays pinned to the version it was
+    // reviewed against (only `active` mappings are re-pinned, data-model
+    // `ApprovedMapping.sourceSpecId`).
+    const activeMappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    const suspendedMappings = await tx.approvedMappings.listSuspendedBySpecId(supersededSpec.id);
+    const mappings = [...activeMappings, ...suspendedMappings];
     const staleMappings: ApprovedMapping[] = [];
     // SL-6 — one re-review descriptor per stale mapping (its id + the affected resource
     // pairs), collected in this same transaction to record the scoped re-review job below.
@@ -427,11 +443,18 @@ export class SpecRegistry {
     for (const mapping of mappings) {
       const fields = await tx.mappingArtifacts.listFieldMappings(mapping.id);
       const operations = await tx.mappingArtifacts.listOperationMappings(mapping.id);
-      const refs = mappingChangedSideRefs(mapping, supersededSpec.id, fields, operations);
       if (mapping.variant === "peer-peer" && mapping.sourceSpecId === supersededSpec.id) {
         changedSourceMappings.push(mapping);
       }
-      if (mappingReferencesChangedElement(refs, affected)) {
+      // The ONE per-mapping verdict, shared verbatim with the SL-10.2 resume catch-up.
+      const verdict = classifyMappingAgainstBreaking(
+        mapping,
+        supersededSpec.id,
+        fields,
+        operations,
+        affected,
+      );
+      if (verdict.staled) {
         // SL-4.1/4.2/4.3 — stale, and STAYS pinned to the reviewed (superseded) version.
         await tx.approvedMappings.markStale(mapping.id);
         await tx.audit.insert(staleAuditEntry(mapping, supersededSpec, newSpec, now));
@@ -440,18 +463,15 @@ export class SpecRegistry {
         // detail-only re-review (computed here from the one classification — SL-1.6).
         reReviewDescriptors.push({
           staleMappingId: mapping.id,
-          affectedPairs: computeReReviewAffectedPairs(
-            mapping,
-            supersededSpec.id,
-            fields,
-            operations,
-            affected,
-          ),
+          affectedPairs: [...verdict.affectedPairs],
         });
-      } else {
+      } else if (mapping.status === "active") {
         // SL-4.1 — references no changed element → advance exactly as the additive case.
         await this.#repinMapping(mapping, supersededSpec, newSpec, tx, now);
       }
+      // SL-10.5 — an unaffected `suspended` mapping is left untouched: it keeps its hold and,
+      // like a `stale` one, stays pinned to the version it was reviewed against. Re-pinning is
+      // defined for `active` mappings only (data-model `ApprovedMapping.sourceSpecId`).
     }
 
     // SL-2.4 exclusions + SL-5.1 re-validated (retain-unconfirmed) binding carry-forward.
@@ -960,6 +980,49 @@ export function mappingReferencesChangedElement(
  * stale mapping's re-review is never scoped down to nothing (SL-6.5). Carries only
  * version-stable `resourceRef`s — never IR payload, never a secret.
  */
+/**
+ * **The per-mapping breaking verdict (SL-4.1 + SL-6.1) — one classification, two callers.**
+ * Composes the three matching primitives into the single decision both the Spec Registry's
+ * {@link SpecRegistry.applyBreakingReaction} (at advance time) and the SL-10.2 **resume
+ * catch-up** (at resume time, for a mapping whose hold spanned the advance) make: does this
+ * mapping reference an element the breaking diff invalidated, and if so which resource pairs
+ * does the scoped re-review cover?
+ *
+ * Extracted so the two paths can never drift — a mapping held through a breaking advance is
+ * classified by the **same** rule as one that was active for it, so a hold defers the
+ * reaction without changing its outcome. Pure.
+ */
+export interface MappingBreakingVerdict {
+  /** The mapping references a changed element → it goes `stale` and awaits re-review. */
+  readonly staled: boolean;
+  /** SL-6.1 — the resource pairs the break touched (empty unless `staled`). */
+  readonly affectedPairs: readonly ReReviewResourcePair[];
+}
+
+/** {@link MappingBreakingVerdict} for `mapping` against a breaking diff on `changedSpecId`. Pure. */
+export function classifyMappingAgainstBreaking(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId" | "variant">,
+  changedSpecId: string,
+  fields: readonly FieldMapping[],
+  operations: readonly OperationMapping[],
+  affected: BreakingAffectedKeys,
+): MappingBreakingVerdict {
+  const refs = mappingChangedSideRefs(mapping, changedSpecId, fields, operations);
+  if (!mappingReferencesChangedElement(refs, affected)) {
+    return { staled: false, affectedPairs: [] };
+  }
+  return {
+    staled: true,
+    affectedPairs: computeReReviewAffectedPairs(
+      mapping,
+      changedSpecId,
+      fields,
+      operations,
+      affected,
+    ),
+  };
+}
+
 export function computeReReviewAffectedPairs(
   mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
   supersededSpecId: string,
@@ -1265,7 +1328,7 @@ export function pollOperationResolves(pollOperationRef: string, ir: Ir): boolean
  * one is a schema migration this deterministic slice deliberately avoids. `details` is
  * metadata only — the side that advanced and the spec ids/version — never a secret.
  */
-function repinAuditEntry(
+export function repinAuditEntry(
   mapping: ApprovedMapping,
   supersededSpec: ApiSpec,
   newSpec: ApiSpec,
@@ -1289,7 +1352,7 @@ function repinAuditEntry(
  * slice): the side whose spec broke and the superseded/new spec ids, never a secret. Makes
  * the stale transition queryable in the audit log alongside the re-pins (SL-4.5).
  */
-function staleAuditEntry(
+export function staleAuditEntry(
   mapping: ApprovedMapping,
   supersededSpec: ApiSpec,
   newSpec: ApiSpec,

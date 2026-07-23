@@ -4,6 +4,7 @@ import { installAuthentication, type AuthProvider } from "../auth/index.js";
 import { registerAdapterEndpointRoutes } from "./adapter-endpoints.routes.js";
 import { registerAdapterRequestRoutes } from "./adapter-requests.routes.js";
 import { registerAdapterTokenRoutes } from "./adapter-token.routes.js";
+import { registerApprovedMappingRoutes } from "./approved-mappings.routes.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
@@ -55,6 +56,12 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
   registerMappingProposalRoutes(app, deps);
+  // Phase-6 SL-10 — manual suspend/resume of an `ApprovedMapping` + the read surface the
+  // control needs. Mounted whenever both the suspension service (mutations) and the reader
+  // (list) are wired; the in-memory unit harness omits them, exactly like the adapter surface.
+  if (deps.approvedMappingSuspension !== undefined && deps.approvedMappingReader !== undefined) {
+    registerApprovedMappingRoutes(app, deps.approvedMappingSuspension, deps.approvedMappingReader);
+  }
   // Phase-4 Sync HTTP API (SA-1..SA-5). Mounted only when the Sync Engine runtime
   // is wired in (the real composition root always provides `deps.sync`; the
   // in-memory unit harness omits it, so its sync routes are simply not registered).
