@@ -131,12 +131,20 @@ class FakeUnitOfWork implements UnitOfWork {
       },
       downstreamArtifacts: {
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+        listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
         recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
       },
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
+      // SL-5 operational-ref re-validation ports — unused by the SS-19 confirm path here.
+      syncRules: { clearPollOperationRef: (): Promise<void> => Promise.resolve() },
+      scopeCorrespondences: { listByResourceSide: (): Promise<never[]> => Promise.resolve([]) },
+      scopeLifecycle: {
+        revalidateSpecBindings: () => Promise.reject(new Error("unused")),
+        revalidateCorrespondence: () => Promise.reject(new Error("unused")),
+      },
       emit: (): Promise<void> => Promise.resolve(),
     } satisfies TxStores;
     return work(stores);

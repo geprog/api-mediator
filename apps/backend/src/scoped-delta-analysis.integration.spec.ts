@@ -257,12 +257,21 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
       },
       downstreamArtifacts: {
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+        listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
         recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
       },
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
+      // SL-5 operational-ref re-validation ports — this SL-3 additive spec never reaches the
+      // breaking branch, so `scopeLifecycle` is never invoked (a rejecting guard proves it).
+      syncRules: { clearPollOperationRef: (): Promise<void> => Promise.resolve() },
+      scopeCorrespondences: { listByResourceSide: (): Promise<never[]> => Promise.resolve([]) },
+      scopeLifecycle: {
+        revalidateSpecBindings: () => Promise.reject(new Error("unused on the additive path")),
+        revalidateCorrespondence: () => Promise.reject(new Error("unused on the additive path")),
+      },
       emit: () => Promise.reject(new Error("advance must not emit")),
     };
   }

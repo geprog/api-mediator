@@ -4,8 +4,12 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  DownstreamArtifactRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
+  SyncRuleRepository,
   apiSpec,
   closeDb,
   createDb,
@@ -22,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { CredentialTxStore, TxStores } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
+import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
 import { providerSpecDocument } from "./testing/sample-specs.testkit.js";
 
 /**
@@ -127,14 +132,21 @@ suite("SL-1 SpecRegistry.ingestNewVersion (requires Postgres)", () => {
         listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
         listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
       },
-      downstreamArtifacts: {
-        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
-      },
+      downstreamArtifacts: new DownstreamArtifactRepository(handle),
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
         recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
       },
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
+      // SL-5 operational-ref re-validation ports (real repos); these SL-1 fixtures seed no
+      // bindings/rules/correspondences, so a breaking advance finds nothing to re-validate.
+      syncRules: new SyncRuleRepository(handle),
+      scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+      scopeLifecycle: new ScopeLifecycleService({
+        resourceBindings: new ResourceBindingRepository(handle),
+        scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+        scopeLinks: new ScopeLinkRepository(handle),
+      }),
       emit: () =>
         Promise.reject(new Error("ingestNewVersion must not emit SpecIngested on advance")),
     };

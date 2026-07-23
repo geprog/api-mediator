@@ -17,6 +17,9 @@ import {
   MappingArtifactsRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
+  SyncRuleRepository,
   tx,
 } from "@mediator/db";
 import type { KeyProvider } from "@mediator/credentials";
@@ -31,12 +34,21 @@ import type {
   AuditLogEntry,
   DomainEventEnvelope,
   FieldMapping,
+  Ir,
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
+  ScopeCorrespondence,
+  SyncRule,
 } from "@mediator/domain";
+import type { ScopeCorrespondenceSide } from "@mediator/ir";
 
 import { GraphProjection } from "./graph/index.js";
+import type {
+  CorrespondenceRevalidationResult,
+  SpecScopeRevalidationResult,
+} from "./sync/scope-lifecycle.js";
+import { ScopeLifecycleService } from "./sync/scope-lifecycle.js";
 
 /**
  * The persistence seam for the registration API slice.
@@ -150,10 +162,51 @@ export interface MappingArtifactsTxReader {
  * SL-4.6 / XI-2 — the downstream adapter artifacts a stale consumer-provider mapping
  * derived, read so the coupled cache drop can target **every** `AdapterEndpoint` whose
  * binding's mapping went stale. Read-only; the reaction never mutates a binding (its
- * `status` is its own — SL-4.2).
+ * `status` is its own — SL-4.2). SL-5.2 additionally reads a mapping's `SyncRule`s to
+ * re-validate their `pollOperationRef` against the new IR.
  */
 export interface DownstreamArtifactTxReader {
   listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]>;
+  /** SL-5.2 — a mapping's `SyncRule`s, whose pinned source `pollOperationRef` is re-validated. */
+  listSyncRulesByMapping(approvedMappingId: string): Promise<SyncRule[]>;
+}
+
+/**
+ * **SL-5.2 — the `SyncRule` mutation the breaking reaction drives in-tx.** Returning a
+ * rule's `pollOperationRef` to unconfirmed (clearing it) when a spec bump removed/renamed
+ * the pinned source poll operation — the derived pause (SL-5.4). Deliberately narrow: the
+ * reaction never writes a rule `status`, and the *re-confirm* (cursor/snapshot reset) is a
+ * later human action, not part of this transaction.
+ */
+export interface SyncRuleTxRepo {
+  clearPollOperationRef(id: string): Promise<void>;
+}
+
+/**
+ * **SL-5.3 — the reverse lookup from the changed spec's resources to the scoped pairs they
+ * participate in** (`ScopeCorrespondenceRepository.listByResourceSide`), so the breaking
+ * reaction can find every `ScopeCorrespondence` to re-validate. Read-only; the write is the
+ * `ScopeLifecycleService` below.
+ */
+export interface ScopeCorrespondenceSideTxReader {
+  listByResourceSide(appId: string, resourceRef: string): Promise<ScopeCorrespondence[]>;
+}
+
+/**
+ * **SL-5.1/5.3 — the SS-16 scope-artifact re-validation policy, bound to the transaction.**
+ * The breaking reaction calls `revalidateSpecBindings` (returns broken `ResourceBinding`
+ * refs to unconfirmed, retained in place) and `revalidateCorrespondence` (returns a scoped
+ * pair's `ScopeCorrespondence` to unconfirmed and archives — never deletes — its
+ * `ScopeLink`s). The concrete `ScopeLifecycleService` (over tx-bound repos) satisfies this
+ * shape; a unit-test fake supplies a recording double.
+ */
+export interface ScopeRevalidationTxService {
+  revalidateSpecBindings(specId: string, newIr: Ir): Promise<SpecScopeRevalidationResult>;
+  revalidateCorrespondence(
+    correspondence: ScopeCorrespondence,
+    source: ScopeCorrespondenceSide,
+    target: ScopeCorrespondenceSide,
+  ): Promise<CorrespondenceRevalidationResult>;
 }
 
 /**
@@ -222,6 +275,10 @@ export interface TxStores {
   readonly downstreamArtifacts: DownstreamArtifactTxReader;
   readonly graph: GraphEdgeRecompute;
   readonly cacheInvalidator: EndpointCacheInvalidator;
+  // ── SL-5 breaking reaction: re-validate the spec's operational refs to unconfirmed ──
+  readonly syncRules: SyncRuleTxRepo;
+  readonly scopeCorrespondences: ScopeCorrespondenceSideTxReader;
+  readonly scopeLifecycle: ScopeRevalidationTxService;
   emit(event: DomainEventEnvelope): Promise<void>;
 }
 
@@ -295,6 +352,15 @@ export class DbUnitOfWork implements UnitOfWork {
             this.#graphProjection.recomputeAdapterEdgeWithin(txn, consumerAppId, backendAppId),
         },
         cacheInvalidator: this.#cacheInvalidator,
+        // SL-5 — the operational-ref re-validation seams, all bound to this transaction so
+        // the unconfirmed artifacts commit atomically with the stale-mark/re-pin.
+        syncRules: new SyncRuleRepository(txn),
+        scopeCorrespondences: new ScopeCorrespondenceRepository(txn),
+        scopeLifecycle: new ScopeLifecycleService({
+          resourceBindings: new ResourceBindingRepository(txn),
+          scopeCorrespondences: new ScopeCorrespondenceRepository(txn),
+          scopeLinks: new ScopeLinkRepository(txn),
+        }),
         emit: (event) => this.#eventBus.emit(event, txn),
       }),
     );

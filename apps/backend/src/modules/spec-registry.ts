@@ -11,6 +11,7 @@ import type {
   Ir,
   OperationMapping,
   ResourceBinding,
+  ScopeCorrespondence,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
 import { createSpecIngested } from "@mediator/event-bus";
@@ -21,10 +22,12 @@ import {
   diffSpec,
   revalidateResourceBinding,
   type RevalidatableRefName,
+  type ScopeCorrespondenceSide,
   type SpecDiff,
 } from "@mediator/ir";
 
 import type { EndpointCacheInvalidator, TxStores } from "./persistence.js";
+import { parseResourcePairRef } from "./sync/resolution.js";
 
 /**
  * A spec that has already been parsed to its IR + content hash, ready to persist
@@ -201,7 +204,7 @@ export class SpecRegistry {
    *    transaction (DT-2). The delta becomes an **ordinary** `MappingProposal` reviewed
    *    through the Phase-3 flow — nothing is auto-approved (SL-3.3).
    *
-   * 6. **Breaking reaction (SL-4)** — when the diff classifies **breaking**, the
+   * 6. **Breaking reaction (SL-4 + SL-5)** — when the diff classifies **breaking**, the
    *    {@link applyBreakingReaction} runs in this same transaction: **only** the mappings
    *    that reference a changed element go `status = stale` (staying pinned to their
    *    reviewed/superseded version — SL-4.3), every mapping referencing no changed
@@ -209,14 +212,18 @@ export class SpecRegistry {
    *    bindings carry forward, and — coupled — each stale endpoint's cache is dropped
    *    (XI-2) and each affected `GraphEdge` recomputes (GR-2/GR-3). A stale mapping's
    *    `SyncRule`s pause and its `AdapterBinding`s fail `mapping-stale` as derived
-   *    conditions (nothing writes their `status`).
+   *    conditions (nothing writes their `status`). The same breaking diff **re-validates
+   *    the spec's operational refs** (**SL-5**): the carried-forward `ResourceBinding`s are
+   *    re-validated in place (a broken bound ref is RETAINED but returned to unconfirmed —
+   *    the additive path drops, the breaking path retains), a `SyncRule.pollOperationRef`
+   *    pinned to a now-gone source operation is returned to unconfirmed, and each scoped
+   *    resource pair's `ScopeCorrespondence` / `ScopeLink`s are re-validated — every
+   *    consequence a paused rule (a **derived** condition; nothing writes a rule status).
    *
-   * Deliberately **out of scope here** (owned by sibling slices): re-validating the
-   * spec's operational refs — `ResourceBinding`s / `pollOperationRef` / scope artifacts —
-   * back to unconfirmed (**SL-5**), and producing each stale mapping's **successor**
-   * re-review proposal (**SL-6**). **No `SpecIngested` is emitted** on any branch (that
-   * event triggers a *full* detection analysis; the SL-2…SL-6 reactions are the diff's
-   * scoped consumers instead).
+   * Deliberately **out of scope here** (owned by sibling slices): producing each stale
+   * mapping's **successor** re-review proposal (**SL-6**). **No `SpecIngested` is emitted**
+   * on any branch (that event triggers a *full* detection analysis; the SL-2…SL-6 reactions
+   * are the diff's scoped consumers instead).
    */
   public async ingestNewVersion(
     appId: string,
@@ -358,12 +365,24 @@ export class SpecRegistry {
    *    `SyncRule`s/`AdapterBinding`s keep their own `status`; the rule pauses and the
    *    binding fails `mapping-stale` as **derived** conditions (nothing writes a rule/
    *    binding status).
-   * 3. **Advance the rest (SL-4.1).** Unaffected mappings re-pin + audit, and the version's
-   *    `analysisExclusions` + `ResourceBinding`s carry forward — identical to the additive
-   *    case (SL-2). *(Returning a broken bound ref to unconfirmed is SL-5's job, not here.)*
+   * 3. **Advance the rest + re-validate the operational refs (SL-4.1 / SL-5).** Unaffected
+   *    mappings re-pin + audit, and the version's `analysisExclusions` +
+   *    `ResourceBinding`s carry forward — but on the breaking path the bindings carry
+   *    forward **re-validated** ({@link carryForwardVersionArtifactsRevalidated}): a broken
+   *    bound ref is RETAINED and returned to **unconfirmed** (SL-5.1 — vs SL-2's additive
+   *    carry-forward, which DROPS it), pausing the rules that depend on it even when no
+   *    mapping content was affected. Then {@link revalidatePollOperationRefs} returns a
+   *    changed-lineage rule's now-gone `pollOperationRef` to unconfirmed (SL-5.2), and — for
+   *    a PROVIDER spec — {@link revalidateScopeCorrespondences} re-validates each scoped
+   *    pair's `ScopeCorrespondence` / `ScopeLink`s (SL-5.3). Every SL-5 consequence is a
+   *    persisted unconfirmed artifact — a **derived** pause, no rule status written (SL-5.4).
    * 4. **Coupled cache + graph (SL-4.6).** {@link reactToStaleTransitions} drops each
    *    stale endpoint's cache (XI-2) and recomputes each affected `(app pair)` `GraphEdge`
    *    (GR-2/GR-3), so no cache or graph masks the pause.
+   *
+   * SL-4 and SL-5 run on the **same** breaking diff in the **one** transaction and are
+   * consistent (SL-5.6): a rule can pause for a stale mapping (SL-4), an unconfirmed ref
+   * (SL-5), or both; SL-5 never un-stales an SL-4 mapping and never writes a rule status.
    *
    * Returns the new `ApiSpec` reflecting its carried-forward `analysisExclusions`.
    */
@@ -378,10 +397,17 @@ export class SpecRegistry {
 
     const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
     const staleMappings: ApprovedMapping[] = [];
+    // SL-5.2 — peer-peer mappings whose SOURCE was the changed spec: their `SyncRule`s pin a
+    // source `pollOperationRef` we must re-validate (stale AND re-pinned alike — the poll-op
+    // safety net is independent of mapping-staleness, so a stale rule can pause for both).
+    const changedSourceMappings: ApprovedMapping[] = [];
     for (const mapping of mappings) {
       const fields = await tx.mappingArtifacts.listFieldMappings(mapping.id);
       const operations = await tx.mappingArtifacts.listOperationMappings(mapping.id);
       const refs = mappingChangedSideRefs(mapping, supersededSpec.id, fields, operations);
+      if (mapping.variant === "peer-peer" && mapping.sourceSpecId === supersededSpec.id) {
+        changedSourceMappings.push(mapping);
+      }
       if (mappingReferencesChangedElement(refs, affected)) {
         // SL-4.1/4.2/4.3 — stale, and STAYS pinned to the reviewed (superseded) version.
         await tx.approvedMappings.markStale(mapping.id);
@@ -393,7 +419,22 @@ export class SpecRegistry {
       }
     }
 
-    const updatedNewSpec = await this.#carryForwardVersionArtifacts(supersededSpec, newSpec, tx);
+    // SL-2.4 exclusions + SL-5.1 re-validated (retain-unconfirmed) binding carry-forward.
+    const updatedNewSpec = await this.#carryForwardVersionArtifactsRevalidated(
+      supersededSpec,
+      newSpec,
+      tx,
+    );
+
+    // SL-5.2 — pollOperationRef re-validation for the changed lineage's peer-peer rules.
+    await this.#revalidatePollOperationRefs(changedSourceMappings, newSpec.parsedIR, tx);
+
+    // SL-5.3 — ScopeCorrespondence / ScopeLink re-validation for the changed spec's scoped
+    // pairs. Only a PROVIDER spec participates in a `ScopeCorrespondence` (it correlates a
+    // peer-peer sync pair); a CONSUMER advance has none to re-validate.
+    if (newSpec.role === "PROVIDER") {
+      await this.#revalidateScopeCorrespondences(newSpec, tx);
+    }
 
     // SL-4.6 — coupled cache drop (XI-2) + graph recompute (GR-2/GR-3) for the stale set,
     // AFTER the stale status is written so the graph aggregate reads the paused/stale state.
@@ -433,11 +474,7 @@ export class SpecRegistry {
     newSpec: ApiSpec,
     tx: TxStores,
   ): Promise<ApiSpec> {
-    const carriedExclusions = carryForwardAnalysisExclusions(
-      supersededSpec.analysisExclusions,
-      newSpec.parsedIR,
-    );
-    const updated = await tx.apiSpecs.updateAnalysisExclusions(newSpec.id, carriedExclusions);
+    const updated = await this.#carryForwardAnalysisExclusions(supersededSpec, newSpec, tx);
 
     const priorBindings = await tx.resourceBindings.listByApiSpecId(supersededSpec.id);
     const carriedBindings = priorBindings.flatMap((prior) => {
@@ -453,7 +490,182 @@ export class SpecRegistry {
       await tx.resourceBindings.createMany(carriedBindings);
     }
 
+    return updated;
+  }
+
+  /**
+   * **SL-5.1 — the breaking-path binding carry-forward: retain-then-re-validate.** Carries
+   * the version's `analysisExclusions` forward (identical to the additive case) and then
+   * relocates the prior version's `ResourceBinding`s to the new version **verbatim**
+   * ({@link carryForwardResourceBindingVerbatim} — every ref/`sourceScopeRef`/`scopePathBindings`
+   * entry with its confirmation intact, dropping only a binding whose resource GROUP is
+   * gone), before re-validating them **in place** against the new IR via SS-16
+   * `ScopeLifecycleService.revalidateSpecBindings`.
+   *
+   * The difference from {@link carryForwardVersionArtifacts} (SL-2's additive path) is the
+   * whole point of SL-5.1: the additive carry-forward **drops** a ref the new IR no longer
+   * resolves, whereas here re-validation **retains** it and returns it to **unconfirmed** —
+   * so `resolveRecordAddressing` / the enablement gate / the poll-plan resolver refuse it
+   * and the dependent `SyncRule`s pause, even when no mapping content was affected. A truly
+   * additive-shaped ref (still resolving) carries forward confirmed either way.
+   */
+  async #carryForwardVersionArtifactsRevalidated(
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<ApiSpec> {
+    const updated = await this.#carryForwardAnalysisExclusions(supersededSpec, newSpec, tx);
+
+    const priorBindings = await tx.resourceBindings.listByApiSpecId(supersededSpec.id);
+    const carriedBindings = priorBindings.flatMap((prior) => {
+      const carried = carryForwardResourceBindingVerbatim(
+        prior,
+        newSpec.id,
+        randomUUID(),
+        newSpec.parsedIR,
+      );
+      return carried === undefined ? [] : [carried];
+    });
+    if (carriedBindings.length > 0) {
+      await tx.resourceBindings.createMany(carriedBindings);
+    }
+    // SS-16 re-validates the relocated bindings in place: a broken bound ref is returned to
+    // unconfirmed (retained), an unaffected one stays confirmed. Findings are the paused-ref
+    // record; the persistence is the pause.
+    await tx.scopeLifecycle.revalidateSpecBindings(newSpec.id, newSpec.parsedIR);
+
+    return updated;
+  }
+
+  /** SL-2.4 — carry the version's `analysisExclusions` forward (shared by both diff branches). */
+  async #carryForwardAnalysisExclusions(
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<ApiSpec> {
+    const carriedExclusions = carryForwardAnalysisExclusions(
+      supersededSpec.analysisExclusions,
+      newSpec.parsedIR,
+    );
+    const updated = await tx.apiSpecs.updateAnalysisExclusions(newSpec.id, carriedExclusions);
     return updated ?? { ...newSpec, analysisExclusions: carriedExclusions };
+  }
+
+  /**
+   * **SL-5.2 — re-validate `SyncRule.pollOperationRef` for the changed lineage's peer-peer
+   * rules.** `pollOperationRef` pins a **source** operation (the collection read or delta
+   * query the Poller calls) that is typically referenced by no mapping element, so SL-4's
+   * mapping-staleness never catches a change to it — this is its dedicated safety net. For
+   * every rule of a mapping whose SOURCE was the superseded spec, if the pinned poll
+   * operation no longer resolves in the new IR ({@link pollOperationResolves}) it is
+   * returned to **unconfirmed** (cleared), pausing the rule at the runtime backstop exactly
+   * as a broken binding ref does. The cursor/snapshot are untouched here (SL-5.4 is a
+   * derived pause, not a state edit); resetting them is the operator's *re-confirm onto a
+   * different operation* (`SyncRuleRepository.reconfirmPollOperation`, SL-5.2's second half).
+   *
+   * `revalidateSpecBindings` does **not** cover this: it re-validates `ResourceBinding`
+   * refs, and `pollOperationRef` lives on the `SyncRule`, so it needs this own wiring.
+   */
+  async #revalidatePollOperationRefs(
+    changedSourceMappings: readonly ApprovedMapping[],
+    newIr: Ir,
+    tx: TxStores,
+  ): Promise<void> {
+    for (const mapping of changedSourceMappings) {
+      const rules = await tx.downstreamArtifacts.listSyncRulesByMapping(mapping.id);
+      for (const rule of rules) {
+        const ref = rule.pollOperationRef;
+        if (ref === undefined || ref.length === 0) {
+          continue; // already unconfirmed — nothing to return
+        }
+        if (!pollOperationResolves(ref, newIr)) {
+          await tx.syncRules.clearPollOperationRef(rule.id);
+        }
+      }
+    }
+  }
+
+  /**
+   * **SL-5.3 — re-validate every `ScopeCorrespondence` the changed spec participates in.**
+   * For each of the changed spec's resource groups, look up the correspondences it is a side
+   * of ({@link ScopeCorrespondenceSideTxReader.listByResourceSide}), dedupe by id, assemble
+   * both {@link ScopeCorrespondenceSide}s ({@link assembleCorrespondenceSides} — the changed
+   * side reads the new IR + its carried-forward bindings, the counterpart reads its active
+   * PROVIDER spec), and hand each to SS-16 `revalidateCorrespondence`. On a scope-identity-key
+   * or container break the correspondence returns to unconfirmed and its `ScopeLink`s are
+   * archived (never deleted); a `constant`/`manual` link is operator-pinned and preserved.
+   */
+  async #revalidateScopeCorrespondences(newSpec: ApiSpec, tx: TxStores): Promise<void> {
+    const seen = new Set<string>();
+    for (const group of newSpec.parsedIR) {
+      const correspondences = await tx.scopeCorrespondences.listByResourceSide(
+        newSpec.appId,
+        group.resourceRef,
+      );
+      for (const correspondence of correspondences) {
+        if (seen.has(correspondence.id)) {
+          continue;
+        }
+        seen.add(correspondence.id);
+        const sides = await this.#assembleCorrespondenceSides(correspondence, newSpec, tx);
+        if (sides === undefined) {
+          continue; // a side could not be assembled (bad pair / missing counterpart) — leave it
+        }
+        await tx.scopeLifecycle.revalidateCorrespondence(
+          correspondence,
+          sides.source,
+          sides.target,
+        );
+      }
+    }
+  }
+
+  /**
+   * Assemble both sides of a correspondence for re-validation. The **target** side is the
+   * `resourcePairRef` token whose app is `targetContainerRef.appId`; the **source** side is
+   * the other token (`revalidateScopeCorrespondence` reads `sourceContainerRef` against the
+   * source side and `targetContainerRef` against the target side). Returns `undefined` when
+   * the pair is unparseable or a counterpart side has no assemblable spec.
+   */
+  async #assembleCorrespondenceSides(
+    correspondence: ScopeCorrespondence,
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<{ source: ScopeCorrespondenceSide; target: ScopeCorrespondenceSide } | undefined> {
+    const parsed = parseResourcePairRef(correspondence.resourcePairRef);
+    if (parsed === undefined) {
+      return undefined;
+    }
+    const targetAppId = correspondence.targetContainerRef.appId;
+    const targetToken = parsed.a.appId === targetAppId ? parsed.a : parsed.b;
+    const sourceToken = targetToken === parsed.a ? parsed.b : parsed.a;
+    const [source, target] = await Promise.all([
+      this.#buildCorrespondenceSide(sourceToken, newSpec, tx),
+      this.#buildCorrespondenceSide(targetToken, newSpec, tx),
+    ]);
+    return source === undefined || target === undefined ? undefined : { source, target };
+  }
+
+  /**
+   * One `ScopeCorrespondenceSide`: the changed side reads the **new** spec's IR + its
+   * carried-forward (already re-validated) bindings; a counterpart side reads its active
+   * PROVIDER spec's IR + bindings. `undefined` when a counterpart has no active PROVIDER spec.
+   */
+  async #buildCorrespondenceSide(
+    token: { readonly appId: string; readonly resourceRef: string },
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<ScopeCorrespondenceSide | undefined> {
+    if (token.appId === newSpec.appId) {
+      const bindings = await tx.resourceBindings.listByApiSpecId(newSpec.id);
+      return { appId: token.appId, ir: newSpec.parsedIR, bindings, resourceRef: token.resourceRef };
+    }
+    const spec = await tx.apiSpecs.findActiveByAppAndRole(token.appId, "PROVIDER");
+    if (spec === undefined) {
+      return undefined;
+    }
+    const bindings = await tx.resourceBindings.listByApiSpecId(spec.id);
+    return { appId: token.appId, ir: spec.parsedIR, bindings, resourceRef: token.resourceRef };
   }
 
   /**
@@ -878,6 +1090,56 @@ export function carryForwardResourceBinding(
       (entry) => !droppedParams.has(entry.parameterName),
     ),
   });
+}
+
+// ── SL-5 pure helpers (the breaking operational-ref carry-forward / resolution policy) ──
+
+/**
+ * **SL-5.1 — one prior-version `ResourceBinding` carried forward to the new version
+ * VERBATIM.** A fresh row (`newId` on `newSpecId`) with every ref, `sourceScopeRef`, and
+ * `scopePathBindings` entry — including its operator confirmation — copied unchanged.
+ *
+ * The contrast with the additive {@link carryForwardResourceBinding} is exactly SL-5.1's
+ * "retains vs drops": additive **drops** any ref the new IR no longer resolves; the breaking
+ * path copies everything here and defers the decision to
+ * `ScopeLifecycleService.revalidateSpecBindings`, which **retains** a broken ref but returns
+ * it to unconfirmed (so it pauses the rule rather than silently reverting to a permissive
+ * default — see the SS-16 policy's "invalidated artifacts are retained, never dropped"). The
+ * one thing dropped is a binding whose resource **group** is gone from the new IR (the whole
+ * binding is moot — SL-4 stales the mapping over that resource), mirroring the additive
+ * drop-the-moot-binding guard. Pure (`newId` supplied by the caller).
+ */
+export function carryForwardResourceBindingVerbatim(
+  prior: ResourceBinding,
+  newSpecId: string,
+  newId: string,
+  newIr: Ir,
+): ResourceBinding | undefined {
+  if (!newIr.some((group) => group.resourceRef === prior.resourceRef)) {
+    return undefined;
+  }
+  return { ...prior, id: newId, apiSpecId: newSpecId };
+}
+
+/**
+ * **SL-5.2 — whether a `SyncRule.pollOperationRef` still resolves to an operation in the
+ * new IR.** `pollOperationRef` is either a bare `operationId` or the serialized
+ * `resourceRef/operationId` form; the leading (slash-free) `resourceRef` is split off the
+ * **first** `/` exactly as the source binding resolver's `parseOperationRef` does (a
+ * synthetic operationId — Vikunja's `"get /tasks/{id}"` — itself contains slashes). The
+ * operation is looked up across **all** groups: "does the operation the Poller pins still
+ * exist in the new spec". A removed or renamed poll operation returns `false` → the caller
+ * clears the ref and the rule pauses. Pure.
+ */
+export function pollOperationResolves(pollOperationRef: string, ir: Ir): boolean {
+  const slash = pollOperationRef.indexOf("/");
+  const operationId =
+    slash > 0 && slash < pollOperationRef.length - 1
+      ? pollOperationRef.slice(slash + 1)
+      : pollOperationRef;
+  return ir.some((group) =>
+    group.operations.some((operation) => operation.operationId === operationId),
+  );
 }
 
 /**

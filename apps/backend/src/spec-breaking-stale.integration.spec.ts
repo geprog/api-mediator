@@ -8,6 +8,8 @@ import {
   MappingArtifactsRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
   SyncRuleRepository,
   adapterEndpoint,
   apiSpec,
@@ -47,6 +49,7 @@ import type {
   TxStores,
 } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
+import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
 import { validateBindingHealth } from "./http/adapter-runtime/serve/planner.js";
 
 /**
@@ -297,6 +300,16 @@ suite(
             graphProjection.recomputeAdapterEdgeWithin(handle, consumerAppId, backendAppId),
         },
         cacheInvalidator,
+        // SL-5 operational-ref re-validation ports (real repos). This SL-4 spec seeds no
+        // bindings/rules/correspondences on the changed provider, so SL-5 finds nothing to
+        // re-validate — proving SL-4 and SL-5 share the breaking branch without interfering.
+        syncRules: new SyncRuleRepository(handle),
+        scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+        scopeLifecycle: new ScopeLifecycleService({
+          resourceBindings: new ResourceBindingRepository(handle),
+          scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+          scopeLinks: new ScopeLinkRepository(handle),
+        }),
         emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
       };
     }
