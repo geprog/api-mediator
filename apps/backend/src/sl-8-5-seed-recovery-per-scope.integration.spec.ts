@@ -10,6 +10,8 @@ import {
   RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
   SyncFieldStateRepository,
   SyncRuleRepository,
   apiSpec,
@@ -20,6 +22,7 @@ import {
   credential,
   graphEdge,
   orderingQueue,
+  pollScopeState,
   pollSnapshot,
   recordLink,
   registeredApp,
@@ -27,6 +30,8 @@ import {
   resourceBinding,
   resourceBindingRef,
   runMigrations,
+  scopeCorrespondence,
+  scopeLink,
   syncFieldState,
   syncRule,
   tx,
@@ -42,13 +47,15 @@ import {
   type RecordLink,
   type RegisteredApp,
   type ResourceBinding,
+  type ScopeCorrespondence,
+  type ScopeLink,
   type SyncFieldState,
   type SyncRule,
 } from "@mediator/domain";
 import type { DeliveredEvent } from "@mediator/event-bus";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "@mediator/outbound";
 import { hashFieldValue } from "@mediator/sync-engine";
-import type { JsonRecord, JsonValue } from "@mediator/transform";
+import type { JsonValue } from "@mediator/transform";
 import { inArray } from "drizzle-orm";
 import { pino } from "pino";
 import type { FastifyBaseLogger } from "fastify";
@@ -60,16 +67,14 @@ import { GraphProjection } from "./modules/graph/index.js";
 import { buildSyncBackground, type SyncBackground } from "./modules/sync/background.js";
 
 /**
- * **SL-8.5 durability — live-Postgres integration proving the offloaded added-field baseline seed
- * is crash/abort-recoverable.** The fast-path seed is deliberately made to **abort** (the source
- * app's collection fetch returns 5xx — a routine transient failure for a whole-collection read),
- * which — with fire-and-forget alone — would silently leave the added field unseeded forever
- * (conflict-detection drift, no recovery). This proves the durable seed-intent + the baseline-seed
- * reconciler close that gap:
- *   1. adoption persists a durable seed-intent (`pending_baseline_seed`) in the adoption tx;
- *   2. the fast-path seed ABORTS → the intent stays set, NO baseline is written;
- *   3. once the source recovers, a baseline-seed reconciler pass re-attempts the seed to a real
- *      completion → the added field's baseline is present and the intent is cleared.
+ * **SL-8.5 durability — a PER-SCOPE (fan-out) seed whose one scope aborts must NOT clear the
+ * intent** (the delta-review MUST-FIX). A scoped successor-adoption rule's seed fans out over its
+ * containers; if scope C2's source collection read returns a transient 5xx it aborts that branch
+ * while C1 completes. A `.some(...completed)` clear would drop C2's added-field baselines
+ * permanently (C2's records then read the absent baseline as drifted → target-wins-withhold →
+ * never propagate the added field). This drives the REAL sync runtime over live Postgres and
+ * proves the corrected `every(scope => completed)` predicate: a partial-abort fan-out KEEPS the
+ * intent, and a later reconciler pass (once C2 recovers) self-heals C2 to a real completion.
  *
  * Requires the compose `postgres` service + a resolvable `DATABASE_URL`; excluded from
  * `pnpm verify`. Self-skips when unresolvable. Run in isolation (the shared-DB integration suite
@@ -96,26 +101,24 @@ const BINDING_B = randomUUID();
 const M_PRED = randomUUID();
 const M_SUCC = randomUUID();
 const RULE_WIDGETS = randomUUID();
-const LINK_ID = randomUUID();
+const CORRESPONDENCE = randomUUID();
+const LINK_C1 = randomUUID();
+const LINK_C2 = randomUUID();
+const RECLINK_C1 = randomUUID();
+const RECLINK_C2 = randomUUID();
 
-const BASE_A = "https://sl85r-a.test";
-const BASE_B = "https://sl85r-b.test";
+const BASE_A = "https://sl85ps-a.test";
+const BASE_B = "https://sl85ps-b.test";
 
 const ALL_APP_IDS = [APP_A, APP_B];
 const ALL_SPEC_IDS = [SPEC_A_OLD, SPEC_A_NEW, SPEC_B];
 const ALL_MAPPING_IDS = [M_PRED, M_SUCC];
+const ALL_RECLINK_IDS = [RECLINK_C1, RECLINK_C2];
 
 const WIDGETS_PAIR = canonicalResourcePairRef(
   { appId: APP_A, resourceRef: "widgets" },
   { appId: APP_B, resourceRef: "widgets" },
 );
-
-// A RecordLink's canonical A/B must follow the same token ordering the resourcePairRef uses
-// (which depends on the random app UUIDs), not hardcode APP_A as appA.
-const WIDGETS_LINK_SIDES =
-  `${APP_A}:widgets` <= `${APP_B}:widgets`
-    ? { appAId: APP_A, appANativeId: "a1", appBId: APP_B, appBNativeId: "b1" }
-    : { appAId: APP_B, appANativeId: "b1", appBId: APP_A, appBNativeId: "a1" };
 
 function appOf(id: string, name: string, baseUrl: string): RegisteredApp {
   return {
@@ -133,39 +136,65 @@ function appOf(id: string, name: string, baseUrl: string): RegisteredApp {
   };
 }
 
-function widgetOp(operationId: string, method: IrOperation["method"], path: string): IrOperation {
+function fields(): IrOperation["responseSchema"] {
   return {
-    operationId,
-    method,
-    path,
-    parameters: [],
-    responseSchema: {
-      name: "Widget",
-      fields: [
-        { name: "id", type: "string", required: true },
-        { name: "code", type: "string", required: true },
-        { name: "name", type: "string", required: false },
-        { name: "status", type: "string", required: false },
-      ],
-    },
+    name: "Widget",
+    fields: [
+      { name: "id", type: "string", required: true },
+      { name: "code", type: "string", required: true },
+      { name: "name", type: "string", required: false },
+      { name: "status", type: "string", required: false },
+    ],
   };
 }
 
-const WIDGET_GROUP: IrResourceGroup = {
+// Source `widgets`: a PER-CONTAINER collection read `GET /orgs/{org}/widgets`.
+const SOURCE_GROUP: IrResourceGroup = {
   resourceRef: "widgets",
   name: "Widgets",
-  operations: [widgetOp("listWidgets", "get", "/widgets")],
+  operations: [
+    {
+      operationId: "listSourceWidgets",
+      method: "get",
+      path: "/orgs/{org}/widgets",
+      parameters: [{ name: "org", location: "path", required: true, type: "string" }],
+      responseSchema: fields(),
+    },
+  ],
   schemas: [],
   crossResourceRefs: [],
 };
 
-function specOf(id: string, appId: string, status: ApiSpec["status"], version: number): ApiSpec {
+// Target `widgets`: an app-wide (unscoped) collection read `GET /widgets`.
+const TARGET_GROUP: IrResourceGroup = {
+  resourceRef: "widgets",
+  name: "Widgets",
+  operations: [
+    {
+      operationId: "listTargetWidgets",
+      method: "get",
+      path: "/widgets",
+      parameters: [],
+      responseSchema: fields(),
+    },
+  ],
+  schemas: [],
+  crossResourceRefs: [],
+};
+
+function specOf(
+  id: string,
+  appId: string,
+  status: ApiSpec["status"],
+  version: number,
+  ir: IrResourceGroup[],
+): ApiSpec {
   return {
     id,
     appId,
     role: "PROVIDER",
     rawDocument: { openapi: "3.1.0" },
-    parsedIR: [WIDGET_GROUP],
+    parsedIR: ir,
     analysisExclusions: [],
     version,
     contentHash: `sha256:${id}`,
@@ -178,13 +207,34 @@ function confirmedRef(value: ConfirmableRef["value"]): ConfirmableRef {
   return { value, confirmedBy: "operator", confirmedAt: CREATED_AT };
 }
 
-function bindingOf(id: string, apiSpecId: string): ResourceBinding {
+function sourceBinding(): ResourceBinding {
   return {
-    id,
-    apiSpecId,
+    id: BINDING_A_NEW,
+    apiSpecId: SPEC_A_NEW,
     resourceRef: "widgets",
     nativeIdRef: confirmedRef({ kind: "field", path: "id" }),
-    collectionReadRef: confirmedRef({ kind: "operation", operationId: "listWidgets" }),
+    collectionReadRef: confirmedRef({ kind: "operation", operationId: "listSourceWidgets" }),
+    // The per-container source read fill: `{org}` from each ScopeLink's source-side scope key.
+    scopePathBindings: [
+      {
+        kind: "scope-link",
+        parameterName: "org",
+        scopeKeyRef: "org",
+        confirmedBy: "operator",
+        confirmedAt: CREATED_AT,
+      },
+    ],
+  };
+}
+
+function targetBinding(): ResourceBinding {
+  return {
+    id: BINDING_B,
+    apiSpecId: SPEC_B,
+    resourceRef: "widgets",
+    nativeIdRef: confirmedRef({ kind: "field", path: "id" }),
+    // Unscoped target read → the seed's counterpart lookup is app-wide (no target container fill).
+    collectionReadRef: confirmedRef({ kind: "operation", operationId: "listTargetWidgets" }),
   };
 }
 
@@ -204,17 +254,73 @@ function field(input: {
   };
 }
 
-function ruleOf(id: string, mappingId: string): SyncRule {
+function correspondenceOf(): ScopeCorrespondence {
+  return {
+    id: CORRESPONDENCE,
+    resourcePairRef: WIDGETS_PAIR,
+    scopeIdentityKey: [{ sourceScopeKey: "org", targetFieldPath: "widgets/org" }],
+    targetContainerRef: { appId: APP_B, resourceRef: "widgets" },
+    sourceContainerRef: { appId: APP_A, resourceRef: "widgets" },
+    confirmedBy: "operator",
+    confirmedAt: CREATED_AT,
+  };
+}
+
+function scopeLinkOf(id: string, org: string): ScopeLink {
   return {
     id,
-    approvedMappingId: mappingId,
+    scopeCorrespondenceId: CORRESPONDENCE,
+    appAId: APP_A,
+    appAScopeKey: { org },
+    appBId: APP_B,
+    appBScopeKey: { org: `${org}-target` },
+    resourcePairRef: WIDGETS_PAIR,
+    // Pinned mode polls/seeds only operator-pinned links.
+    establishedBy: "manual",
+    status: "active",
+    createdAt: CREATED_AT,
+  };
+}
+
+// A RecordLink's canonical A/B must follow the same token ordering the resourcePairRef uses
+// (which depends on the random app UUIDs), not hardcode APP_A as appA.
+const APP_A_IS_CANONICAL_A = `${APP_A}:widgets` <= `${APP_B}:widgets`;
+
+function recLinkOf(
+  id: string,
+  aNativeId: string,
+  bNativeId: string,
+  scopeLinkId: string,
+): RecordLink {
+  return {
+    id,
+    appAId: APP_A_IS_CANONICAL_A ? APP_A : APP_B,
+    appANativeId: APP_A_IS_CANONICAL_A ? aNativeId : bNativeId,
+    appBId: APP_A_IS_CANONICAL_A ? APP_B : APP_A,
+    appBNativeId: APP_A_IS_CANONICAL_A ? bNativeId : aNativeId,
+    resourcePairRef: WIDGETS_PAIR,
+    establishedBy: "identity-match",
+    status: "active",
+    establishingQueueKey: { kind: "identity-value", value: aNativeId },
+    createdAt: CREATED_AT,
+    tombstonedAt: null,
+    scopeRef: { kind: "scope-link", scopeLinkId },
+  };
+}
+
+function ruleOf(): SyncRule {
+  return {
+    id: RULE_WIDGETS,
+    approvedMappingId: M_PRED,
     resourcePairRef: WIDGETS_PAIR,
     status: "enabled",
     backfillStatus: "completed",
     backfillMode: "link-only",
+    // Pin the rule per-scope so its seed fans out over the two operator-linked containers.
+    pollScopeMode: "per-scope-pinned",
     cursor: null,
     lastSnapshotRef: null,
-    pollOperationRef: "widgets/listWidgets",
+    pollOperationRef: "widgets/listSourceWidgets",
   };
 }
 
@@ -222,25 +328,30 @@ function resp(status: number, body: JsonValue | undefined): Promise<OutboundResp
   return Promise.resolve({ status, headers: {}, body });
 }
 
-/** A source app that fails its collection read while `failSourceGets > 0` (a transient 5xx). */
-class FlakyLandscape implements ProtocolClient {
-  public readonly appA = new Map<string, JsonRecord>();
-  public readonly appB = new Map<string, JsonRecord>();
-  public failSourceGets = 0;
+/** Source reads are per-container; C2's read fails while `failC2 > 0` (a transient 5xx). */
+class PerScopeLandscape implements ProtocolClient {
+  public failC2 = 0;
 
   public send(request: OutboundRequest): Promise<OutboundResponse> {
     const isA = request.url.startsWith(BASE_A);
-    const store = isA ? this.appA : this.appB;
     const path = request.url.slice((isA ? BASE_A : BASE_B).length);
     const bare = path.split("?")[0] ?? path;
 
-    if (request.method === "GET" && bare === "/widgets") {
-      if (isA && this.failSourceGets > 0) {
-        this.failSourceGets -= 1;
-        // A transient server error → RestSourceReader returns `{ ok: false }` → the seed ABORTS.
+    if (isA && request.method === "GET" && bare === "/orgs/c1/widgets") {
+      return resp(200, [{ id: "a1", code: "W-1", name: "Alpha", status: "open" }]);
+    }
+    if (isA && request.method === "GET" && bare === "/orgs/c2/widgets") {
+      if (this.failC2 > 0) {
+        this.failC2 -= 1;
         return resp(500, undefined);
       }
-      return resp(200, [...store.values()]);
+      return resp(200, [{ id: "a2", code: "W-2", name: "Beta", status: "ready" }]);
+    }
+    if (!isA && request.method === "GET" && bare === "/widgets") {
+      return resp(200, [
+        { id: "b1", code: "W-1", name: "Alpha", status: "open" },
+        { id: "b2", code: "W-2", name: "Beta", status: "ready" },
+      ]);
     }
     return resp(404, undefined);
   }
@@ -271,10 +382,13 @@ function testConfig(url: string): AppConfig {
 }
 
 async function cleanup(db: Database): Promise<void> {
-  await db.delete(syncFieldState).where(inArray(syncFieldState.recordLinkId, [LINK_ID]));
+  await db.delete(syncFieldState).where(inArray(syncFieldState.recordLinkId, ALL_RECLINK_IDS));
   await db.delete(orderingQueue);
+  await db.delete(pollScopeState).where(inArray(pollScopeState.syncRuleId, [RULE_WIDGETS]));
   await db.delete(pollSnapshot).where(inArray(pollSnapshot.syncRuleId, [RULE_WIDGETS]));
-  await db.delete(recordLink).where(inArray(recordLink.id, [LINK_ID]));
+  await db.delete(recordLink).where(inArray(recordLink.id, ALL_RECLINK_IDS));
+  await db.delete(scopeLink).where(inArray(scopeLink.id, [LINK_C1, LINK_C2]));
+  await db.delete(scopeCorrespondence).where(inArray(scopeCorrespondence.id, [CORRESPONDENCE]));
   await db.delete(auditLog);
   await db.delete(syncRule).where(inArray(syncRule.approvedMappingId, ALL_MAPPING_IDS));
   await db.delete(graphEdge).where(inArray(graphEdge.sourceNodeId, ALL_APP_IDS));
@@ -288,11 +402,11 @@ async function cleanup(db: Database): Promise<void> {
   await db.delete(registeredApp).where(inArray(registeredApp.id, ALL_APP_IDS));
 }
 
-suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires Postgres)", () => {
+suite("Phase-6 SL-8.5 per-scope seed durability / recovery (requires Postgres)", () => {
   let db: Database;
   const config = testConfig(databaseUrl ?? "");
   const logger: FastifyBaseLogger = pino({ level: "silent" });
-  const landscape = new FlakyLandscape();
+  const landscape = new PerScopeLandscape();
   let sync: SyncBackground;
   let consumer: ReturnType<typeof buildArtifactInstantiation>["consumer"];
 
@@ -301,22 +415,22 @@ suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires 
     await runMigrations(db);
     await cleanup(db);
 
-    landscape.appA.set("a1", { id: "a1", code: "W-1", name: "Alpha", status: "open" });
-    landscape.appB.set("b1", { id: "b1", code: "W-1", name: "Alpha", status: "open" });
-
     await tx(db, async (txn) => {
       const apps = new RegisteredAppRepository(txn);
-      await apps.create(appOf(APP_A, "sl85r-a", BASE_A));
-      await apps.create(appOf(APP_B, "sl85r-b", BASE_B));
+      await apps.create(appOf(APP_A, "sl85ps-a", BASE_A));
+      await apps.create(appOf(APP_B, "sl85ps-b", BASE_B));
 
       const specs = new ApiSpecRepository(txn);
-      await specs.create(specOf(SPEC_A_OLD, APP_A, "superseded", 1));
-      await specs.create(specOf(SPEC_A_NEW, APP_A, "active", 2));
-      await specs.create(specOf(SPEC_B, APP_B, "active", 1));
-      await new ResourceBindingRepository(txn).createMany([
-        bindingOf(BINDING_A_NEW, SPEC_A_NEW),
-        bindingOf(BINDING_B, SPEC_B),
-      ]);
+      await specs.create(specOf(SPEC_A_OLD, APP_A, "superseded", 1, [SOURCE_GROUP]));
+      await specs.create(specOf(SPEC_A_NEW, APP_A, "active", 2, [SOURCE_GROUP]));
+      await specs.create(specOf(SPEC_B, APP_B, "active", 1, [TARGET_GROUP]));
+      await new ResourceBindingRepository(txn).createMany([sourceBinding(), targetBinding()]);
+
+      // The pair's scope correspondence + two operator-pinned container links (C1, C2).
+      await new ScopeCorrespondenceRepository(txn).create(correspondenceOf());
+      const links = new ScopeLinkRepository(txn);
+      await links.create(scopeLinkOf(LINK_C1, "c1"));
+      await links.create(scopeLinkOf(LINK_C2, "c2"));
 
       const mappings = new ApprovedMappingRepository(txn);
       const artifacts = new MappingArtifactsRepository(txn);
@@ -354,7 +468,7 @@ suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires 
         sourceAppId: APP_A,
         targetAppId: APP_B,
         variant: "peer-peer",
-        approvedBy: "reviewer-sl85r",
+        approvedBy: "reviewer-sl85ps",
         approvedAt: OBSERVED_AT,
         status: "active",
         predecessorMappingId: M_PRED,
@@ -375,28 +489,23 @@ suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires 
         parameterMappings: [],
       });
 
-      await downstream.insertSyncRuleIfAbsent(ruleOf(RULE_WIDGETS, M_PRED));
+      await downstream.insertSyncRuleIfAbsent(ruleOf());
 
-      const link: RecordLink = {
-        id: LINK_ID,
-        ...WIDGETS_LINK_SIDES,
-        resourcePairRef: WIDGETS_PAIR,
-        establishedBy: "identity-match",
-        status: "active",
-        establishingQueueKey: { kind: "identity-value", value: "W-1" },
-        createdAt: CREATED_AT,
-        tombstonedAt: null,
-      };
-      await new RecordLinkRepository(txn).insert(link);
+      // A pre-existing RecordLink per container (C1: a1↔b1, C2: a2↔b2) from before the spec bump.
+      const recLinks = new RecordLinkRepository(txn);
+      await recLinks.insert(recLinkOf(RECLINK_C1, "a1", "b1", LINK_C1));
+      await recLinks.insert(recLinkOf(RECLINK_C2, "a2", "b2", LINK_C2));
 
-      // Pre-existing baselines for the pre-existing fields only (widgets/status has none).
+      // Pre-existing baselines for the pre-existing fields only (code, name), both sides, both
+      // links — so widgets/status is demonstrably the newly-seeded field.
       const baseState = (
+        recordLinkId: string,
         side: SyncFieldState["side"],
         fieldPath: string,
         value: string,
       ): SyncFieldState => ({
         id: randomUUID(),
-        recordLinkId: LINK_ID,
+        recordLinkId,
         side,
         fieldPath,
         observedHash: hashFieldValue(value),
@@ -406,11 +515,16 @@ suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires 
         lastSyncedHash: hashFieldValue(value),
         lastSyncedAt: OBSERVED_AT,
       });
-      await new SyncFieldStateRepository(txn).seed([
-        baseState("A", "widgets/code", "W-1"),
-        baseState("B", "widgets/code", "W-1"),
-        baseState("A", "widgets/name", "Alpha"),
-        baseState("B", "widgets/name", "Alpha"),
+      const fieldState = new SyncFieldStateRepository(txn);
+      await fieldState.seed([
+        baseState(RECLINK_C1, "A", "widgets/code", "W-1"),
+        baseState(RECLINK_C1, "B", "widgets/code", "W-1"),
+        baseState(RECLINK_C1, "A", "widgets/name", "Alpha"),
+        baseState(RECLINK_C1, "B", "widgets/name", "Alpha"),
+        baseState(RECLINK_C2, "A", "widgets/code", "W-2"),
+        baseState(RECLINK_C2, "B", "widgets/code", "W-2"),
+        baseState(RECLINK_C2, "A", "widgets/name", "Beta"),
+        baseState(RECLINK_C2, "B", "widgets/name", "Beta"),
       ]);
     });
 
@@ -450,42 +564,40 @@ suite("Phase-6 SL-8.5 added-field baseline seed durability / recovery (requires 
     };
   }
 
-  it("keeps the seed-intent outstanding when the fast-path seed ABORTS, then self-heals via the reconciler", async () => {
+  function statusBaselines(states: readonly SyncFieldState[]): SyncFieldState[] {
+    return states.filter((row) => row.fieldPath === "widgets/status");
+  }
+
+  it("a partial per-scope abort KEEPS the intent (C2 unseeded); a later reconciler pass self-heals C2", async () => {
     const rules = new SyncRuleRepository(db);
     const fieldState = new SyncFieldStateRepository(db);
 
-    // Make the source collection read fail — the fast-path seed will ABORT.
-    landscape.failSourceGets = 5;
+    // C2's per-container source read fails — its scope's seed branch ABORTS while C1 completes.
+    landscape.failC2 = 5;
 
     await tx(db, (txn) => consumer.handle(mappingApprovedEvent(M_SUCC), txn));
     await sync.awaitBackfills();
 
-    // The seed aborted: the added field is STILL unseeded, but the durable intent is OUTSTANDING
-    // (set atomically in the adoption tx and NOT cleared by the aborted run).
-    const afterAbort = await rules.getById(RULE_WIDGETS);
-    expect(afterAbort?.approvedMappingId).toBe(M_SUCC); // adoption itself committed
-    expect(afterAbort?.pendingBaselineSeed).toBe(true);
-    const statusAfterAbort = (await fieldState.findByLink(LINK_ID)).filter(
-      (row) => row.fieldPath === "widgets/status",
-    );
-    expect(statusAfterAbort).toEqual([]);
+    // The intent is OUTSTANDING: even though C1 completed, C2 aborted, so `every(completed)` is
+    // false → the seed did NOT clear the intent.
+    expect((await rules.getById(RULE_WIDGETS))?.pendingBaselineSeed).toBe(true);
+    // C1 (the completed scope) got its added-field baseline; C2 (aborted) did NOT.
+    expect(statusBaselines(await fieldState.findByLink(RECLINK_C1)).length).toBeGreaterThan(0);
+    expect(statusBaselines(await fieldState.findByLink(RECLINK_C2))).toEqual([]);
 
-    // The source recovers; a baseline-seed reconciler pass re-attempts the owed seed.
-    landscape.failSourceGets = 0;
+    // C2's container recovers; one baseline-seed reconciler pass re-attempts the owed seed.
+    landscape.failC2 = 0;
     await sync.baselineSeedReconciler.reconcile();
     await sync.awaitBackfills();
 
-    // Self-healed: the added field now has a reconciled baseline and the intent is cleared.
-    const statusAfterHeal = (await fieldState.findByLink(LINK_ID)).filter(
-      (row) => row.fieldPath === "widgets/status",
-    );
-    expect(statusAfterHeal.map((row) => row.side).sort()).toEqual(["A", "B"]);
-    expect(statusAfterHeal.every((row) => row.lastSyncedHash === hashFieldValue("open"))).toBe(
-      true,
-    );
+    // Self-healed: C2 now has its added-field baseline (reconciled), and the intent is cleared
+    // (every scope completed). C1's baseline is untouched (seed-never-erases).
+    const c2Status = statusBaselines(await fieldState.findByLink(RECLINK_C2));
+    expect(c2Status.map((row) => row.side).sort()).toEqual(["A", "B"]);
+    expect(c2Status.every((row) => row.lastSyncedHash === hashFieldValue("ready"))).toBe(true);
     expect((await rules.getById(RULE_WIDGETS))?.pendingBaselineSeed).toBeUndefined();
 
-    // A further reconciler pass is a no-op (nothing left owes a seed).
+    // A further pass is a no-op — nothing owes a seed.
     await sync.baselineSeedReconciler.reconcile();
     await sync.awaitBackfills();
     expect((await rules.getById(RULE_WIDGETS))?.pendingBaselineSeed).toBeUndefined();

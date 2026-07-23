@@ -264,10 +264,26 @@ const NO_OP_BACKFILL_METRICS: BackfillMetrics = {
 };
 
 /**
- * SL-8.5 — whether a baseline seed's backfill actually **completed** (a full source enumeration),
- * so its durable seed-intent may be cleared. `aborted` (a partial/failed source fetch) is NOT a
- * completion. A per-scope fan-out counts as completed iff at least one scope completed (SS-17.5
- * partial success — an all-scopes-failed run keeps the intent for a re-attempt).
+ * SL-8.5 — whether a baseline seed's backfill genuinely **completed for every scope**, so its
+ * durable seed-intent may be cleared. A single-scope run: `completed` clears, `aborted` keeps.
+ *
+ * **A per-scope fan-out clears ONLY when EVERY scope completed** — the intent is KEPT if ANY
+ * scope `aborted` or `parked`, or if there are no scopes yet. This is deliberately NOT the
+ * enablement "SS-17.5 partial success" rule (which lets a run with one good scope go live): that
+ * analogy does not transfer to a SEED. `RuleEnabler.enable`'s aborted scope has no
+ * `poll_scope_state` yet, so its next poll re-lists and re-seeds; but this seed runs over an
+ * **already-enabled** rule whose aborted/parked scope already has a snapshot — its next
+ * incremental poll sees the source content unchanged (the added field is newly *mapped*, not
+ * newly *present* in the record) and so never re-seeds on its own. Clearing the intent on a
+ * `.some(...completed)` would therefore drop the aborted/parked scope's added-field baselines
+ * **permanently** (Conflict Detection then reads the absence as drifted → target-wins-withhold →
+ * that scope's records never propagate the added field) — the exact SL-8.6 "silently
+ * half-adopted" gap this seed-intent exists to close. So a partial abort/park keeps the intent
+ * and the reconciler re-attempts it (bounded LIMIT, idempotent seed-never-erases), converging
+ * once every scope's container resolves (a parked scope un-parks) or the rule is
+ * disabled/re-pointed/its scope-links archived. A `parked` scope holds the intent for the same
+ * reason an `aborted` one does (its un-park hits the identical "content unchanged, never
+ * re-seeds" gap), and an **empty** scope array (no containers linked yet) likewise keeps it.
  */
 function baselineSeedCompleted(result: BackfillRunResult): boolean {
   if (result.outcome === "completed") {
@@ -276,7 +292,12 @@ function baselineSeedCompleted(result: BackfillRunResult): boolean {
   if (result.outcome === "aborted") {
     return false;
   }
-  return result.scopes.some((scope) => scope.outcome.outcome === "completed");
+  // completed-per-scope: no scopes yet → nothing seeded, keep the intent (wait for containers).
+  if (result.scopes.length === 0) {
+    return false;
+  }
+  // Every scope must have genuinely completed; ANY aborted/parked scope keeps the intent.
+  return result.scopes.every((scope) => scope.outcome.outcome === "completed");
 }
 
 export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {

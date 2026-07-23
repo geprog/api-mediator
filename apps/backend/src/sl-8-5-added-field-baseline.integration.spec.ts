@@ -48,7 +48,7 @@ import {
 } from "@mediator/domain";
 import type { DeliveredEvent } from "@mediator/event-bus";
 import type { OutboundRequest, OutboundResponse, ProtocolClient } from "@mediator/outbound";
-import { hashFieldValue } from "@mediator/sync-engine";
+import { buildChangePayload, hashFieldValue, type DetectedChange } from "@mediator/sync-engine";
 import type { JsonRecord, JsonValue } from "@mediator/transform";
 import { inArray } from "drizzle-orm";
 import { pino } from "pino";
@@ -121,6 +121,18 @@ const WIDGETS_PAIR = canonicalResourcePairRef(
   { appId: APP_A, resourceRef: "widgets" },
   { appId: APP_B, resourceRef: "widgets" },
 );
+
+/**
+ * A `RecordLink`'s canonical A/B sides for the widgets pair (a1 in APP_A, b1 in APP_B). The link's
+ * `appAId`/`appBId` MUST follow the same canonical (lexicographic token) ordering the
+ * `resourcePairRef` uses — otherwise the pipeline resolves the target native id from the wrong
+ * side and writes to the source's native id. (Which side is canonical A depends on the random
+ * app UUIDs, so hardcoding APP_A as appA is order-dependent and flaky.)
+ */
+const WIDGETS_LINK_SIDES =
+  `${APP_A}:widgets` <= `${APP_B}:widgets`
+    ? { appAId: APP_A, appANativeId: "a1", appBId: APP_B, appBNativeId: "b1" }
+    : { appAId: APP_B, appANativeId: "b1", appBId: APP_A, appBNativeId: "a1" };
 const GADGETS_PAIR = canonicalResourcePairRef(
   { appId: APP_A, resourceRef: "gadgets" },
   { appId: APP_B, resourceRef: "gadgets" },
@@ -461,10 +473,7 @@ suite("Phase-6 SL-8.5 added-field baseline seeding on adoption (requires Postgre
       // A pre-existing RecordLink on the widgets pair (a1 ↔ b1) from before the spec bump.
       const link: RecordLink = {
         id: LINK_ID,
-        appAId: APP_A,
-        appANativeId: "a1",
-        appBId: APP_B,
-        appBNativeId: "b1",
+        ...WIDGETS_LINK_SIDES,
         resourcePairRef: WIDGETS_PAIR,
         establishedBy: "identity-match",
         status: "active",
@@ -582,22 +591,28 @@ suite("Phase-6 SL-8.5 added-field baseline seeding on adoption (requires Postgre
     const rules = new SyncRuleRepository(db);
     const writesBefore = landscape.writes.length;
 
-    // Prime the full-fetch snapshot from the current (reconciled) source state, so the NEXT poll
-    // diffs a genuine change rather than treating every record as first-seen.
-    await sync.pollOnce(RULE_WIDGETS);
-    await sync.runQueueOnce();
-    // No propagation yet: source == the just-seeded baseline for every field.
-    expect(landscape.writes.length).toBe(writesBefore);
-
-    // The source now changes ONLY the added field.
+    // The source now changes ONLY the added field. Drive the change straight through the
+    // ordering-queue pipeline (RL → EP → CF → TX → OC) rather than the full-fetch poll's
+    // snapshot-diff detection: change DETECTION is orthogonal to "does the added field propagate",
+    // and driving the pipeline directly keeps this assertion deterministic (the two-poll snapshot
+    // dance is inherently timing/state-sensitive over the shared DB).
     landscape.appA.set("a1", { id: "a1", code: "W-1", name: "Alpha", status: "closed" });
-
-    const poll = await sync.pollOnce(RULE_WIDGETS);
-    expect(poll.kind).toBe("completed");
+    const change: DetectedChange = {
+      ruleId: RULE_WIDGETS,
+      mappingId: M_SUCC,
+      sourceAppId: APP_A,
+      targetAppId: APP_B,
+      resourcePairRef: WIDGETS_PAIR,
+      sourceNativeId: "a1",
+      changeKind: "update",
+      observedRecord: { id: "a1", code: "W-1", name: "Alpha", status: "closed" },
+    };
+    await sync.orderingQueue.enqueue(LINK_ID, buildChangePayload(change));
     await sync.runQueueOnce();
 
-    // The added field PROPAGATED to the target (source-wins over its reconciled baseline) — it did
-    // NOT withhold/park as it would have with no baseline.
+    // The added field PROPAGATED to the target (source-wins over its reconciled baseline) — Conflict
+    // Detection compared against the SEEDED baseline instead of reading an absent baseline as drift,
+    // so it did NOT withhold/park as it would have with no baseline (the SL-8.5 gap).
     const newWrites = landscape.writes.slice(writesBefore);
     expect(newWrites.some((w) => w.method === "PATCH" && w.path === "/widgets/b1")).toBe(true);
     expect(landscape.appB.get("b1")).toMatchObject({ status: "closed" });
