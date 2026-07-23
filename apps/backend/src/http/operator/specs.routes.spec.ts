@@ -94,6 +94,41 @@ describe("PATCH /api/specs/:id/analysis-exclusions (SI-4)", () => {
     expect(response.statusCode).toBe(400);
     expect(server.store.specs.get(specId)?.analysisExclusions).toEqual([]);
   });
+
+  /**
+   * SL-9.5 — the OB-2 count has to be attributable to a person, and the only thing
+   * standing between the authenticated `Principal` and the audit row is this route's
+   * `getPrincipal(request).identity` wiring. Drive the real route so a regression there
+   * (dropping the actor, or hard-coding `system`) fails here.
+   */
+  it("attributes an SL-9 re-inclusion to the authenticated operator (crit 5)", async () => {
+    server = buildTestServer();
+    const registered = await registerProvider(server);
+    const specId = registered.specs[0]?.id ?? "";
+
+    // Exclude, then re-include: only the second call is a re-inclusion.
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/specs/${specId}/analysis-exclusions`,
+      payload: { analysisExclusions: ["issues"] },
+    });
+    expect(server.store.auditLog).toEqual([]);
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "PATCH",
+      url: `/api/specs/${specId}/analysis-exclusions`,
+      payload: { analysisExclusions: [] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(server.store.auditLog).toHaveLength(1);
+    expect(server.store.auditLog[0]?.actor).toBe(TEST_OPERATOR.username);
+    expect(server.store.auditLog[0]?.details).toContain("issues");
+    // ...and the scoped analysis was actually recorded for that spec.
+    expect(server.store.scopedDetectionJobs).toEqual([
+      { apiSpecId: specId, scope: { kind: "re-inclusion", reincludedResourceGroups: ["issues"] } },
+    ]);
+  });
 });
 
 describe("POST /api/specs/preview (AR-3/SI-4)", () => {

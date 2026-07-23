@@ -125,7 +125,11 @@ suite("SL-1 SpecRegistry.ingestNewVersion (requires Postgres)", () => {
       audit: new AuditLogRepository(handle),
       // SL-1 isolates the version-advance + diff classification; the SL-3 scoped-delta
       // trigger has its own spec, so record no job here.
-      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      detectionJobs: {
+        enqueueScoped: (): Promise<boolean> => Promise.resolve(true),
+        lockUnfinishedJob: (): Promise<undefined> => Promise.resolve(undefined),
+        updateScope: (): Promise<void> => Promise.resolve(),
+      },
       // SL-4 breaking-reaction ports — these SL-1 fixtures seed no mappings, so the
       // breaking branch finds nothing to stale even when the diff classifies breaking.
       mappingArtifacts: {

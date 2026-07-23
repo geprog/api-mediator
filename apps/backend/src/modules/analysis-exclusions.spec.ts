@@ -176,7 +176,7 @@ describe("AnalysisExclusionsService.replace — SL-9 re-inclusion trigger", () =
     await expect(service.replace(SPEC_ID, ["does-not-exist"], OPERATOR)).rejects.toThrow(
       /Unknown resourceRef/,
     );
-    // The rolled-back transaction persisted neither the exclusions nor a job.
+    // Validation runs before any write, so nothing was persisted in the first place.
     expect(store.specs.get(SPEC_ID)?.analysisExclusions).toEqual(["labels"]);
     expect(store.scopedDetectionJobs).toEqual([]);
     expect(store.auditLog).toEqual([]);
@@ -184,5 +184,144 @@ describe("AnalysisExclusionsService.replace — SL-9 re-inclusion trigger", () =
 
   it("rejects an unknown spec", async () => {
     await expect(service.replace(SPEC_ID, [], OPERATOR)).rejects.toThrow(/not found/);
+  });
+});
+
+/**
+ * **SL-9 — a re-inclusion must never be silently swallowed.** Only one un-finished
+ * `mapping_detection_job` may exist per spec, and a *scoped* job freezes its resource
+ * list in the row, so an `ON CONFLICT DO NOTHING` collapse would drop the re-included
+ * group forever (the reconciliation sweep only re-derives specs with *no* job at all)
+ * while still committing the scope change and an audit row claiming an analysis.
+ *
+ * Every branch below therefore either guarantees the analysis or refuses the edit — and
+ * an audit row exists **iff** the analysis was guaranteed, which is what keeps the OB-2
+ * count honest.
+ */
+describe("AnalysisExclusionsService.replace — collapse against an un-finished job", () => {
+  const JOB_ID = "66666666-6666-4666-8666-666666666666";
+
+  it("merges into a still-pending re-inclusion job instead of dropping the refs", async () => {
+    seedSpec(store, ["audit"]);
+    // The first removal's job, not yet claimed by the worker.
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "pending",
+      scope: { kind: "re-inclusion", reincludedResourceGroups: ["labels"] },
+    };
+
+    await service.replace(SPEC_ID, [], OPERATOR);
+
+    // `audit` joined `labels` in the SAME job — neither is lost.
+    expect(store.unfinishedDetectionJob.scope).toEqual({
+      kind: "re-inclusion",
+      reincludedResourceGroups: ["labels", "audit"],
+    });
+    // No second job was inserted (the partial-unique index forbids it).
+    expect(store.scopedDetectionJobs).toEqual([]);
+    expect(store.auditLog).toHaveLength(1);
+    expect(store.auditLog[0]?.details).toContain("merged into the pending re-inclusion job");
+  });
+
+  it("does not duplicate a ref already queued in the pending re-inclusion job", async () => {
+    seedSpec(store, ["labels"]);
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "pending",
+      scope: { kind: "re-inclusion", reincludedResourceGroups: ["labels"] },
+    };
+
+    await service.replace(SPEC_ID, [], OPERATOR);
+
+    expect(store.unfinishedDetectionJob.scope).toEqual({
+      kind: "re-inclusion",
+      reincludedResourceGroups: ["labels"],
+    });
+  });
+
+  it("accepts a collapse onto a pending FULL detection job (it re-derives from current state)", async () => {
+    seedSpec(store, ["labels"]);
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "pending",
+      scope: null,
+    };
+
+    const updated = await service.replace(SPEC_ID, [], OPERATOR);
+
+    // A full run re-reads the spec (and its exclusions) when the worker claims it, so
+    // the re-included group is analyzed without a job of our own.
+    expect(updated.analysisExclusions).toEqual([]);
+    expect(store.scopedDetectionJobs).toEqual([]);
+    expect(store.auditLog).toHaveLength(1);
+    expect(store.auditLog[0]?.details).toContain("folded into the pending full detection run");
+  });
+
+  it("rejects with 409 while an analysis is RUNNING — it already read the exclusions", async () => {
+    seedSpec(store, ["labels"]);
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "running",
+      scope: null,
+    };
+
+    await expect(service.replace(SPEC_ID, [], OPERATOR)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+
+    // NOTHING committed: the exclusion stands, no job, and — crucially — no audit row
+    // claiming an analysis that would never have happened.
+    expect(store.specs.get(SPEC_ID)?.analysisExclusions).toEqual(["labels"]);
+    expect(store.scopedDetectionJobs).toEqual([]);
+    expect(store.auditLog).toEqual([]);
+  });
+
+  it("rejects with 409 when a pending scoped job of another kind cannot absorb the refs", async () => {
+    seedSpec(store, ["labels"]);
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "pending",
+      scope: {
+        kind: "additive-delta",
+        supersededSpecId: "77777777-7777-4777-8777-777777777777",
+        newResourceGroups: ["orders"],
+        changedResources: [],
+      },
+    };
+
+    await expect(service.replace(SPEC_ID, [], OPERATOR)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+
+    // The other job's frozen scope is left exactly as it was — never overwritten.
+    expect(store.unfinishedDetectionJob.scope).toEqual({
+      kind: "additive-delta",
+      supersededSpecId: "77777777-7777-4777-8777-777777777777",
+      newResourceGroups: ["orders"],
+      changedResources: [],
+    });
+    expect(store.specs.get(SPEC_ID)?.analysisExclusions).toEqual(["labels"]);
+    expect(store.auditLog).toEqual([]);
+  });
+
+  it("still triggers nothing for a pure exclusion ADD, whatever job is in flight", async () => {
+    seedSpec(store, ["labels"]);
+    store.unfinishedDetectionJob = {
+      apiSpecId: SPEC_ID,
+      id: JOB_ID,
+      status: "running",
+      scope: null,
+    };
+
+    // No re-inclusion → the collapse resolution is never consulted → no 409.
+    const updated = await service.replace(SPEC_ID, ["labels", "audit"], OPERATOR);
+
+    expect(updated.analysisExclusions).toEqual(["labels", "audit"]);
+    expect(store.auditLog).toEqual([]);
   });
 });

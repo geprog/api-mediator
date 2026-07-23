@@ -7,6 +7,7 @@ import type {
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
   SourceScopeRefPatch,
+  UnfinishedDetectionJob,
 } from "@mediator/db";
 import {
   ApiSpecRepository,
@@ -250,9 +251,19 @@ export interface AuditTxRepo {
  * re-pin/carry-forward. The slow LLM/network work runs later in the worker,
  * outside this transaction (DT-2). Deliberately narrow — the reaction only records
  * intent, exactly as the `SpecIngested` consumer records a full detection job.
+ *
+ * `enqueueScoped` reports whether it actually inserted: a scoped job freezes its
+ * payload in the row, so a collapse against an un-finished job discards that
+ * descriptor's work rather than deduplicating it. SL-9 resolves such a collapse
+ * in-transaction via {@link lockUnfinishedJob} + {@link updateScope} rather than
+ * committing a silent loss.
  */
 export interface DetectionJobTxRepo {
-  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void>;
+  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<boolean>;
+  /** The spec's un-finished job, locked `FOR UPDATE` so the collapse resolution is race-free. */
+  lockUnfinishedJob(apiSpecId: string): Promise<UnfinishedDetectionJob | undefined>;
+  /** Replace a locked job's frozen `scope` (the SL-9 merge into a pending re-inclusion job). */
+  updateScope(id: string, scope: DetectionJobScope): Promise<void>;
 }
 
 /**

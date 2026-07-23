@@ -15,6 +15,7 @@ import {
   type EventConsumer,
   type Reconciler,
 } from "@mediator/event-bus";
+import { assertNever } from "@mediator/domain";
 import { PROMPT_VERSION, type LLMMappingProvider } from "@mediator/llm";
 import {
   createDbPriorProposalSource,
@@ -138,52 +139,61 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
     if (scope === null) {
       throw new Error("runScopedDetection: claimed job carries no scope");
     }
-    if (scope.kind === "additive-delta") {
-      const result = await runScopedAdditiveAnalysis(
-        {
-          newSpecId: job.apiSpecId,
-          supersededSpecId: scope.supersededSpecId,
-          scope: {
-            newResourceGroups: scope.newResourceGroups,
-            changedResources: scope.changedResources,
+    // Exhaustive over `DetectionJobScope`: a newly-added scope kind is a COMPILE error
+    // here (`assertNever`), never a job silently executed as the wrong analysis.
+    switch (scope.kind) {
+      case "additive-delta": {
+        const result = await runScopedAdditiveAnalysis(
+          {
+            newSpecId: job.apiSpecId,
+            supersededSpecId: scope.supersededSpecId,
+            scope: {
+              newResourceGroups: scope.newResourceGroups,
+              changedResources: scope.changedResources,
+            },
           },
-        },
-        { ...runDetectionDeps, priorProposals },
-      );
-      sink.onDetectionRun(result);
-      return;
-    }
-    if (scope.kind === "re-inclusion") {
-      // SL-9 — an exclusion the operator removed puts those resource groups back in scope
-      // for the SAME spec version. That is exactly SL-3.1's "a resource group newly in
-      // scope": one scoped shortlist per counterpart, then detail for what gets
-      // shortlisted. No `supersededSpecId` (nothing was superseded) and no
-      // `changedResources`, so no prior-proposal lookup runs. The result is an ordinary
-      // `pending` MappingProposal reviewed through the Phase-3 flow (SL-9.2).
-      const result = await runScopedAdditiveAnalysis(
-        {
-          newSpecId: job.apiSpecId,
-          scope: {
-            newResourceGroups: scope.reincludedResourceGroups,
-            changedResources: [],
+          { ...runDetectionDeps, priorProposals },
+        );
+        sink.onDetectionRun(result);
+        return;
+      }
+      case "re-inclusion": {
+        // SL-9 — an exclusion the operator removed puts those resource groups back in
+        // scope for the SAME spec version. That is exactly SL-3.1's "a resource group
+        // newly in scope": one scoped shortlist per counterpart, then detail for what
+        // gets shortlisted. No `supersededSpecId` (nothing was superseded) and no
+        // `changedResources`, so no prior-proposal lookup runs. The result is an ordinary
+        // `pending` MappingProposal reviewed through the Phase-3 flow (SL-9.2).
+        const result = await runScopedAdditiveAnalysis(
+          {
+            newSpecId: job.apiSpecId,
+            scope: {
+              newResourceGroups: scope.reincludedResourceGroups,
+              changedResources: [],
+            },
           },
-        },
-        { ...runDetectionDeps, priorProposals },
-      );
-      sink.onDetectionRun(result);
-      return;
+          { ...runDetectionDeps, priorProposals },
+        );
+        sink.onDetectionRun(result);
+        return;
+      }
+      case "re-review": {
+        // SL-6 — the scoped breaking re-review: a detail-only successor proposal per
+        // stale mapping, with the stale mapping's approved content as `priorFeedback`.
+        const result = await runScopedReReviewAnalysis(
+          {
+            newSpecId: job.apiSpecId,
+            supersededSpecId: scope.supersededSpecId,
+            staleMappings: scope.staleMappings,
+          },
+          { ...runDetectionDeps, staleMappings: staleMappingSource },
+        );
+        sink.onDetectionRun(result);
+        return;
+      }
+      default:
+        return assertNever(scope);
     }
-    // SL-6 — the scoped breaking re-review: a detail-only successor proposal per stale
-    // mapping, with the stale mapping's approved content as `priorFeedback`.
-    const result = await runScopedReReviewAnalysis(
-      {
-        newSpecId: job.apiSpecId,
-        supersededSpecId: scope.supersededSpecId,
-        staleMappings: scope.staleMappings,
-      },
-      { ...runDetectionDeps, staleMappings: staleMappingSource },
-    );
-    sink.onDetectionRun(result);
   };
 
   // ── Consumer + dispatcher: enqueue-in-tx, no LLM ──────────────────────────

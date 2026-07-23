@@ -229,4 +229,5 @@ export {
   type SyncRuleAdvance,
   type SyncRuleConfigPatch,
   type SyncRuleEnableTransition,
+  type UnfinishedDetectionJob,
 } from "./repositories/index.js";

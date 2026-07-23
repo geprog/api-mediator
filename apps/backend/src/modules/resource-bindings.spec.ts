@@ -123,7 +123,11 @@ class FakeUnitOfWork implements UnitOfWork {
         markStale: (): Promise<undefined> => Promise.resolve(undefined),
       },
       audit: { insert: (): Promise<void> => Promise.resolve() },
-      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      detectionJobs: {
+        enqueueScoped: (): Promise<boolean> => Promise.resolve(true),
+        lockUnfinishedJob: (): Promise<undefined> => Promise.resolve(undefined),
+        updateScope: (): Promise<void> => Promise.resolve(),
+      },
       // SL-4 breaking-reaction ports — unused by the SS-19 confirm path exercised here.
       mappingArtifacts: {
         listFieldMappings: (): Promise<never[]> => Promise.resolve([]),

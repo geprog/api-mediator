@@ -37,7 +37,10 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createServerLogger } from "./composition-root.js";
-import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
+import {
+  AnalysisExclusionsService,
+  RE_INCLUSION_AUDIT_PREFIX,
+} from "./modules/analysis-exclusions.js";
 import {
   buildDetectionBackground,
   type DetectionBackground,
@@ -101,6 +104,22 @@ const issuesGroup: IrResourceGroup = {
     },
   ],
   schemas: [{ name: "Issue", fields: [{ name: "title", type: "string", required: true }] }],
+  crossResourceRefs: [],
+};
+/** A second excluded resource, re-included while the first one's job is still pending. */
+const webhooksGroup: IrResourceGroup = {
+  resourceRef: "webhooks",
+  name: "Webhooks",
+  operations: [
+    {
+      operationId: "listWebhooks",
+      method: "get",
+      path: "/webhooks",
+      summary: "List webhooks",
+      parameters: [],
+    },
+  ],
+  schemas: [{ name: "Webhook", fields: [{ name: "url", type: "string", required: true }] }],
   crossResourceRefs: [],
 };
 /** The counterpart spec's resource `labels` shortlists against. */
@@ -299,8 +318,13 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
     await new RegisteredAppRepository(db).create(appA);
     await new RegisteredAppRepository(db).create(appB);
 
-    // Spec A holds the excluded `labels` plus the unrelated `issues`; B is the counterpart.
-    specA = await seedSpec(appA.id, [issuesGroup, labelsGroup], ["labels"]);
+    // Spec A holds two excluded groups (`labels`, `webhooks`) plus the unrelated,
+    // never-excluded `issues`; B is the counterpart.
+    specA = await seedSpec(
+      appA.id,
+      [issuesGroup, labelsGroup, webhooksGroup],
+      ["labels", "webhooks"],
+    );
     specB = await seedSpec(appB.id, [tasksGroup], []);
 
     // A pre-existing, human-approved mapping over the UNRELATED `issues` resource.
@@ -334,7 +358,10 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
     // the one that ships — with a deterministic FakeProvider instead of a live model.
     const provider = new FakeProvider({
       shortlistKey: (ctx) => ctx.sourceSpecSummaryIR.map((group) => group.resourceRef).join(","),
-      shortlist: { labels: [labelsShortlist] },
+      // Keyed by the SOURCE summary only, so it is robust to any extra active counterpart
+      // the shared DB might hold. Both keys pair `labels`→`tasks` and leave `webhooks`
+      // unpaired; the merged-scope run summarizes both groups in one call.
+      shortlist: { labels: [labelsShortlist], "labels,webhooks": [labelsShortlist] },
       detail: {
         "labels=>tasks@peer-peer": [peerDetail("listLabels", "listTasks")],
         "tasks=>labels@peer-peer": [peerDetail("listTasks", "listLabels")],
@@ -380,8 +407,8 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
     const service = new AnalysisExclusionsService({ unitOfWork });
 
     // ── Removing `labels` from analysisExclusions (SL-9.1) ────────────────────
-    const updated = await service.replace(specA.id, [], OPERATOR);
-    expect(updated.analysisExclusions).toEqual([]);
+    const updated = await service.replace(specA.id, ["webhooks"], OPERATOR);
+    expect(updated.analysisExclusions).toEqual(["webhooks"]);
 
     // The intent is recorded in-tx; NO proposal exists yet (the LLM work is off the tx).
     const pending = (await jobs.listByStatus("pending")).filter(
@@ -396,18 +423,35 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
     expect(await proposalRepo.listBySourceSpecId(specA.id)).toHaveLength(0);
 
     // SL-9.5 — a durable, countable, operator-attributed audit row exists.
-    const auditRows = await db.select().from(auditLog).where(eq(auditLog.actor, OPERATOR));
-    const reInclusionRows = auditRows.filter((row) => row.details?.includes("re-inclusion"));
-    expect(reInclusionRows).toHaveLength(1);
-    expect(reInclusionRows[0]?.details).toContain("labels");
-    expect(reInclusionRows[0]?.details).toContain(specA.id);
+    expect(await reInclusionAuditRows()).toHaveLength(1);
+    expect((await reInclusionAuditRows())[0]?.details).toContain("labels");
+    expect((await reInclusionAuditRows())[0]?.details).toContain(specA.id);
 
-    // Idempotency (same partial-unique index as DT-2): a repeated replace of the same
-    // list re-includes nothing, and a redelivered scoped enqueue collapses to one job.
+    // ── A SECOND removal while that job is still pending must not be swallowed ──
+    // Only one un-finished job may exist per spec, and a scoped job's resource list is
+    // frozen in the row, so an `ON CONFLICT DO NOTHING` collapse here would silently
+    // drop `webhooks` forever. It merges into the pending job instead.
+    await service.replace(specA.id, [], OPERATOR);
+
+    const afterMerge = (await jobs.listByStatus("pending")).filter(
+      (job) => job.apiSpecId === specA.id,
+    );
+    expect(afterMerge).toHaveLength(1);
+    expect(afterMerge[0]?.id).toBe(pending[0]?.id); // the SAME row, rewritten
+    expect(afterMerge[0]?.scope).toEqual({
+      kind: "re-inclusion",
+      reincludedResourceGroups: ["labels", "webhooks"],
+    });
+    const merged = await reInclusionAuditRows();
+    expect(merged).toHaveLength(2);
+    expect(merged[1]?.details).toContain("merged into the pending re-inclusion job");
+
+    // An identical replace re-includes nothing at all, so it records no job and no row.
     await service.replace(specA.id, [], OPERATOR);
     expect(
       (await jobs.listByStatus("pending")).filter((job) => job.apiSpecId === specA.id),
     ).toHaveLength(1);
+    expect(await reInclusionAuditRows()).toHaveLength(2);
 
     // ── The real worker claims it and runs the scoped analysis off-transaction ──
     for (let pass = 0; pass < 10; pass += 1) {
@@ -445,6 +489,12 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
       expect(await proposalRepo.listItems(proposal.id)).not.toHaveLength(0);
     }
 
+    // The MERGED second removal was analyzed too — `webhooks` was summarized and
+    // shortlisted (finding no counterpart), which is what would have been lost had the
+    // collapsed enqueue been swallowed.
+    const noCounterpart = forward[0]?.shortlistResult?.noCounterpartResources ?? [];
+    expect(noCounterpart.some((resource) => resource.resourceRef === "webhooks")).toBe(true);
+
     // ── SL-9.3 — the pre-existing ApprovedMapping and its children are UNTOUCHED ──
     const mappingAfter = await new ApprovedMappingRepository(db).getById(seededMapping.id);
     expect(mappingAfter).toStrictEqual(seededMapping);
@@ -453,4 +503,42 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
     );
     expect(fieldsAfter).toStrictEqual([seededField]);
   });
+
+  /**
+   * SL-9 — the collapse that CANNOT be resolved. A `running` analysis already read the
+   * spec's exclusions, so it can never pick up a newly re-included group, and its row
+   * must not be rewritten underneath it. The `replace` is refused with a 409 and the
+   * whole transaction rolls back — no exclusion change, and above all no audit row
+   * claiming an analysis that would never have run.
+   */
+  it("refuses the re-inclusion with a 409 while an analysis is running, committing nothing", async () => {
+    const service = new AnalysisExclusionsService({ unitOfWork });
+
+    // Re-exclude `labels` first (an exclusion ADD never triggers anything), then stage a
+    // running job for this spec — the state a mid-flight LLM analysis leaves behind.
+    await service.replace(specA.id, ["labels"], OPERATOR);
+    const auditBefore = await reInclusionAuditRows();
+    await db
+      .insert(mappingDetectionJob)
+      .values({ apiSpecId: specA.id, status: "running", startedAt: new Date() });
+
+    await expect(service.replace(specA.id, [], OPERATOR)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+
+    // Rolled back: the exclusion still stands and no new audit row was written.
+    const specAfter = await new ApiSpecRepository(db).getById(specA.id);
+    expect(specAfter?.analysisExclusions).toEqual(["labels"]);
+    expect(await reInclusionAuditRows()).toHaveLength(auditBefore.length);
+  });
+
+  /** This suite's re-inclusion audit rows, oldest first (SL-9.5's countable signal). */
+  async function reInclusionAuditRows(): Promise<{ details: string | null }[]> {
+    const rows = await db
+      .select({ details: auditLog.details, timestamp: auditLog.timestamp })
+      .from(auditLog)
+      .where(eq(auditLog.actor, OPERATOR))
+      .orderBy(auditLog.timestamp);
+    return rows.filter((row) => row.details?.startsWith(RE_INCLUSION_AUDIT_PREFIX) === true);
+  }
 });

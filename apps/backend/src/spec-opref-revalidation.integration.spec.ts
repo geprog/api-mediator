@@ -280,7 +280,11 @@ suite("SL-5 breaking operational-ref re-validation (requires Postgres)", () => {
       credentialStore: unusedCredentials,
       approvedMappings: new ApprovedMappingRepository(handle),
       audit: new AuditLogRepository(handle),
-      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      detectionJobs: {
+        enqueueScoped: (): Promise<boolean> => Promise.resolve(true),
+        lockUnfinishedJob: (): Promise<undefined> => Promise.resolve(undefined),
+        updateScope: (): Promise<void> => Promise.resolve(),
+      },
       mappingArtifacts: new MappingArtifactsRepository(handle),
       downstreamArtifacts: new DownstreamArtifactRepository(handle),
       graph: {
