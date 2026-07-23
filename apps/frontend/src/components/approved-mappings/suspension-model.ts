@@ -1,3 +1,4 @@
+import type { ApprovedMappingDto } from "@mediator/contracts";
 import type { ApprovedMappingStatus } from "@mediator/domain";
 
 /**
@@ -49,6 +50,35 @@ export function suspensionAction(status: ApprovedMappingStatus): SuspensionActio
           "This mapping was archived when its app was deregistered. It is retained for audit and never executed again.",
       };
   }
+}
+
+/**
+ * Why a **status-eligible** resume would still be refused by the server, or `null` when
+ * nothing blocks it. Derived from the list the screen already has — no extra request.
+ *
+ * The one case: a mapping's directional spec pair has a single `active` slot (the
+ * `approved_mapping_active_direction_uq` index), and while this mapping was suspended a
+ * later approval took it. Resume then returns `409` with nothing the operator can do from
+ * this screen, so the affordance is withdrawn and the reason shown instead of letting them
+ * click into a dead end.
+ */
+export function resumeBlockedReason(
+  mapping: ApprovedMappingDto,
+  allMappings: readonly ApprovedMappingDto[],
+): string | null {
+  if (mapping.status !== "suspended") {
+    return null;
+  }
+  const incumbent = allMappings.find(
+    (candidate) =>
+      candidate.id !== mapping.id &&
+      candidate.status === "active" &&
+      candidate.sourceSpecId === mapping.sourceSpecId &&
+      candidate.targetSpecId === mapping.targetSpecId,
+  );
+  return incumbent === undefined
+    ? null
+    : `Another mapping (${incumbent.id}) became the active mapping for this same spec pair while this one was suspended. Only one mapping per direction can be active, so this one can no longer be resumed.`;
 }
 
 /**

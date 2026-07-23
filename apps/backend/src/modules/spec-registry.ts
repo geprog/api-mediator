@@ -443,11 +443,18 @@ export class SpecRegistry {
     for (const mapping of mappings) {
       const fields = await tx.mappingArtifacts.listFieldMappings(mapping.id);
       const operations = await tx.mappingArtifacts.listOperationMappings(mapping.id);
-      const refs = mappingChangedSideRefs(mapping, supersededSpec.id, fields, operations);
       if (mapping.variant === "peer-peer" && mapping.sourceSpecId === supersededSpec.id) {
         changedSourceMappings.push(mapping);
       }
-      if (mappingReferencesChangedElement(refs, affected)) {
+      // The ONE per-mapping verdict, shared verbatim with the SL-10.2 resume catch-up.
+      const verdict = classifyMappingAgainstBreaking(
+        mapping,
+        supersededSpec.id,
+        fields,
+        operations,
+        affected,
+      );
+      if (verdict.staled) {
         // SL-4.1/4.2/4.3 — stale, and STAYS pinned to the reviewed (superseded) version.
         await tx.approvedMappings.markStale(mapping.id);
         await tx.audit.insert(staleAuditEntry(mapping, supersededSpec, newSpec, now));
@@ -456,13 +463,7 @@ export class SpecRegistry {
         // detail-only re-review (computed here from the one classification — SL-1.6).
         reReviewDescriptors.push({
           staleMappingId: mapping.id,
-          affectedPairs: computeReReviewAffectedPairs(
-            mapping,
-            supersededSpec.id,
-            fields,
-            operations,
-            affected,
-          ),
+          affectedPairs: [...verdict.affectedPairs],
         });
       } else if (mapping.status === "active") {
         // SL-4.1 — references no changed element → advance exactly as the additive case.
@@ -979,6 +980,49 @@ export function mappingReferencesChangedElement(
  * stale mapping's re-review is never scoped down to nothing (SL-6.5). Carries only
  * version-stable `resourceRef`s — never IR payload, never a secret.
  */
+/**
+ * **The per-mapping breaking verdict (SL-4.1 + SL-6.1) — one classification, two callers.**
+ * Composes the three matching primitives into the single decision both the Spec Registry's
+ * {@link SpecRegistry.applyBreakingReaction} (at advance time) and the SL-10.2 **resume
+ * catch-up** (at resume time, for a mapping whose hold spanned the advance) make: does this
+ * mapping reference an element the breaking diff invalidated, and if so which resource pairs
+ * does the scoped re-review cover?
+ *
+ * Extracted so the two paths can never drift — a mapping held through a breaking advance is
+ * classified by the **same** rule as one that was active for it, so a hold defers the
+ * reaction without changing its outcome. Pure.
+ */
+export interface MappingBreakingVerdict {
+  /** The mapping references a changed element → it goes `stale` and awaits re-review. */
+  readonly staled: boolean;
+  /** SL-6.1 — the resource pairs the break touched (empty unless `staled`). */
+  readonly affectedPairs: readonly ReReviewResourcePair[];
+}
+
+/** {@link MappingBreakingVerdict} for `mapping` against a breaking diff on `changedSpecId`. Pure. */
+export function classifyMappingAgainstBreaking(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId" | "variant">,
+  changedSpecId: string,
+  fields: readonly FieldMapping[],
+  operations: readonly OperationMapping[],
+  affected: BreakingAffectedKeys,
+): MappingBreakingVerdict {
+  const refs = mappingChangedSideRefs(mapping, changedSpecId, fields, operations);
+  if (!mappingReferencesChangedElement(refs, affected)) {
+    return { staled: false, affectedPairs: [] };
+  }
+  return {
+    staled: true,
+    affectedPairs: computeReReviewAffectedPairs(
+      mapping,
+      changedSpecId,
+      fields,
+      operations,
+      affected,
+    ),
+  };
+}
+
 export function computeReReviewAffectedPairs(
   mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
   supersededSpecId: string,
@@ -1284,7 +1328,7 @@ export function pollOperationResolves(pollOperationRef: string, ir: Ir): boolean
  * one is a schema migration this deterministic slice deliberately avoids. `details` is
  * metadata only — the side that advanced and the spec ids/version — never a secret.
  */
-function repinAuditEntry(
+export function repinAuditEntry(
   mapping: ApprovedMapping,
   supersededSpec: ApiSpec,
   newSpec: ApiSpec,
@@ -1308,7 +1352,7 @@ function repinAuditEntry(
  * slice): the side whose spec broke and the superseded/new spec ids, never a secret. Makes
  * the stale transition queryable in the audit log alongside the re-pins (SL-4.5).
  */
-function staleAuditEntry(
+export function staleAuditEntry(
   mapping: ApprovedMapping,
   supersededSpec: ApiSpec,
   newSpec: ApiSpec,

@@ -4,6 +4,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  DetectionJobRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
   RegisteredAppRepository,
@@ -18,6 +19,7 @@ import {
   closeDb,
   createDb,
   graphEdge,
+  mappingDetectionJob,
   registeredApp,
   resolveDatabaseUrl,
   resourceBinding,
@@ -26,6 +28,7 @@ import {
   tx,
   type Database,
   type DbHandle,
+  type DetectionJobScope,
 } from "@mediator/db";
 import type {
   AdapterBinding,
@@ -176,15 +179,19 @@ suite("SL-10 manual suspend / resume of an ApprovedMapping (requires Postgres)",
   const mappingIds: string[] = [];
   /** Every `invalidateEndpoint` the transitions drove, in order (the XI-2 spy). */
   const cacheDrops: string[] = [];
+  /** Every scoped detection job recorded in-tx (the SL-6 re-review trigger spy). */
+  const enqueuedJobs: { apiSpecId: string; scope: DetectionJobScope }[] = [];
 
   beforeAll(async () => {
     db = createDb(resolveDatabaseUrl(process.env));
     await runMigrations(db);
     graphProjection = new GraphProjection({ db, newId: randomUUID });
     suspension = new ApprovedMappingSuspensionService({
-      db,
+      // A real transaction over the SAME hand-built `TxStores` (all real repositories +
+      // the real `GraphProjection`) the Spec Registry runs on below, so the catch-up's
+      // re-pin / mark-stale / re-review paths hit real rows and real constraints.
+      unitOfWork: { run: (work) => tx(db, (handle) => work(txStoresOn(handle))) },
       newId: randomUUID,
-      graphProjection,
       cacheInvalidator: {
         invalidateEndpoint: (endpointId) => {
           cacheDrops.push(endpointId);
@@ -214,6 +221,12 @@ suite("SL-10 manual suspend / resume of an ApprovedMapping (requires Postgres)",
         .from(apiSpec)
         .where(inArray(apiSpec.appId, appIds));
       const allSpecIds = specRows.map((row) => row.id);
+      if (allSpecIds.length > 0) {
+        // FK `api_spec` — the SL-6 re-review jobs must go before their spec rows.
+        await db
+          .delete(mappingDetectionJob)
+          .where(inArray(mappingDetectionJob.apiSpecId, allSpecIds));
+      }
       if (allSpecIds.length > 0) {
         const bindingRows = await db
           .select({ id: resourceBinding.id })
@@ -297,7 +310,14 @@ suite("SL-10 manual suspend / resume of an ApprovedMapping (requires Postgres)",
       credentialStore: unusedCredentials,
       approvedMappings: new ApprovedMappingRepository(handle),
       audit: new AuditLogRepository(handle),
-      detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      // The REAL enqueue (so the SL-6 job row is really written against the real schema),
+      // wrapped to record the scope for assertions.
+      detectionJobs: {
+        enqueueScoped: async (apiSpecId, scope): Promise<void> => {
+          enqueuedJobs.push({ apiSpecId, scope });
+          await new DetectionJobRepository(handle).enqueueScoped(apiSpecId, scope);
+        },
+      },
       mappingArtifacts: new MappingArtifactsRepository(handle),
       downstreamArtifacts: new DownstreamArtifactRepository(handle),
       graph: {
@@ -669,5 +689,252 @@ suite("SL-10 manual suspend / resume of an ApprovedMapping (requires Postgres)",
     await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toBeInstanceOf(ConflictError);
     await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toThrow(/re-review/i);
     expect((await mappings.getById(mapping.id))?.status).toBe("stale");
+  });
+
+  // ── SL-10.2 — the resume pin catch-up: a hold DEFERS the lifecycle, never exempts it ──
+
+  /** Seed a suspended peer-peer mapping on a real provider v1 + a bare peer spec. */
+  async function seedSuspendedMapping(label: string): Promise<{
+    provider: RegisteredApp;
+    providerV1: ApiSpec;
+    peerSpec: ApiSpec;
+    mapping: ApprovedMapping;
+  }> {
+    const provider = makeApp(`${label} provider`);
+    const peer = makeApp(`${label} peer`);
+    const appRepo = new RegisteredAppRepository(db);
+    await appRepo.create(provider);
+    await appRepo.create(peer);
+    const providerV1 = await seedProviderV1(provider.id);
+    const peerSpec = await seedBareSpec(peer.id);
+
+    const mapping: ApprovedMapping = {
+      id: randomUUID(),
+      sourceSpecId: providerV1.id,
+      targetSpecId: peerSpec.id,
+      sourceAppId: provider.id,
+      targetAppId: peer.id,
+      variant: "peer-peer",
+      approvedBy: "reviewer:alice",
+      approvedAt: CREATED_AT,
+      status: "active",
+    };
+    mappingIds.push(mapping.id);
+    await new ApprovedMappingRepository(db).insert(mapping);
+    // References `issues.title` — the field the breaking bump retypes.
+    await new MappingArtifactsRepository(db).replaceChildren(mapping.id, {
+      fieldMappings: [
+        {
+          id: randomUUID(),
+          mappingId: mapping.id,
+          sourcePath: "issues/title",
+          targetPath: "issues/title",
+          transform: "rename",
+        },
+      ],
+      operationMappings: [],
+      parameterMappings: [],
+    });
+    await suspension.suspend(mapping.id, OPERATOR);
+    return { provider, providerV1, peerSpec, mapping };
+  }
+
+  /** An ADDITIVE bump of the provider doc: a new optional `Issue.assignee` field. */
+  function providerDocWithAddedField(): Record<string, unknown> {
+    const document = providerDoc("string");
+    return {
+      ...document,
+      components: {
+        schemas: {
+          Issue: {
+            type: "object",
+            properties: {
+              id: { type: "integer" },
+              title: { type: "string" },
+              assignee: { type: "string" },
+            },
+            required: ["id"],
+          },
+          Label: {
+            type: "object",
+            properties: { id: { type: "integer" }, name: { type: "string" } },
+            required: ["id"],
+          },
+        },
+      },
+    };
+  }
+
+  it("resume after an ADDITIVE advance during the hold re-pins to the current version and activates", async () => {
+    const { provider, providerV1, peerSpec, mapping } =
+      await seedSuspendedMapping("SL-10 additive");
+
+    // An additive advance lands while suspended. SL-2 re-pins only ACTIVE mappings, so the
+    // suspended mapping is left pinned to v1 and v1 becomes `superseded`.
+    const outcome = await tx(db, (handle) =>
+      registry.ingestNewVersion(
+        provider.id,
+        providerDocWithAddedField(),
+        "PROVIDER",
+        txStoresOn(handle),
+      ),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("additive");
+    const v2Id = outcome.newSpec.id;
+    specIds.push(v2Id);
+
+    const mappings = new ApprovedMappingRepository(db);
+    expect((await mappings.getById(mapping.id))?.sourceSpecId).toBe(providerV1.id);
+    expect((await new ApiSpecRepository(db).getById(providerV1.id))?.status).toBe("superseded");
+
+    // ── Resume catches the mapping up: nothing it references broke → re-pin, then activate. ──
+    const resumed = await suspension.resume(mapping.id, OPERATOR);
+    expect(resumed.status).toBe("active");
+    // The load-bearing assertion: it is pinned to the CURRENT active version, never a
+    // superseded one (data-model `ApprovedMapping.sourceSpecId`), so every later advance
+    // still finds it.
+    expect(resumed.sourceSpecId).toBe(v2Id);
+    expect(resumed.targetSpecId).toBe(peerSpec.id); // the untouched side is carried forward
+    const reloaded = await mappings.getById(mapping.id);
+    expect(reloaded?.sourceSpecId).toBe(v2Id);
+
+    // It is now in the ACTIVE set a subsequent advance of v2 would re-pin — no longer orphaned.
+    expect((await mappings.listActiveBySpecId(v2Id)).map((row) => row.id)).toContain(mapping.id);
+
+    // SL-2's re-pin audit row was written alongside the operator's resume row.
+    const rows = await auditFor(mapping.id);
+    expect(rows.some((row) => row.details?.includes("re-pinned") === true)).toBe(true);
+    expect(rows.some((row) => row.actor === OPERATOR && row.details?.includes("resumed"))).toBe(
+      true,
+    );
+  });
+
+  it("resume after a BREAKING advance during the hold marks stale, triggers SL-6 re-review, and is rejected", async () => {
+    const { provider, providerV1, mapping } = await seedSuspendedMapping("SL-10 breaking-hold");
+    enqueuedJobs.length = 0;
+
+    // A BREAKING advance lands while suspended. The suspended mapping is pinned to v1, so
+    // the advance's own SL-4 pass classifies it — but to isolate the catch-up we assert the
+    // resume path drives the reaction for a mapping the advance could not reach: re-pin it
+    // back to v1 first is unnecessary here, because SL-10.5 already stales it at advance
+    // time. Instead this case proves the SAME outcome is reached via resume for a mapping
+    // whose break is only discovered at resume time (below, the two-advance case).
+    const outcome = await tx(db, (handle) =>
+      registry.ingestNewVersion(
+        provider.id,
+        providerDoc("integer"),
+        "PROVIDER",
+        txStoresOn(handle),
+      ),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+    specIds.push(outcome.newSpec.id);
+
+    const mappings = new ApprovedMappingRepository(db);
+    // SL-10.5 (advance-time) — already stale, pinned to v1.
+    expect((await mappings.getById(mapping.id))?.status).toBe("stale");
+    expect((await mappings.getById(mapping.id))?.sourceSpecId).toBe(providerV1.id);
+    // ...and resume is refused with the re-review reason.
+    await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toThrow(/re-review/i);
+  });
+
+  it("resume across TWO advances (additive then breaking) stales via the catch-up and is rejected", async () => {
+    const { provider, providerV1, mapping } = await seedSuspendedMapping("SL-10 two-advance");
+    enqueuedJobs.length = 0;
+    cacheDrops.length = 0;
+
+    // (1) ADDITIVE v1 → v2 while suspended: SL-2 re-pins only active mappings, so the
+    //     suspended mapping stays pinned to v1 and the advance's SL-4 pass does not stale it.
+    const additive = await tx(db, (handle) =>
+      registry.ingestNewVersion(
+        provider.id,
+        providerDocWithAddedField(),
+        "PROVIDER",
+        txStoresOn(handle),
+      ),
+    );
+    if (additive.kind !== "advanced") throw new Error("expected advanced");
+    expect(additive.diff.classification).toBe("additive");
+    specIds.push(additive.newSpec.id);
+
+    const mappings = new ApprovedMappingRepository(db);
+    expect((await mappings.getById(mapping.id))?.status).toBe("suspended");
+    expect((await mappings.getById(mapping.id))?.sourceSpecId).toBe(providerV1.id);
+
+    // (2) BREAKING v2 → v3. The mapping is pinned to v1, so the advance looks up by v2 and
+    //     CANNOT see it — this is exactly the detachment the catch-up exists to close.
+    const breaking = await tx(db, (handle) =>
+      registry.ingestNewVersion(
+        provider.id,
+        providerDoc("integer"),
+        "PROVIDER",
+        txStoresOn(handle),
+      ),
+    );
+    if (breaking.kind !== "advanced") throw new Error("expected advanced");
+    expect(breaking.diff.classification).toBe("breaking");
+    const v3Id = breaking.newSpec.id;
+    specIds.push(v3Id);
+    // The advance did NOT reach it (still suspended, still pinned to v1).
+    expect((await mappings.getById(mapping.id))?.status).toBe("suspended");
+
+    // ── Resume diffs pinned v1 → current v3 in ONE comparison and finds the break. ──
+    enqueuedJobs.length = 0;
+    await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toBeInstanceOf(ConflictError);
+
+    // The stale mark COMMITTED even though the resume was rejected.
+    const after = await mappings.getById(mapping.id);
+    expect(after?.status).toBe("stale");
+    // SL-4.3 — a stale mapping stays pinned to the version it was reviewed against.
+    expect(after?.sourceSpecId).toBe(providerV1.id);
+
+    // SL-6 — the scoped re-review job that produces the successor proposal was recorded
+    // against the CURRENT active version, scoped to this one mapping and the touched pair.
+    expect(enqueuedJobs).toHaveLength(1);
+    const job = enqueuedJobs[0];
+    if (job?.scope.kind !== "re-review") throw new Error("expected a re-review scope");
+    expect(job.apiSpecId).toBe(v3Id);
+    expect(job.scope.supersededSpecId).toBe(providerV1.id);
+    expect(job.scope.staleMappings.map((entry) => entry.staleMappingId)).toEqual([mapping.id]);
+    expect(job.scope.staleMappings[0]?.affectedPairs).toEqual([
+      { sourceResource: "issues", targetResource: "issues" },
+    ]);
+
+    // A second resume attempt now hits the plain `stale` guard.
+    await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toThrow(/re-review/i);
+  });
+
+  it("refuses to resume when another mapping took the pair's active slot during the hold", async () => {
+    const { provider, providerV1, peerSpec, mapping } =
+      await seedSuspendedMapping("SL-10 incumbent");
+    void provider;
+
+    // While suspended, a new approval takes the pair's single `active` slot: the approval
+    // service's update-in-place keys on the ACTIVE mapping, finds none, and inserts.
+    const incumbent: ApprovedMapping = {
+      id: randomUUID(),
+      sourceSpecId: providerV1.id,
+      targetSpecId: peerSpec.id,
+      sourceAppId: mapping.sourceAppId,
+      targetAppId: mapping.targetAppId,
+      variant: "peer-peer",
+      approvedBy: "reviewer:bob",
+      approvedAt: CREATED_AT,
+      status: "active",
+    };
+    mappingIds.push(incumbent.id);
+    await new ApprovedMappingRepository(db).insert(incumbent);
+
+    // Resume must report the state conflict (409), NOT surface a raw constraint violation.
+    await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toBeInstanceOf(ConflictError);
+    await expect(suspension.resume(mapping.id, OPERATOR)).rejects.toThrow(
+      /already the active mapping/i,
+    );
+    // Nothing changed: the held mapping is still suspended, the incumbent still active.
+    const mappings = new ApprovedMappingRepository(db);
+    expect((await mappings.getById(mapping.id))?.status).toBe("suspended");
+    expect((await mappings.getById(incumbent.id))?.status).toBe("active");
   });
 });

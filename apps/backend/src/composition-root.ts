@@ -244,9 +244,10 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     // drops the affected endpoints' cached entries (XI-2/CH-5.3) and recomputes the affected
     // `GraphEdge`s (GR-2/GR-3) — neither cache nor graph may mask a suspended relationship.
     approvedMappingSuspension: new ApprovedMappingSuspensionService({
-      db,
+      // The SAME `TxStores` seam the Spec Registry runs on, so the resume catch-up reuses
+      // SL-2's re-pin and SL-4/SL-6's mark-stale + re-review paths verbatim.
+      unitOfWork,
       newId: randomUUID,
-      graphProjection,
       ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
     }),
     // The SL-10 read surface behind `GET /api/approved-mappings` (metadata only).

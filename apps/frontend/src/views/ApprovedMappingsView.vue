@@ -4,6 +4,7 @@ import Message from "primevue/message";
 import { computed, ref } from "vue";
 
 import MappingSuspensionRow from "../components/approved-mappings/MappingSuspensionRow.vue";
+import { resumeBlockedReason } from "../components/approved-mappings/suspension-model.js";
 import {
   useApprovedMappings,
   useResumeApprovedMapping,
@@ -36,6 +37,11 @@ const errorMessage = ref<string | null>(null);
 
 function isPending(mappingId: string): boolean {
   return pendingMappingId.value === mappingId;
+}
+
+/** Why this mapping's resume would be refused despite its status (or `null`). */
+function blockedReasonFor(mapping: ApprovedMappingDto): string | null {
+  return resumeBlockedReason(mapping, mappings.value);
 }
 
 async function run(mappingId: string, action: "suspend" | "resume"): Promise<void> {
@@ -111,6 +117,7 @@ function onResume(mappingId: string): void {
           :mapping="mapping"
           :readonly="readonly"
           :pending="isPending(mapping.id)"
+          :blocked-reason="blockedReasonFor(mapping)"
           @suspend="onSuspend"
           @resume="onResume"
         />

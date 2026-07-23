@@ -132,6 +132,21 @@ export interface CredentialTxStore {
  * element). Deliberately narrow — neither reaction touches mapping content.
  */
 export interface ApprovedMappingTxRepo {
+  /** One mapping by id — the SL-10 transition's existence + status guard. */
+  getById(id: string): Promise<ApprovedMapping | undefined>;
+  /**
+   * SL-10.2 — the single `active` mapping of a directional spec pair, if any. Resume
+   * re-claims that slot (the partial `approved_mapping_active_direction_uq` index admits
+   * one), so it must first see whether another mapping took it during the hold.
+   */
+  getActiveByDirectionalSpecPair(
+    sourceSpecId: string,
+    targetSpecId: string,
+  ): Promise<ApprovedMapping | undefined>;
+  /** SL-10.1 — compare-and-set `active → suspended`; `undefined` when the row was not `active`. */
+  markSuspended(id: string): Promise<ApprovedMapping | undefined>;
+  /** SL-10.2 — compare-and-set `suspended → active`; `undefined` when the row was not `suspended`. */
+  markActive(id: string): Promise<ApprovedMapping | undefined>;
   /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
   listActiveBySpecId(specId: string): Promise<ApprovedMapping[]>;
   /**

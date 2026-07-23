@@ -4,7 +4,12 @@ import Button from "primevue/button";
 import Tag from "primevue/tag";
 import { computed } from "vue";
 
-import { statusExplanation, statusSeverity, suspensionAction } from "./suspension-model.js";
+import {
+  statusExplanation,
+  statusSeverity,
+  suspensionAction,
+  type SuspensionAction,
+} from "./suspension-model.js";
 
 /**
  * The SL-10 suspend/resume control for one `ApprovedMapping`: its current `status`, what
@@ -20,6 +25,11 @@ const props = defineProps<{
   readonly: boolean;
   /** A transition is in flight for this mapping (disables the action). */
   pending: boolean;
+  /**
+   * Why a status-eligible resume would still be refused (another mapping took the pair's
+   * single active slot), or `null`. Derived by the owning view from the full list.
+   */
+  blockedReason: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -27,12 +37,14 @@ const emit = defineEmits<{
   resume: [mappingId: string];
 }>();
 
-const action = computed(() => suspensionAction(props.mapping.status));
+const action = computed<SuspensionAction>(() => suspensionAction(props.mapping.status));
 const explanation = computed<string>(() => statusExplanation(props.mapping.status));
-const severity = computed(() => statusSeverity(props.mapping.status));
+const severity = computed<"success" | "warn" | "secondary">(() =>
+  statusSeverity(props.mapping.status),
+);
 
 function onAct(): void {
-  if (props.readonly || props.pending) {
+  if (props.readonly || props.pending || props.blockedReason !== null) {
     return;
   }
   if (action.value.kind === "suspend") {
@@ -63,9 +75,21 @@ function onAct(): void {
       >
         {{ action.reason }}
       </p>
+      <!-- Status-eligible, but the server would refuse: say why instead of offering a
+           button that can only 409. -->
+      <p
+        v-else-if="blockedReason !== null"
+        class="mapping-row__blocked"
+        data-testid="mapping-resume-blocked"
+      >
+        {{ blockedReason }}
+      </p>
     </div>
 
-    <div v-if="!readonly && action.kind !== 'none'" class="mapping-row__actions">
+    <div
+      v-if="!readonly && action.kind !== 'none' && blockedReason === null"
+      class="mapping-row__actions"
+    >
       <Button
         v-if="action.kind === 'suspend'"
         label="Suspend"

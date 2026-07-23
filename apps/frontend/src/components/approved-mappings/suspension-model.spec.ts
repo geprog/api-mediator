@@ -1,7 +1,13 @@
+import type { ApprovedMappingDto } from "@mediator/contracts";
 import type { ApprovedMappingStatus } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
-import { statusExplanation, statusSeverity, suspensionAction } from "./suspension-model.js";
+import {
+  resumeBlockedReason,
+  statusExplanation,
+  statusSeverity,
+  suspensionAction,
+} from "./suspension-model.js";
 
 /**
  * SL-10 — the suspend/resume affordance logic. Pure, so the whole state model is asserted
@@ -61,6 +67,52 @@ describe("statusExplanation (SL-10)", () => {
 
   it("describes an active mapping as executing", () => {
     expect(statusExplanation("active")).toContain("Executing");
+  });
+});
+
+describe("resumeBlockedReason (SL-10)", () => {
+  function dto(overrides: Partial<ApprovedMappingDto> & Pick<ApprovedMappingDto, "id">) {
+    const value: ApprovedMappingDto = {
+      variant: "peer-peer",
+      status: "suspended",
+      sourceAppId: "app-a",
+      targetAppId: "app-b",
+      sourceSpecId: "spec-a",
+      targetSpecId: "spec-b",
+      approvedBy: "reviewer:alice",
+      approvedAt: "2026-07-23T00:00:00.000Z",
+      ...overrides,
+    };
+    return value;
+  }
+
+  it("blocks resume when another mapping holds the pair's single active slot", () => {
+    const held = dto({ id: "held" });
+    const incumbent = dto({ id: "incumbent", status: "active" });
+
+    const reason = resumeBlockedReason(held, [held, incumbent]);
+
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("incumbent");
+  });
+
+  it("does not block when the other active mapping is a DIFFERENT spec pair", () => {
+    const held = dto({ id: "held" });
+    const elsewhere = dto({ id: "other", status: "active", targetSpecId: "spec-z" });
+
+    expect(resumeBlockedReason(held, [held, elsewhere])).toBeNull();
+  });
+
+  it("does not block a lone suspended mapping", () => {
+    const held = dto({ id: "held" });
+    expect(resumeBlockedReason(held, [held])).toBeNull();
+  });
+
+  it("never blocks a non-suspended mapping (its status already decides the action)", () => {
+    const active = dto({ id: "a", status: "active" });
+    const stale = dto({ id: "s", status: "stale" });
+    expect(resumeBlockedReason(active, [active, stale])).toBeNull();
+    expect(resumeBlockedReason(stale, [active, stale])).toBeNull();
   });
 });
 
