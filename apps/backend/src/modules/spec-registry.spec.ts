@@ -960,15 +960,17 @@ describe("SpecRegistry.ingestNewVersion breaking reaction (SL-4)", () => {
     const { app, v1 } = await seedV1(store, unitOfWork, registry);
 
     // A consumer-provider mapping whose BACKEND (target) spec is the changed provider v1,
-    // reading `issues.title` via a response-phase field → its target ref references the change.
+    // reading `issues.title` via a RESPONSE-phase field. Response-phase INVERTS the
+    // convention (`serve-context.ts`/`response-mapping.ts`): `sourcePath` is the backend
+    // field (`issues/title`), `targetPath` the consumer field (`con-issues/title`).
     store.approvedMappings.set("m-adapter", consumerProvider("m-adapter", v1.id));
     seedOperationMapping(store, "m-adapter", "con-issues/getConIssue", "issues/getIssue");
-    seedFieldMapping(store, "m-adapter", "con-issues/title", "issues/title", { phase: "response" });
+    seedFieldMapping(store, "m-adapter", "issues/title", "con-issues/title", { phase: "response" });
     seedBinding(store, "m-adapter", "endpoint-issues");
 
-    // An unaffected consumer-provider mapping (reads only `labels`) with its own endpoint.
+    // An unaffected consumer-provider mapping (reads only the unchanged backend `labels`).
     store.approvedMappings.set("m-adapter-safe", consumerProvider("m-adapter-safe", v1.id));
-    seedFieldMapping(store, "m-adapter-safe", "con-labels/name", "labels/name", {
+    seedFieldMapping(store, "m-adapter-safe", "labels/name", "con-labels/name", {
       phase: "response",
     });
     seedBinding(store, "m-adapter-safe", "endpoint-labels");
@@ -1002,7 +1004,8 @@ describe("SpecRegistry.ingestNewVersion breaking reaction (SL-4)", () => {
     const { app, v1 } = await seedV1(store, unitOfWork, registry);
 
     store.approvedMappings.set("m-adapter", consumerProvider("m-adapter", v1.id));
-    seedFieldMapping(store, "m-adapter", "con-issues/title", "issues/title", { phase: "response" });
+    // Response-phase → `sourcePath` is the backend (`issues/title`) field (see above).
+    seedFieldMapping(store, "m-adapter", "issues/title", "con-issues/title", { phase: "response" });
     seedBinding(store, "m-adapter", "endpoint-issues");
     store.failCacheInvalidation = true; // every invalidateEndpoint throws.
 
@@ -1200,6 +1203,44 @@ describe("SL-4 pure mark-stale matching", () => {
       expect(refs.fieldRefs).toEqual(["tickets/subject"]);
       expect(refs.operationRefs).toEqual(["tickets/getTicket"]);
       expect(refs.paramRefs).toEqual(["tickets/updateTicket#id"]);
+    });
+
+    // A consumer-provider RESPONSE-phase field INVERTS the field-ref convention: `sourcePath`
+    // (+ additionalInputPaths) is the backend/target-spec read, `targetPath` the consumer/
+    // source-spec write. Getting this wrong silently under-marks a provider response-body break.
+    const responseFields: FieldMapping[] = [
+      {
+        id: "rf1",
+        mappingId: "m",
+        sourcePath: "issues/title", // backend (target-spec) read
+        targetPath: "con-issues/subject", // consumer (source-spec) write
+        transform: "aggregate",
+        transformConfig: { additionalInputPaths: ["issues/summary"] }, // backend reads too
+        phase: "response",
+      },
+    ];
+    const cpOperations: OperationMapping[] = [
+      {
+        id: "ro1",
+        mappingId: "m",
+        sourceOperationRef: "con-issues/getConIssue", // consumer op
+        targetOperationRef: "issues/getIssue", // backend op
+        action: "read",
+      },
+    ];
+
+    it("response-phase: a BACKEND (target-spec) break reads sourcePath + additionalInputPaths (the inverted backend refs)", () => {
+      const refs = mappingChangedSideRefs(targetMapping, SUPERSEDED, responseFields, cpOperations);
+      // NOT the consumer `con-issues/subject` — the backend fields the transform reads.
+      expect([...refs.fieldRefs].sort()).toEqual(["issues/summary", "issues/title"]);
+      expect(refs.operationRefs).toEqual(["issues/getIssue"]);
+    });
+
+    it("response-phase: a CONSUMER (source-spec) break reads targetPath (the inverted consumer ref)", () => {
+      const refs = mappingChangedSideRefs(sourceMapping, SUPERSEDED, responseFields, cpOperations);
+      // NOT the backend `issues/title` — the consumer response field the mapping produces.
+      expect(refs.fieldRefs).toEqual(["con-issues/subject"]);
+      expect(refs.operationRefs).toEqual(["con-issues/getConIssue"]);
     });
   });
 

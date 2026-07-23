@@ -570,12 +570,20 @@ export function computeBreakingAffectedKeys(diff: SpecDiff): BreakingAffectedKey
  * superseded version — SL-4.1). Split by ref kind so each is matched against the change
  * bucket that can break it:
  *
- * - `fieldRefs` — `FieldMapping.{source,target}Path` (plus a source-side aggregate/
- *   expression's `transformConfig.additionalInputPaths`, which are read too, so a change
- *   to an additional input still stales the mapping).
- * - `operationRefs` — `OperationMapping.{source,target}OperationRef`.
+ * - `fieldRefs` — a `FieldMapping`'s field paths (plus an aggregate/expression's
+ *   `transformConfig.additionalInputPaths`, which are read too), assigned to the spec side
+ *   they actually reference. **Which path references which spec depends on the phase**: a
+ *   peer-peer or consumer-provider **request**-phase field is `sourcePath`↔source-spec,
+ *   `targetPath`↔target-spec; a consumer-provider **response**-phase field **inverts** it —
+ *   `sourcePath` is the **backend (target-spec)** field and `targetPath` the **consumer
+ *   (source-spec)** field (`serve-context.ts` / `response-mapping.ts`). `additionalInputPaths`
+ *   travel with `sourcePath`'s spec. Assigning them phase-blind would silently miss a
+ *   provider response-body break — the common adapter-read case (SL-4.1's exact failure).
+ * - `operationRefs` — `OperationMapping.{source,target}OperationRef`. Not phase-dependent:
+ *   `sourceOperationRef`↔consumer, `targetOperationRef`↔backend regardless of phase.
  * - `paramRefs` — target-side operation-input refs (`OperationMapping.targetIdParamRef`,
- *   `FieldMapping.targetLookupParamRef`), matched to their owning operation.
+ *   `FieldMapping.targetLookupParamRef` — peer-peer only, never phase-bearing), matched to
+ *   their owning operation.
  */
 export interface MappingChangedSideRefs {
   readonly fieldRefs: readonly string[];
@@ -584,9 +592,11 @@ export interface MappingChangedSideRefs {
 }
 
 /**
- * SL-4.1 — extract a mapping's referenced refs **on the changed side**: source refs when
- * the mapping pinned the superseded spec as source, target refs when as target (both for
- * a self-referential mapping). Pure.
+ * SL-4.1 — extract a mapping's referenced refs **on the changed side**: the refs that
+ * reference the superseded spec (source-spec refs when the mapping pinned it as source,
+ * target-spec refs when as target; both for a self-referential mapping). **Phase-aware**
+ * for field refs (a response-phase consumer-provider field inverts `sourcePath`/`targetPath`
+ * — see the interface note); operation/parameter refs are phase-independent. Pure.
  */
 export function mappingChangedSideRefs(
   mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
@@ -601,16 +611,20 @@ export function mappingChangedSideRefs(
   const paramRefs: string[] = [];
 
   for (const field of fields) {
+    // A consumer-provider RESPONSE-phase field inverts the convention: `sourcePath` is the
+    // backend (target-spec) field and `targetPath` the consumer (source-spec) field, the
+    // opposite of a peer-peer / request-phase field. `additionalInputPaths` (never a secret —
+    // resource-qualified IR paths) travel with `sourcePath`'s spec.
+    const inverted = field.phase === "response";
+    const primaryRefs = [field.sourcePath, ...(field.transformConfig?.additionalInputPaths ?? [])];
+    const sourceSpecFieldRefs = inverted ? [field.targetPath] : primaryRefs;
+    const targetSpecFieldRefs = inverted ? primaryRefs : [field.targetPath];
     if (useSource) {
-      fieldRefs.push(field.sourcePath);
-      // Additional aggregate/expression inputs are source-side reads too (never a secret —
-      // resource-qualified IR paths), so a break to one of them must stale the mapping.
-      for (const extra of field.transformConfig?.additionalInputPaths ?? []) {
-        fieldRefs.push(extra);
-      }
+      fieldRefs.push(...sourceSpecFieldRefs);
     }
     if (useTarget) {
-      fieldRefs.push(field.targetPath);
+      fieldRefs.push(...targetSpecFieldRefs);
+      // `targetLookupParamRef` is peer-peer only (never phase-bearing), so it never inverts.
       if (field.targetLookupParamRef !== undefined) {
         paramRefs.push(field.targetLookupParamRef);
       }

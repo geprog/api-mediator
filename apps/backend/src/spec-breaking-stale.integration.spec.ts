@@ -413,11 +413,14 @@ suite(
         targetOperationRef: "issues/getIssue",
         action: "read",
       };
+      // RESPONSE-phase field: the convention inverts (serve-context.ts/response-mapping.ts),
+      // so `sourcePath` is the BACKEND (provider `issues/title`) field it reads and
+      // `targetPath` the consumer (`con-issues/title`) field it writes.
       const adapterField: FieldMapping = {
         id: randomUUID(),
         mappingId: mAdapter.id,
-        sourcePath: "con-issues/title",
-        targetPath: "issues/title",
+        sourcePath: "issues/title",
+        targetPath: "con-issues/title",
         transform: "rename",
         phase: "response",
       };
