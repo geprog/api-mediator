@@ -271,6 +271,43 @@ export class SyncRuleRepository {
   }
 
   /**
+   * **SL-8.5 — mark a rule as owing a link-only baseline seed** (the durable seed-intent).
+   * Called by successor adoption **inside the adoption transaction** (atomic with the
+   * re-point) for a re-pointed rule whose successor added a field pair, so a crash/abort of
+   * the offloaded seed leaves a durable record the baseline-seed reconciler re-derives from.
+   * Idempotent (`set(true)`), and a plain column set on whatever handle it was constructed
+   * with — so it commits with the re-point.
+   */
+  public async markPendingBaselineSeed(id: string): Promise<void> {
+    await this.db.update(syncRule).set({ pendingBaselineSeed: true }).where(eq(syncRule.id, id));
+  }
+
+  /**
+   * **SL-8.5 — clear a rule's baseline seed-intent.** Called only when a seed pass actually
+   * **completed** (never on an `aborted` fetch), so an interrupted seed keeps the flag and is
+   * re-attempted. Writes NULL (nothing owed). Idempotent.
+   */
+  public async clearPendingBaselineSeed(id: string): Promise<void> {
+    await this.db.update(syncRule).set({ pendingBaselineSeed: null }).where(eq(syncRule.id, id));
+  }
+
+  /**
+   * **SL-8.5 — the baseline-seed reconciler's bounded scan** of rules that still owe a seed
+   * (`pending_baseline_seed = true`), ordered by `id` so a pass is deterministic. Served by the
+   * partial `sync_rule_pending_baseline_seed_idx`; `limit` is the never-scan-unbounded-history
+   * guardrail (mirrors {@link listEnabledForReconciliation}).
+   */
+  public async listPendingBaselineSeed(limit: number): Promise<SyncRule[]> {
+    const rows = await this.db
+      .select()
+      .from(syncRule)
+      .where(eq(syncRule.pendingBaselineSeed, true))
+      .orderBy(syncRule.id)
+      .limit(limit);
+    return rows.map(mapSyncRuleRow);
+  }
+
+  /**
    * Persist a **disabled** rule's execution-option configuration (SA-1.1/SA-1.2).
    * Writes **only** the fields present in `patch` (an absent key keeps its column
    * value); `pollIntervalOverride: null` clears the override. All columns are the

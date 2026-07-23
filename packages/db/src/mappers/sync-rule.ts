@@ -33,6 +33,8 @@ export function mapSyncRuleRow(row: SyncRuleRow): SyncRule {
     lastEventAt: row.lastEventAt ?? undefined,
     cursor: row.cursor ?? undefined,
     lastSnapshotRef: row.lastSnapshotRef ?? undefined,
+    // SL-8.5 — NULL/false collapse to absent (nothing owed); only a `true` reads as owed.
+    pendingBaselineSeed: row.pendingBaselineSeed === true ? true : undefined,
   });
 }
 
@@ -58,5 +60,7 @@ export function toSyncRuleInsert(rule: SyncRule): SyncRuleInsert {
     lastEventAt: rule.lastEventAt ?? null,
     cursor: rule.cursor ?? null,
     lastSnapshotRef: rule.lastSnapshotRef ?? null,
+    // SL-8.5 — an absent seed-intent lands NULL (nothing owed); a present `true` is written.
+    pendingBaselineSeed: rule.pendingBaselineSeed ?? null,
   };
 }

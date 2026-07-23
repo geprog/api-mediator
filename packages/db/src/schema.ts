@@ -1276,6 +1276,15 @@ export const syncRule = pgTable(
     lastEventAt: timestamp("last_event_at", { withTimezone: true }),
     cursor: text("cursor"),
     lastSnapshotRef: uuid("last_snapshot_ref"),
+    // SL-8.5 — the **durable seed-intent**: a re-pointed successor-adoption rule whose
+    // successor ADDED a field pair owes a link-only baseline SEED over its existing
+    // `RecordLink`s. Set `true` **inside the adoption transaction** (atomic with the
+    // re-point), cleared to NULL only when a seed pass actually COMPLETES (never on an
+    // `aborted` fetch). NULL = nothing owed. It makes the offloaded seed crash/abort
+    // durable: the baseline-seed reconciler re-attempts any rule still flagged (SL-8.6 /
+    // RC-3 — a lost/half-applied adoption is re-derivable, never silently half-adopted).
+    // Additive/backward-compatible: a pre-SL-8.5 rule row has it NULL and owes nothing.
+    pendingBaselineSeed: boolean("pending_baseline_seed"),
   },
   (table) => [
     index("sync_rule_approved_mapping_id_idx").on(table.approvedMappingId),
@@ -1289,6 +1298,11 @@ export const syncRule = pgTable(
     index("sync_rule_enabled_idx")
       .on(table.status)
       .where(sql`${table.status} = 'enabled'`),
+    // SL-8.5 — the baseline-seed reconciler's bounded scan of rules that still owe a
+    // seed. Partial so only the (rare, transient) owed rows are indexed.
+    index("sync_rule_pending_baseline_seed_idx")
+      .on(table.pendingBaselineSeed)
+      .where(sql`${table.pendingBaselineSeed}`),
   ],
 );
 

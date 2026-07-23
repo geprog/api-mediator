@@ -1,0 +1,2 @@
+ALTER TABLE "sync_rule" ADD COLUMN "pending_baseline_seed" boolean;--> statement-breakpoint
+CREATE INDEX "sync_rule_pending_baseline_seed_idx" ON "sync_rule" USING btree ("pending_baseline_seed") WHERE "sync_rule"."pending_baseline_seed";

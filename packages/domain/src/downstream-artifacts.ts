@@ -108,6 +108,14 @@ export const syncRuleSchema = z.object({
   cursor: z.string().nullable().optional(),
   /** Reference to the last complete full-fetch content-hash snapshot; nullable — seeded at go-live. */
   lastSnapshotRef: z.string().nullable().optional(),
+  /**
+   * SL-8.5 — the durable seed-intent. `true` while this re-pointed successor-adoption rule
+   * still owes a link-only baseline seed for a field pair the successor ADDED (set atomically
+   * with the re-point, cleared only when a seed pass completes). **Absent** = nothing owed;
+   * the mapper collapses a NULL/false column to absent. It is what makes the offloaded seed
+   * crash/abort-durable — the baseline-seed reconciler re-attempts any rule still flagged.
+   */
+  pendingBaselineSeed: z.boolean().optional(),
 });
 export type SyncRule = z.infer<typeof syncRuleSchema>;
 

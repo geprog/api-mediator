@@ -307,7 +307,12 @@ export class ApprovalService {
     // `replaceChildren`) keeps the successor covering everything the predecessor did — minus
     // only the field pairs the re-review genuinely removed from a touched pair — and commits
     // the successor *complete* before its `MappingApproved`, so adoption's adapter half
-    // re-validates composition against the full content. See `carry-forward.ts`.
+    // re-validates composition against the full content. Coverage is computed from SL-6's
+    // affected-pairs list (the re-review proposal's persisted `shortlistResult.candidatePairs`
+    // — the same forced detail pairs the re-review `DetectionJobScope` records), NOT merely from
+    // the successor's content: a pair the re-review touched but approved zero items for (or an
+    // `analysisFailed` pair approved anyway) is thus treated **covered** (genuinely dropped)
+    // rather than resurrected. See `carry-forward.ts`.
     const childArtifacts =
       proposal.reReviewOf === undefined
         ? artifacts
@@ -321,6 +326,7 @@ export class ApprovalService {
             predecessorParameters: await stores.artifacts.listParameterMappings(
               proposal.reReviewOf,
             ),
+            affectedPairs: proposal.shortlistResult?.candidatePairs ?? [],
             newId: this.#newId,
           });
     await stores.artifacts.replaceChildren(mappingId, childArtifacts);

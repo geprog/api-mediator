@@ -7,6 +7,7 @@ import {
   MappingArtifactsRepository,
   ResourceBindingRepository,
   ScopeCorrespondenceRepository,
+  SyncRuleRepository,
   tx,
   type Database,
   type DbTransaction,
@@ -18,7 +19,11 @@ import {
   proposeScopeCorrespondences,
   type ScopeCorrespondenceProposalOps,
 } from "../scope-authoring.js";
-import type { AdapterSuccessorAdopter, SuccessorAdoptionDeps } from "./adopt.js";
+import type {
+  AdapterSuccessorAdopter,
+  AddedFieldBaselineSeeder,
+  SuccessorAdoptionDeps,
+} from "./adopt.js";
 import {
   MappingApprovedInstantiationConsumer,
   type LoadedApprovedMapping,
@@ -61,6 +66,13 @@ export interface ArtifactInstantiationDeps {
   readonly adoption?: {
     readonly graphProjection: GraphProjection;
     readonly adoptAdapter: AdapterSuccessorAdopter;
+    /**
+     * SL-8.5 — the Sync Engine runtime's added-field baseline seeder
+     * (`SyncBackground.seedAddedFieldBaselines`). When present, a peer-peer adoption whose
+     * successor adds a field pair enqueues an async link-only backfill that seeds the added pair's
+     * baselines over the existing `RecordLink`s. Optional: omitted → no seeding is enqueued.
+     */
+    readonly seedAddedFieldBaselines?: AddedFieldBaselineSeeder;
   };
   /** Id factory for the instantiated rows; defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
@@ -113,6 +125,14 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
       : {
           syncOps: (handle) => ({
             getApprovedMapping: (id) => new ApprovedMappingRepository(handle).getById(id),
+            // SL-8.5 — read a mapping's fields (the predecessor's) so adoption can detect the
+            // successor's ADDED field pairs and enqueue their baseline seeding.
+            listFieldMappings: (mappingId) =>
+              new MappingArtifactsRepository(handle).listFieldMappings(mappingId),
+            // SL-8.5 — persist the durable seed-intent IN this adoption transaction (atomic with
+            // the re-point), so a crash/abort of the async seed is recoverable by the reconciler.
+            markPendingBaselineSeed: (ruleId) =>
+              new SyncRuleRepository(handle).markPendingBaselineSeed(ruleId),
             repointSyncRulesToSuccessor: (supersededMappingId, successorMappingId) =>
               new DownstreamArtifactRepository(handle).repointSyncRulesToSuccessor(
                 supersededMappingId,
@@ -131,6 +151,11 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
               ),
           }),
           adoptAdapter: adoptionDeps.adoptAdapter,
+          // SL-8.5 — the async link-only seeding trigger (fire-and-forget), when the sync runtime
+          // wired it. Omitted → a peer-peer adoption re-points but seeds no added-field baselines.
+          ...(adoptionDeps.seedAddedFieldBaselines !== undefined
+            ? { seedAddedFieldBaselines: adoptionDeps.seedAddedFieldBaselines }
+            : {}),
         };
 
   const consumer = new MappingApprovedInstantiationConsumer<DbTransaction>({

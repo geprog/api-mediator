@@ -194,16 +194,26 @@ function findBinding(
  * degenerate self-pair `resourcePairRef`, or a base URL-less source/target app). Never
  * fabricates a binding — the per-ref confirmation checks are the caller's (the source
  * binding resolver / enablement gate), decided over the returned `ResourceBinding`s.
+ *
+ * `mappingOverride` (SL-8.5) resolves the rule's artifacts against a **specific** mapping
+ * instead of the rule's currently-persisted `approvedMappingId`. The successor-adoption seeding
+ * backfill passes the **successor** mapping (committed at approval), so the seed reads the
+ * successor's fields/spec-version/bindings without waiting for the adoption transaction's
+ * re-point to commit — the re-point moves only `approvedMappingId`, and this bypasses that read.
+ * The override must be a mapping for this rule's directional pair (its `sourceAppId`/`targetAppId`
+ * matching the rule's `resourcePairRef` sides); a mismatch returns `undefined` exactly as a
+ * degenerate ref does. Omitted → the rule's persisted mapping is loaded (every other caller).
  */
 export async function resolveRuleArtifacts(
   ruleId: string,
   repos: RuleArtifactRepos,
+  mappingOverride?: ApprovedMapping,
 ): Promise<RuleArtifacts | undefined> {
   const rule = await repos.syncRules.getById(ruleId);
   if (rule === undefined) {
     return undefined;
   }
-  const mapping = await repos.approvedMappings.getById(rule.approvedMappingId);
+  const mapping = mappingOverride ?? (await repos.approvedMappings.getById(rule.approvedMappingId));
   if (mapping === undefined) {
     return undefined;
   }

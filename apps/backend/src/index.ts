@@ -156,6 +156,12 @@ const artifactInstantiation = buildArtifactInstantiation({
     adoptAdapter: async (input, actor) => {
       await adapterComposition.adoptSuccessor(input, actor);
     },
+    // SL-8.5 — the async link-only seeding backfill for an adopted successor's added field pairs,
+    // driven through the SAME Sync Engine runtime the enable/backfill flow uses. Fire-and-forget:
+    // it resolves the backfill against the committed successor mapping and runs in the background.
+    seedAddedFieldBaselines: (input) => {
+      sync.seedAddedFieldBaselines(input);
+    },
   },
 });
 
@@ -179,6 +185,8 @@ const detection = buildDetectionBackground({
     artifactInstantiation.reconciler,
     sync.reconciler,
     sync.scopeDiscoveryReconciler,
+    // SL-8.5 — the durable safety net for the offloaded added-field baseline seed.
+    sync.baselineSeedReconciler,
     adapterMountReactions.reconciler,
   ],
 });
