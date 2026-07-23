@@ -7,6 +7,7 @@ import {
   MappingArtifactsRepository,
   ResourceBindingRepository,
   ScopeCorrespondenceRepository,
+  SyncRuleRepository,
   tx,
   type Database,
   type DbTransaction,
@@ -128,6 +129,10 @@ export function buildArtifactInstantiation(deps: ArtifactInstantiationDeps): Art
             // successor's ADDED field pairs and enqueue their baseline seeding.
             listFieldMappings: (mappingId) =>
               new MappingArtifactsRepository(handle).listFieldMappings(mappingId),
+            // SL-8.5 — persist the durable seed-intent IN this adoption transaction (atomic with
+            // the re-point), so a crash/abort of the async seed is recoverable by the reconciler.
+            markPendingBaselineSeed: (ruleId) =>
+              new SyncRuleRepository(handle).markPendingBaselineSeed(ruleId),
             repointSyncRulesToSuccessor: (supersededMappingId, successorMappingId) =>
               new DownstreamArtifactRepository(handle).repointSyncRulesToSuccessor(
                 supersededMappingId,

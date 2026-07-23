@@ -60,16 +60,29 @@ import { canonicalResourcePairRef, resourceRefOf } from "./derive.js";
  * impossible: a baseline requires the field's **observed value** (`SyncFieldState.observedHash`/
  * `observedAt`), which only a live fetch produces — not synthesizable in a DB transaction. So
  * for each re-pointed `SyncRule` whose successor adds a field pair concerning that rule's
- * resource pair, adoption enqueues an **async, scoped, link-only backfill** (reusing the
- * enablement backfill path — {@link SuccessorAdoptionDeps.seedAddedFieldBaselines}): a link-only
- * pass over the **existing** `RecordLink`s that seeds baselines. It is **safe and idempotent**:
- * `SyncFieldStateStore.seed` **never erases** an existing baseline, so re-running a link-only
- * backfill over the existing links seeds ONLY the added fields (every already-seeded pair is a
- * no-op), a redelivered adoption re-enqueues without double-seeding, and a rule with **no** added
- * field pair enqueues nothing. It is a **seed pass, not a re-enable**: enablement / cursor /
- * snapshot are untouched, and it is **link-only, never a push re-backfill** (SL-8.5 — "no full
- * re-backfill"). The seeding backfill resolves against the **successor** mapping (committed at
- * approval), so it is independent of when this transaction's re-point commits.
+ * resource pair, adoption **(1) persists a durable seed-intent on the rule IN THIS TRANSACTION**
+ * (`markPendingBaselineSeed`, committed atomically with the re-point) and **(2) enqueues an
+ * async, scoped, link-only backfill** (reusing the enablement backfill path —
+ * {@link SuccessorAdoptionDeps.seedAddedFieldBaselines}): a link-only pass over the **existing**
+ * `RecordLink`s that seeds baselines and clears the intent on completion.
+ *
+ * **Durable recovery (SL-8.6 / RC-3).** The async seed is offloaded (a baseline needs a live
+ * value, so it cannot run in-tx), which means it can crash or `abort` on a transient source
+ * fetch failure — and its `MappingApproved` event is already consumed, so it is **not**
+ * redelivered. The durable intent is what closes that gap: the seed clears it **only on a real,
+ * non-`aborted` completion**, so an interrupted/aborted seed leaves it set, and the
+ * **baseline-seed reconciler** (registered on the shared sweep) re-attempts any still-flagged
+ * rule until it completes — the same "re-derive from persisted state" guarantee the rest of
+ * adoption relies on (never a silently half-adopted mapping).
+ *
+ * The seed is **safe and idempotent**: `SyncFieldStateStore.seed` **never erases** an existing
+ * baseline, so re-running a link-only backfill over the existing links seeds ONLY the still-
+ * unseeded added fields (every already-seeded pair is a no-op), and a rule with **no** added
+ * field pair marks nothing and enqueues nothing. It is a **seed pass, not a re-enable**:
+ * enablement / cursor / snapshot are untouched, and it is **link-only, never a push re-backfill**
+ * (SL-8.5 — "no full re-backfill"). The fast-path seed resolves against the **successor** mapping
+ * (committed at approval), so it is independent of when this transaction's re-point commits; the
+ * reconciler resolves against the rule's current mapping (the committed successor).
  *
  * **`SyncFieldState` dropped-field archiving (SL-8.4) remains a deferred follow-up**, because
  * `SyncFieldState` is shared by **both** peer directions over a resource pair, so archiving a
@@ -93,6 +106,13 @@ export interface AdoptionSyncOps {
    * link-only backfill only for the rules those added pairs concern.
    */
   listFieldMappings(mappingId: string): Promise<readonly FieldMapping[]>;
+  /**
+   * SL-8.5 — persist the **durable seed-intent** on a re-pointed rule whose successor added a
+   * field pair, **inside this adoption transaction** (so it commits atomically with the
+   * re-point). It is what makes the offloaded seed crash/abort-durable: the baseline-seed
+   * reconciler re-attempts any rule still flagged. The async seed clears it only on completion.
+   */
+  markPendingBaselineSeed(ruleId: string): Promise<void>;
   /**
    * SL-7.1/8.1 — re-point every `SyncRule` on the predecessor to the successor, changing
    * **only** `approvedMappingId` (cursor/snapshot/backfill/enablement retained). Returns the
@@ -272,6 +292,12 @@ async function enqueueAddedFieldBaselineSeeds<TTx>(params: {
     repointedRules: params.repointedRules,
   });
   for (const rule of rulesToSeed) {
+    // 1) Persist the durable seed-intent IN THIS TRANSACTION (atomic with the re-point), so a
+    //    crash/abort of the async seed below leaves a durable record the baseline-seed
+    //    reconciler re-derives from (SL-8.6 / RC-3 — never a silently half-adopted mapping).
+    await params.syncOps.markPendingBaselineSeed(rule.id);
+    // 2) Enqueue the immediate async link-only seed (the fast path) — fire-and-forget; it
+    //    clears the intent on completion, and the reconciler is the safety net if it does not.
     seed({ ruleId: rule.id, successorMappingId: params.successor.id });
   }
 }

@@ -40,6 +40,7 @@ import {
   classifyOutboundFailure,
   resolveSingleRecordReadBinding,
   type BackfillMetrics,
+  type BackfillRunResult,
   type CredentialApplier,
   type EnableRuleResult,
   type ProtocolClient,
@@ -63,7 +64,7 @@ import {
   type RecentlyWrittenCache,
   type SingleRecordReadResult,
 } from "@mediator/sync-engine";
-import { PostgresEventBus } from "@mediator/event-bus";
+import { PostgresEventBus, type Reconciler } from "@mediator/event-bus";
 import { getActiveTraceContext } from "@mediator/telemetry";
 import { applyFieldMappings } from "@mediator/transform";
 import type { FastifyBaseLogger } from "fastify";
@@ -233,6 +234,12 @@ export interface SyncBackground {
   readonly reconciler: SyncExecutionReconciler;
   /** SS-11.7 — the scope-discovery sweep re-trigger (registered on the same shared sweep). */
   readonly scopeDiscoveryReconciler: ScopeDiscoveryReconciler;
+  /**
+   * SL-8.5 — the durable safety net for the offloaded added-field baseline seed: re-attempts any
+   * rule still owing a seed (`pending_baseline_seed`) until it completes. Registered on the same
+   * shared reconciliation sweep, so a transient abort/crash of the fast-path seed self-heals.
+   */
+  readonly baselineSeedReconciler: Reconciler;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
   /** Start the ordering-queue dispatcher and the `unref`'d schedule loop. */
@@ -246,10 +253,31 @@ export const DEFAULT_SCHEDULE_INTERVAL_MS = 1_000;
 /** The recently-written cache TTL (EP-2 fast path; correctness never depends on it). */
 const RECENTLY_WRITTEN_TTL_MS = 5 * 60 * 1000;
 
+/** SL-8.5 — the baseline-seed reconciler's identity in the shared sweep registry. */
+export const BASELINE_SEED_RECONCILER_NAME = "baseline-seed";
+/** SL-8.5 — the per-pass bound on rules re-attempted (never scans unbounded history). */
+const BASELINE_SEED_RECONCILE_LIMIT = 500;
+
 const NO_OP_BACKFILL_METRICS: BackfillMetrics = {
   recordProgress: (): void => {},
   recordDuration: (): void => {},
 };
+
+/**
+ * SL-8.5 — whether a baseline seed's backfill actually **completed** (a full source enumeration),
+ * so its durable seed-intent may be cleared. `aborted` (a partial/failed source fetch) is NOT a
+ * completion. A per-scope fan-out counts as completed iff at least one scope completed (SS-17.5
+ * partial success — an all-scopes-failed run keeps the intent for a re-attempt).
+ */
+function baselineSeedCompleted(result: BackfillRunResult): boolean {
+  if (result.outcome === "completed") {
+    return true;
+  }
+  if (result.outcome === "aborted") {
+    return false;
+  }
+  return result.scopes.some((scope) => scope.outcome.outcome === "completed");
+}
 
 export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   const { db, config, logger } = deps;
@@ -579,35 +607,43 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     await runBracketedEnable(ruleId, resolved.input);
   };
 
+  // SL-8.5 — in-flight bracket for the baseline seed, so the fast-path seed and the
+  // reconciler drain never double-run the same rule concurrently (both go through
+  // `runBaselineSeed`, which marks/clears this). Distinct from the enable-backfill
+  // `inFlightRegistry` (that one is keyed to a `backfillStatus = running` rule; the seed
+  // never sets `running`), so the two never interfere.
+  const baselineSeedInFlight = new InMemoryBackfillInFlightRegistry();
+
   /**
-   * SL-8.5 — the added-field baseline seeding pass. Resolves the LINK-ONLY backfill against the
-   * **successor** mapping (committed at approval — so it does not race the adoption tx's re-point)
-   * and runs it in the background over the rule's EXISTING `RecordLink`s, seeding the added field
-   * pairs' baselines (`SyncFieldStateStore.seed` never erases, so already-seeded pairs are no-ops).
-   * It is deliberately NOT a `RuleEnabler.enable`: no enablement gate, no cursor/snapshot seed, no
-   * status flip — the rule is already enabled and this is only a seed pass. It is NOT in-flight
-   * bracketed either: the reconciler only re-triggers a `backfillStatus = running` backfill, and
-   * this never sets `running`, so it is invisible to the sweep (a lost seed is re-derived by
-   * adoption redelivery, not the backfill reconciler). The run is tracked so graceful `stop()` /
-   * {@link awaitBackfills} await it; its rejection is handled (a transient fault degrades
-   * timeliness, never the process).
+   * SL-8.5 — run ONE added-field baseline seed pass for a rule against a specific mapping, and
+   * **clear the durable seed-intent ONLY on a real completion**. Resolves the LINK-ONLY backfill
+   * against `mappingId` (the fast path passes the committed successor id — race-free against the
+   * adoption tx's re-point; the reconciler passes the rule's current `approvedMappingId`) and runs
+   * it over the rule's EXISTING `RecordLink`s, seeding the added pairs' baselines
+   * (`SyncFieldStateStore.seed` never erases, so already-seeded pairs are no-ops). It is
+   * deliberately NOT a `RuleEnabler.enable`: no enablement gate, no cursor/snapshot seed, no status
+   * flip — the rule is already enabled and this is only a seed pass.
+   *
+   * **Durability:** the intent is cleared iff the backfill **completed** (a full source
+   * enumeration). An `aborted` seed (a partial/failed source fetch), an unresolvable rule (e.g. a
+   * paused rule whose ref went unconfirmed), or a missing mapping **keeps** the intent set, so the
+   * {@link baselineSeedReconciler} re-attempts it until it completes — the seed can never silently
+   * drop the added field. Bracketed in-flight so a concurrent reconciler pass skips it.
    */
-  const seedAddedFieldBaselines = (input: {
-    readonly ruleId: string;
-    readonly successorMappingId: string;
-  }): void => {
-    const run = (async (): Promise<void> => {
-      const successor = await approvedMappings.getById(input.successorMappingId);
-      if (successor === undefined) {
+  const runBaselineSeed = async (ruleId: string, mappingId: string): Promise<void> => {
+    baselineSeedInFlight.markInFlight(ruleId);
+    try {
+      const mapping = await approvedMappings.getById(mappingId);
+      if (mapping === undefined) {
         logger.warn(
-          { ruleId: input.ruleId, successorMappingId: input.successorMappingId },
-          "added-field baseline seed: successor mapping not found — skipping",
+          { ruleId, mappingId },
+          "added-field baseline seed: mapping not found — leaving the seed-intent for the reconciler",
         );
         return;
       }
       const resolved = await resolveAddedFieldSeedBackfill(
-        input.ruleId,
-        successor,
+        ruleId,
+        mapping,
         ruleArtifactRepos,
         scopeLinks,
         scopeCorrespondences,
@@ -615,23 +651,82 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
         scopeDiscovery,
       );
       if (!resolved.ok) {
+        // A transient/paused rule that cannot resolve now: leave the intent — the reconciler
+        // re-attempts once the rule resolves again (a re-confirmed ref, a restored binding).
         logger.warn(
-          { ruleId: input.ruleId, reason: resolved.reason },
-          "added-field baseline seed: rule did not resolve — skipping",
+          { ruleId, reason: resolved.reason },
+          "added-field baseline seed: rule did not resolve — leaving the seed-intent for the reconciler",
         );
         return;
       }
-      await backfillRunner.run(resolved.backfill);
-    })();
-    // `trackBackgroundRun` attaches its own `.catch(onError)` (so the run can never float as an
-    // unhandled rejection) and returns the original run for `awaitBackfills`/`stop()` to await;
-    // this fire-and-forget enqueue does not await it, so the returned promise is explicitly voided.
-    void trackBackgroundRun(run, activeBackfills, (error) => {
-      logger.error(
-        { ruleId: input.ruleId, err: describeError(error) },
-        "added-field baseline seed backfill failed",
-      );
-    });
+      const result = await backfillRunner.run(resolved.backfill);
+      if (baselineSeedCompleted(result)) {
+        // Cleared ONLY on a real completion — an aborted fetch keeps the flag for a re-attempt.
+        await syncRules.clearPendingBaselineSeed(ruleId);
+      } else {
+        logger.warn(
+          { ruleId, outcome: result.outcome },
+          "added-field baseline seed aborted — keeping the seed-intent for the reconciler to re-attempt",
+        );
+      }
+    } finally {
+      baselineSeedInFlight.clear(ruleId);
+    }
+  };
+
+  /**
+   * SL-8.5 — the FAST-PATH added-field baseline seed successor adoption enqueues (fire-and-forget)
+   * for a re-pointed rule whose successor added a field pair. Resolves against the committed
+   * successor mapping (so it does not race the adoption tx re-point) and runs in the background;
+   * the durable seed-intent (set in the adoption tx) plus the reconciler make it recoverable if
+   * this run aborts/crashes. Tracked so graceful `stop()` / {@link awaitBackfills} await it; its
+   * rejection is handled (a transient fault degrades timeliness, never the process).
+   */
+  const seedAddedFieldBaselines = (input: {
+    readonly ruleId: string;
+    readonly successorMappingId: string;
+  }): void => {
+    void trackBackgroundRun(
+      runBaselineSeed(input.ruleId, input.successorMappingId),
+      activeBackfills,
+      (error) => {
+        logger.error(
+          { ruleId: input.ruleId, err: describeError(error) },
+          "added-field baseline seed backfill failed",
+        );
+      },
+    );
+  };
+
+  /**
+   * SL-8.5 — the baseline-seed reconciler: the durable safety net for the offloaded seed. NOT a
+   * second scheduler — it registers on the SHARED reconciliation sweep. Each pass scans the
+   * bounded set of rules still owing a seed (`pending_baseline_seed = true`, `RS`-style bounded)
+   * and, for any not already seeding in this process, re-attempts the seed. Idempotent
+   * (seed-never-erases) and self-clearing (a completed seed clears the flag), so a transient
+   * abort/crash self-heals rather than permanently dropping the added field (SL-8.6 / RC-3).
+   */
+  const baselineSeedReconciler: Reconciler = {
+    name: BASELINE_SEED_RECONCILER_NAME,
+    reconcile: async (): Promise<void> => {
+      const pending = await syncRules.listPendingBaselineSeed(BASELINE_SEED_RECONCILE_LIMIT);
+      for (const rule of pending) {
+        if (baselineSeedInFlight.isBackfillInFlight(rule.id)) {
+          // A fast-path or prior reconciler seed for this rule is live — never double-run.
+          continue;
+        }
+        void trackBackgroundRun(
+          runBaselineSeed(rule.id, rule.approvedMappingId),
+          activeBackfills,
+          (error) => {
+            logger.error(
+              { ruleId: rule.id, err: describeError(error) },
+              "baseline seed reconcile run failed",
+            );
+          },
+        );
+      }
+    },
   };
 
   // SS-11.7 — the sweep re-trigger for a lost/crashed enablement discovery pass. NOT a
@@ -743,6 +838,7 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
     loadGovernor: governor,
     reconciler,
     scopeDiscoveryReconciler,
+    baselineSeedReconciler,
     start(): void {
       queueDispatcher.start();
       if (!scheduleRunning) {

@@ -27,6 +27,7 @@ const MINIMAL_ROW: SyncRuleRow = {
   lastEventAt: null,
   cursor: null,
   lastSnapshotRef: null,
+  pendingBaselineSeed: null,
 };
 
 describe("sync-rule mapper", () => {
@@ -63,6 +64,8 @@ describe("sync-rule mapper", () => {
       lastEventAt: null,
       cursor: "cursor-abc",
       lastSnapshotRef: "snap-1",
+      // SL-8.5 — the durable seed-intent round-trips (a rule owing a baseline seed).
+      pendingBaselineSeed: true,
     };
     const rule = mapSyncRuleRow(row);
     expect(rule).toMatchObject({
@@ -78,9 +81,18 @@ describe("sync-rule mapper", () => {
       lastRunAt,
       cursor: "cursor-abc",
       lastSnapshotRef: "snap-1",
+      pendingBaselineSeed: true,
     });
     // lastEventAt was NULL → absent.
     expect("lastEventAt" in rule).toBe(false);
+  });
+
+  it("collapses a false/NULL pending_baseline_seed to an absent key (nothing owed)", () => {
+    // A rule that does not owe a seed reads back WITHOUT the key (never present-false).
+    expect(
+      "pendingBaselineSeed" in mapSyncRuleRow({ ...MINIMAL_ROW, pendingBaselineSeed: false }),
+    ).toBe(false);
+    expect("pendingBaselineSeed" in mapSyncRuleRow(MINIMAL_ROW)).toBe(false);
   });
 
   it("toSyncRuleInsert writes an absent execution field as NULL (backward-compatible insert)", () => {
@@ -99,6 +111,8 @@ describe("sync-rule mapper", () => {
       backfillStatus: null,
       cursor: null,
       lastSnapshotRef: null,
+      // SL-8.5 — an absent seed-intent inserts NULL (nothing owed).
+      pendingBaselineSeed: null,
     });
   });
 });

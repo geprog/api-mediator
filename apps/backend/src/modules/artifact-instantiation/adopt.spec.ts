@@ -52,12 +52,17 @@ class FakeAdoptionSyncOps implements AdoptionSyncOps {
   readonly superseded: string[] = [];
   readonly counterpartSets: { id: string; counterpart: string | null }[] = [];
   readonly syncEdgeRecomputes: { source: string; target: string }[] = [];
+  readonly pendingBaselineSeedMarks: string[] = [];
 
   getApprovedMapping(id: string): Promise<ApprovedMapping | undefined> {
     return Promise.resolve(this.mappings.get(id));
   }
   listFieldMappings(mappingId: string): Promise<readonly FieldMapping[]> {
     return Promise.resolve(this.fieldsByMapping.get(mappingId) ?? []);
+  }
+  markPendingBaselineSeed(ruleId: string): Promise<void> {
+    this.pendingBaselineSeedMarks.push(ruleId);
+    return Promise.resolve();
   }
   repointSyncRulesToSuccessor(
     supersededMappingId: string,
@@ -479,6 +484,9 @@ describe("successor adoption (SL-7/SL-8) via the MappingApproved consumer", () =
     // ONLY the issues rule (whose pair gained a field) is seeded — the comments rule (no added
     // pair) enqueues nothing — and the seed resolves against the successor mapping.
     expect(seedCalls).toEqual([{ ruleId: "r-issues", successorMappingId: "succ" }]);
+    // The DURABLE seed-intent was persisted (in the adoption tx) for exactly that rule — the
+    // recovery record the reconciler drains if the async seed aborts/crashes.
+    expect(syncOps.pendingBaselineSeedMarks).toEqual(["r-issues"]);
     // Adoption still re-pointed both rules + superseded the predecessor (the seed is additive).
     expect(syncOps.superseded).toEqual(["pred"]);
   });
@@ -546,6 +554,8 @@ describe("successor adoption (SL-7/SL-8) via the MappingApproved consumer", () =
     await consumer.handle(mappingApprovedEvent("evt-1", "succ"), fakeTx);
 
     expect(seedCalls).toEqual([]);
+    // No added pair → no durable seed-intent persisted either.
+    expect(syncOps.pendingBaselineSeedMarks).toEqual([]);
     expect(syncOps.superseded).toEqual(["pred"]);
   });
 });

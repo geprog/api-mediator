@@ -185,6 +185,8 @@ const detection = buildDetectionBackground({
     artifactInstantiation.reconciler,
     sync.reconciler,
     sync.scopeDiscoveryReconciler,
+    // SL-8.5 — the durable safety net for the offloaded added-field baseline seed.
+    sync.baselineSeedReconciler,
     adapterMountReactions.reconciler,
   ],
 });
