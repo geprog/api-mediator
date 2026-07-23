@@ -18,16 +18,24 @@ import type {
   AuditLogEntry,
   DomainEventEnvelope,
   FieldMapping,
+  Ir,
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
   ScopeCorrespondence,
   ScopePathBinding,
+  SyncRule,
 } from "@mediator/domain";
+import { revalidateResourceBinding, revalidateScopeCorrespondence } from "@mediator/ir";
+import type { ScopeCorrespondenceSide } from "@mediator/ir";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { AnalysisExclusionsService } from "../modules/analysis-exclusions.js";
 import { FakeApprovalPersistence } from "../modules/approval/approval.testkit.js";
+import type {
+  CorrespondenceRevalidationResult,
+  SpecScopeRevalidationResult,
+} from "../modules/sync/scope-lifecycle.js";
 import type {
   ApprovedMappingTxRepo,
   AppReader,
@@ -40,9 +48,11 @@ import type {
   EndpointCacheInvalidator,
   GraphEdgeRecompute,
   MappingArtifactsTxReader,
+  ScopeRevalidationTxService,
   SpecReader,
   DetectionJobTxRepo,
   SpecTxRepo,
+  SyncRuleTxRepo,
   TxStores,
   UnitOfWork,
 } from "../modules/persistence.js";
@@ -108,6 +118,15 @@ export class InMemoryStore {
   public readonly operationMappings: OperationMapping[] = [];
   /** SL-4.6 — the adapter bindings a consumer-provider mapping derived, read to target the coupled cache drop. */
   public readonly adapterBindings: AdapterBinding[] = [];
+  /** SL-5.2 — `SyncRule`s keyed by id, so the breaking reaction can re-validate + clear their `pollOperationRef`. */
+  public readonly syncRules = new Map<string, SyncRule>();
+  /** SL-5.1 — the spec ids whose `ResourceBinding`s the breaking reaction re-validated (spy surface). */
+  public readonly bindingRevalidations: string[] = [];
+  /** SL-5.3 — the `ScopeCorrespondence`s the breaking reaction re-validated (spy surface: id + archive scope). */
+  public readonly correspondenceRevalidations: {
+    readonly correspondenceId: string;
+    readonly archivedScopeLinks: number;
+  }[] = [];
   /** SL-4.6 — the `GraphEdge` recomputes the breaking reaction requested (spy surface for tests). */
   public readonly graphRecomputes: {
     readonly type: "sync" | "adapter-dependency";
@@ -390,13 +409,96 @@ class FakeMappingArtifactsRepo implements MappingArtifactsTxReader {
   }
 }
 
-/** Mirrors {@link DownstreamArtifactRepository.listAdapterBindingsByMapping} for the SL-4.6 coupled cache drop. */
+/**
+ * Mirrors {@link DownstreamArtifactRepository}'s by-mapping reads: adapter bindings (SL-4.6
+ * coupled cache drop) and `SyncRule`s (SL-5.2 `pollOperationRef` re-validation).
+ */
 class FakeDownstreamArtifactRepo implements DownstreamArtifactTxReader {
   public constructor(private readonly store: InMemoryStore) {}
   public listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]> {
     return Promise.resolve(
       this.store.adapterBindings.filter((b) => b.approvedMappingId === mappingId),
     );
+  }
+  public listSyncRulesByMapping(approvedMappingId: string): Promise<SyncRule[]> {
+    return Promise.resolve(
+      [...this.store.syncRules.values()].filter(
+        (rule) => rule.approvedMappingId === approvedMappingId,
+      ),
+    );
+  }
+}
+
+/**
+ * SL-5.2 — mirrors {@link SyncRuleRepository.clearPollOperationRef}: returns a rule's
+ * `pollOperationRef` to unconfirmed (an absent domain key). Only that field moves — the
+ * cursor/snapshot stay (the re-confirm is a separate human action).
+ */
+class FakeSyncRuleRepo implements SyncRuleTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+  public clearPollOperationRef(id: string): Promise<void> {
+    const existing = this.store.syncRules.get(id);
+    if (existing !== undefined) {
+      // The real repo NULLs the column, which the mapper reads back as an absent key.
+      const next = { ...existing };
+      delete next.pollOperationRef;
+      this.store.syncRules.set(id, next);
+    }
+    return Promise.resolve();
+  }
+}
+
+/**
+ * SL-5.1/5.3 — a faithful {@link ScopeRevalidationTxService} fake that runs the **real**
+ * `@mediator/ir` pure re-validation policy over the in-memory store and persists its
+ * consequence, so a unit test proves the wiring end to end (a broken ref returned to
+ * unconfirmed but RETAINED, a correspondence returned to unconfirmed) without a live
+ * Postgres. The real archiving of `ScopeLink`s is proven against the DB in the integration
+ * spec; here only the correspondence write + the archive-scope intent are recorded.
+ */
+class FakeScopeLifecycle implements ScopeRevalidationTxService {
+  public constructor(private readonly store: InMemoryStore) {}
+
+  public revalidateSpecBindings(specId: string, newIr: Ir): Promise<SpecScopeRevalidationResult> {
+    this.store.bindingRevalidations.push(specId);
+    const findings: SpecScopeRevalidationResult["findings"][number][] = [];
+    const bindings: ResourceBinding[] = [];
+    for (const binding of this.store.bindings.values()) {
+      if (binding.apiSpecId !== specId) continue;
+      const revalidation = revalidateResourceBinding(binding, newIr);
+      findings.push(...revalidation.findings);
+      // Retain-in-place (the SS-16 replaceRevalidated semantics), never drop.
+      this.store.bindings.set(binding.id, revalidation.binding);
+      bindings.push(revalidation.binding);
+    }
+    return Promise.resolve({ findings, bindings });
+  }
+
+  public revalidateCorrespondence(
+    correspondence: ScopeCorrespondence,
+    source: ScopeCorrespondenceSide,
+    target: ScopeCorrespondenceSide,
+  ): Promise<CorrespondenceRevalidationResult> {
+    const revalidation = revalidateScopeCorrespondence({ correspondence, source, target });
+    // Approximate the archived-link count by the pure archive scope (the real service reads
+    // the live links; the unit test asserts only the call + the correspondence unconfirmed).
+    const archivedScopeLinks =
+      revalidation.archiveScopeLinks === "none" ? 0 : revalidation.findings.length;
+    if (revalidation.findings.length > 0) {
+      this.store.scopeCorrespondences.set(
+        revalidation.correspondence.resourcePairRef,
+        revalidation.correspondence,
+      );
+    }
+    this.store.correspondenceRevalidations.push({
+      correspondenceId: correspondence.id,
+      archivedScopeLinks,
+    });
+    return Promise.resolve({
+      findings: revalidation.findings,
+      correspondence: revalidation.correspondence,
+      archivedScopeLinks,
+    });
   }
 }
 
@@ -475,6 +577,10 @@ export class FakeUnitOfWork implements UnitOfWork {
       adapterBindings: [...this.store.adapterBindings],
       graphRecomputes: [...this.store.graphRecomputes],
       cacheInvalidations: [...this.store.cacheInvalidations],
+      syncRules: new Map(this.store.syncRules),
+      scopeCorrespondences: new Map(this.store.scopeCorrespondences),
+      bindingRevalidations: [...this.store.bindingRevalidations],
+      correspondenceRevalidations: [...this.store.correspondenceRevalidations],
     };
     const stores: TxStores = {
       registeredApps: new FakeAppRepo(this.store),
@@ -488,6 +594,9 @@ export class FakeUnitOfWork implements UnitOfWork {
       downstreamArtifacts: new FakeDownstreamArtifactRepo(this.store),
       graph: new FakeGraphRecompute(this.store),
       cacheInvalidator: new FakeEndpointCacheInvalidator(this.store),
+      syncRules: new FakeSyncRuleRepo(this.store),
+      scopeCorrespondences: new FakeScopeCorrespondenceRepo(this.store),
+      scopeLifecycle: new FakeScopeLifecycle(this.store),
       emit: (event) => {
         this.store.events.push(event);
         return Promise.resolve();
@@ -515,6 +624,10 @@ export class FakeUnitOfWork implements UnitOfWork {
     adapterBindings: AdapterBinding[];
     graphRecomputes: InMemoryStore["graphRecomputes"][number][];
     cacheInvalidations: string[];
+    syncRules: Map<string, SyncRule>;
+    scopeCorrespondences: Map<string, ScopeCorrespondence>;
+    bindingRevalidations: string[];
+    correspondenceRevalidations: InMemoryStore["correspondenceRevalidations"][number][];
   }): void {
     replaceMap(this.store.apps, snapshot.apps);
     replaceMap(this.store.specs, snapshot.specs);
@@ -529,6 +642,10 @@ export class FakeUnitOfWork implements UnitOfWork {
     replaceArray(this.store.adapterBindings, snapshot.adapterBindings);
     replaceArray(this.store.graphRecomputes, snapshot.graphRecomputes);
     replaceArray(this.store.cacheInvalidations, snapshot.cacheInvalidations);
+    replaceMap(this.store.syncRules, snapshot.syncRules);
+    replaceMap(this.store.scopeCorrespondences, snapshot.scopeCorrespondences);
+    replaceArray(this.store.bindingRevalidations, snapshot.bindingRevalidations);
+    replaceArray(this.store.correspondenceRevalidations, snapshot.correspondenceRevalidations);
   }
 }
 

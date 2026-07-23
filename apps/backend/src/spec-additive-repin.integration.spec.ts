@@ -8,6 +8,9 @@ import {
   MappingArtifactsRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
+  ScopeCorrespondenceRepository,
+  ScopeLinkRepository,
+  SyncRuleRepository,
   apiSpec,
   approvedMapping,
   auditLog,
@@ -36,6 +39,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { CredentialTxStore, TxStores } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
+import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
 import { providerSpecDocument } from "./testing/sample-specs.testkit.js";
 
 /**
@@ -202,14 +206,21 @@ suite("SL-2 additive re-pin + carry-forward (requires Postgres)", () => {
         listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
         listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
       },
-      downstreamArtifacts: {
-        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
-      },
+      downstreamArtifacts: new DownstreamArtifactRepository(handle),
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
         recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
       },
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
+      // SL-5 operational-ref re-validation ports (real repos) — this additive spec never
+      // reaches the breaking branch, so they carry no fixtures to re-validate.
+      syncRules: new SyncRuleRepository(handle),
+      scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+      scopeLifecycle: new ScopeLifecycleService({
+        resourceBindings: new ResourceBindingRepository(handle),
+        scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
+        scopeLinks: new ScopeLinkRepository(handle),
+      }),
       emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
     };
   }

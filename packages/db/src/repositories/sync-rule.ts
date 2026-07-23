@@ -219,6 +219,58 @@ export class SyncRuleRepository {
   }
 
   /**
+   * **SL-5.2 — return a rule's `pollOperationRef` to unconfirmed (clear it).** The
+   * breaking-change reaction (`SpecRegistry.ingestNewVersion`) calls this in-tx when a
+   * spec bump removed/renamed the pinned poll operation: the domain models
+   * `pollOperationRef` as a plain optional string (present + non-empty = confirmed), so
+   * "return to unconfirmed" is a NULL write. That pauses the rule — the runtime backstop
+   * (`RepoPollPlanResolver`) refuses an unconfirmed poll operation — exactly as a
+   * `ResourceBinding` ref going unconfirmed pauses (`docs/architecture/extensibility.md`
+   * *Spec update lifecycle* step 4). Deliberately **only** `pollOperationRef` moves: the
+   * cursor/snapshot are preserved until a human *re-confirms it onto a different
+   * operation* ({@link reconfirmPollOperation}), never on the break itself.
+   */
+  public async clearPollOperationRef(id: string): Promise<void> {
+    await this.db.update(syncRule).set({ pollOperationRef: null }).where(eq(syncRule.id, id));
+  }
+
+  /**
+   * **SL-5.2 — the documented `pollOperationRef` re-confirm behavior.** An operator
+   * re-confirms an unconfirmed (or corrects a confirmed) `pollOperationRef` onto some
+   * operation: when that is a **different** operation than the rule currently holds, the
+   * delta `cursor` is cleared and the snapshot rebuilt (a fresh complete fetch), because
+   * the old delta stream / full-fetch snapshot describes a *different* source operation
+   * and reusing it would misread the new operation's output (`docs/architecture/extensibility.md`
+   * *Spec update lifecycle* step 4, *Successor adoption*; SL-5 criterion 2 / SL-8 criterion 2).
+   * Re-confirming onto the **same** operation (a still-valid ref) leaves the cursor and
+   * snapshot untouched.
+   *
+   * Nothing here auto-confirms — the caller supplies the operator's chosen operation
+   * (SL-5.5). Returns whether the cursor/snapshot were reset, so the caller can report it.
+   * The compare-and-write is one statement on this handle, so it is atomic under the
+   * caller's transaction.
+   */
+  public async reconfirmPollOperation(
+    id: string,
+    pollOperationRef: string,
+  ): Promise<{ readonly reset: boolean }> {
+    const [row] = await this.db
+      .select({ current: syncRule.pollOperationRef })
+      .from(syncRule)
+      .where(eq(syncRule.id, id))
+      .limit(1);
+    if (row === undefined) {
+      return { reset: false };
+    }
+    const reset = (row.current ?? undefined) !== pollOperationRef;
+    await this.db
+      .update(syncRule)
+      .set(reset ? { pollOperationRef, cursor: null, lastSnapshotRef: null } : { pollOperationRef })
+      .where(eq(syncRule.id, id));
+    return { reset };
+  }
+
+  /**
    * Persist a **disabled** rule's execution-option configuration (SA-1.1/SA-1.2).
    * Writes **only** the fields present in `patch` (an absent key keeps its column
    * value); `pollIntervalOverride: null` clears the override. All columns are the

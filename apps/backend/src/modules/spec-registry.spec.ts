@@ -8,6 +8,8 @@ import type {
   OperationMapping,
   RegisteredApp,
   ResourceBinding,
+  ScopeCorrespondence,
+  SyncRule,
 } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
@@ -19,10 +21,12 @@ import {
   UnknownAppError,
   carryForwardAnalysisExclusions,
   carryForwardResourceBinding,
+  carryForwardResourceBindingVerbatim,
   computeAdditiveAnalysisScope,
   computeBreakingAffectedKeys,
   mappingChangedSideRefs,
   mappingReferencesChangedElement,
+  pollOperationResolves,
   repinnedSpecPair,
 } from "./spec-registry.js";
 
@@ -1391,6 +1395,375 @@ describe("SL-4 pure mark-stale matching", () => {
           keys,
         ),
       ).toBe(false);
+    });
+  });
+});
+
+/**
+ * SL-5 — the breaking reaction's operational-ref re-validation wired into the breaking
+ * branch of `ingestNewVersion`, ALONGSIDE SL-4's mark-stale (same diff, same transaction):
+ * the changed spec's `ResourceBinding`s carry forward **re-validated** (a broken bound ref
+ * RETAINED but returned to unconfirmed — vs SL-2's additive drop), a `SyncRule.pollOperationRef`
+ * pinned to a now-gone source operation returns to unconfirmed, and each scoped pair's
+ * `ScopeCorrespondence` is re-validated. Every consequence is a persisted unconfirmed
+ * artifact — a derived pause, no rule status written.
+ */
+describe("SpecRegistry.ingestNewVersion breaking operational-ref re-validation (SL-5)", () => {
+  const CONFIRMED_AT = new Date("2026-07-20T00:00:00.000Z");
+
+  /**
+   * The sample provider doc with `title` retyped integer (breaking → the diff classifies
+   * breaking) AND the list operation `listIssues` renamed `issuesIndex` (so a derived
+   * `collectionReadRef` / a `pollOperationRef` pinned to `listIssues` no longer resolves).
+   */
+  function providerSpecBreakingListRename(): Record<string, unknown> {
+    const doc = structuredClone(providerSpecDocument()) as {
+      paths: { "/issues": { get: { operationId: string } } };
+      components: { schemas: { Issue: { properties: Record<string, { type: string }> } } };
+    };
+    doc.paths["/issues"].get.operationId = "issuesIndex";
+    doc.components.schemas.Issue.properties["title"] = { type: "integer" };
+    return doc;
+  }
+
+  async function seedV1(
+    store: InMemoryStore,
+    unitOfWork: FakeUnitOfWork,
+    registry: SpecRegistry,
+  ): Promise<{ app: RegisteredApp; v1: ApiSpec }> {
+    const app = seedApp(store);
+    const v1 = await unitOfWork.run((tx) =>
+      registry.ingestSpec(app.id, providerSpecDocument(), "PROVIDER", [], tx),
+    );
+    return { app, v1 };
+  }
+
+  function peerSourceMapping(app: RegisteredApp, v1: ApiSpec): ApprovedMapping {
+    return {
+      id: "m1",
+      sourceSpecId: v1.id, // the changed provider is the SOURCE (its rules pin a source poll op)
+      targetSpecId: "spec-counterpart",
+      sourceAppId: app.id,
+      targetAppId: "app-counterpart",
+      variant: "peer-peer",
+      approvedBy: "reviewer:alice",
+      approvedAt: CONFIRMED_AT,
+      status: "active",
+    };
+  }
+
+  it("SL-5.1: carries bindings forward RE-VALIDATED — a broken bound ref is RETAINED but unconfirmed, an unaffected ref stays confirmed, with no mapping content affected", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    const v1Issues = [...store.bindings.values()].find(
+      (b) => b.apiSpecId === v1.id && b.resourceRef === "issues",
+    );
+    if (v1Issues === undefined) throw new Error("expected a derived issues binding");
+    // Confirm the native id (field `id`, survives the bump) and the collection read
+    // (operation `listIssues`, renamed away → its IR target no longer resolves).
+    store.bindings.set(v1Issues.id, {
+      ...v1Issues,
+      nativeIdRef: {
+        value: { kind: "field", path: "id" },
+        confirmedBy: "op",
+        confirmedAt: CONFIRMED_AT,
+      },
+      collectionReadRef: {
+        value: { kind: "operation", operationId: "listIssues" },
+        confirmedBy: "op",
+        confirmedAt: CONFIRMED_AT,
+      },
+    });
+
+    // No mappings seeded → nothing stale; the operational-ref re-validation fires anyway.
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecBreakingListRename(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+    const v2Id = outcome.newSpec.id;
+
+    const v2Issues = [...store.bindings.values()].find(
+      (b) => b.apiSpecId === v2Id && b.resourceRef === "issues",
+    );
+    expect(v2Issues).toBeDefined();
+    // The native id's field `id` still resolves → carried forward CONFIRMED (SL-5.1: unaffected
+    // refs carry forward with the re-pin).
+    expect(v2Issues?.nativeIdRef?.confirmedBy).toBe("op");
+    // The collection read's operation was renamed away → RETAINED (defined, NOT dropped as the
+    // additive path would) but returned to UNCONFIRMED, which pauses any dependent rule.
+    expect(v2Issues?.collectionReadRef).toBeDefined();
+    expect(v2Issues?.collectionReadRef?.confirmedBy).toBeNull();
+    // SS-16 `revalidateSpecBindings` was invoked for the NEW version's bindings (the wiring).
+    expect(store.bindingRevalidations).toContain(v2Id);
+  });
+
+  it("SL-5.2: returns a rule's pollOperationRef to unconfirmed when its pinned poll op is gone, leaves a still-resolving one, and writes no rule status / cursor / snapshot (SL-5.4)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+    // A peer-peer mapping whose SOURCE is the changed provider, referencing NO changed element
+    // (no field/operation children) → it stays active; only its poll op re-validation fires.
+    store.approvedMappings.set("m1", peerSourceMapping(app, v1));
+    const brokenRule: SyncRule = {
+      id: "r-broken",
+      approvedMappingId: "m1",
+      resourcePairRef: `${app.id}:issues|app-counterpart:issues`,
+      status: "enabled",
+      pollOperationRef: "listIssues", // renamed away in v2 → cleared
+      cursor: "cur-1",
+      lastSnapshotRef: "snap-1",
+    };
+    const okRule: SyncRule = {
+      id: "r-ok",
+      approvedMappingId: "m1",
+      resourcePairRef: `${app.id}:issues|app-counterpart:issues`,
+      status: "enabled",
+      pollOperationRef: "getIssue", // still resolves in v2 → left pinned
+    };
+    store.syncRules.set(brokenRule.id, brokenRule);
+    store.syncRules.set(okRule.id, okRule);
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecBreakingListRename(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    // The mapping referenced no changed element → re-pinned active (SL-5 fires independently).
+    expect(store.approvedMappings.get("m1")?.status).toBe("active");
+
+    // SL-5.2 — the pinned op that no longer resolves is returned to unconfirmed (cleared).
+    expect(store.syncRules.get("r-broken")?.pollOperationRef).toBeUndefined();
+    // The still-resolving op is left pinned.
+    expect(store.syncRules.get("r-ok")?.pollOperationRef).toBe("getIssue");
+    // SL-5.4 — the clear touches ONLY pollOperationRef: no rule status, cursor, or snapshot moves
+    // (resetting those is the operator's re-confirm-onto-a-different-operation, not the break).
+    expect(store.syncRules.get("r-broken")?.status).toBe("enabled");
+    expect(store.syncRules.get("r-broken")?.cursor).toBe("cur-1");
+    expect(store.syncRules.get("r-broken")?.lastSnapshotRef).toBe("snap-1");
+  });
+
+  it("SL-5.6: a rule pauses for BOTH a stale mapping (SL-4) and a cleared pollOperationRef (SL-5), consistently", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+    // This mapping DOES reference the changed `issues.title` → SL-4 stales it; its rule's
+    // pinned `listIssues` poll op is also gone → SL-5 clears it. One rule, two conditions.
+    store.approvedMappings.set("m1", peerSourceMapping(app, v1));
+    store.fieldMappings.push({
+      id: "m1-fm",
+      mappingId: "m1",
+      sourcePath: "issues/title",
+      targetPath: "issues/title",
+      transform: "rename",
+    });
+    store.syncRules.set("r1", {
+      id: "r1",
+      approvedMappingId: "m1",
+      resourcePairRef: `${app.id}:issues|app-counterpart:issues`,
+      status: "enabled",
+      pollOperationRef: "listIssues",
+    });
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecBreakingListRename(), "PROVIDER", tx),
+    );
+
+    // SL-4 — the mapping is stale and STAYS pinned to the reviewed (superseded) version.
+    expect(store.approvedMappings.get("m1")?.status).toBe("stale");
+    expect(store.approvedMappings.get("m1")?.sourceSpecId).toBe(v1.id);
+    // SL-5 — the same rule's poll op is returned to unconfirmed; SL-5 never un-stales the
+    // mapping and writes no rule status (the two conditions are independent, both cleared to resume).
+    expect(store.syncRules.get("r1")?.pollOperationRef).toBeUndefined();
+    expect(store.syncRules.get("r1")?.status).toBe("enabled");
+  });
+
+  it("SL-5.3: re-validates a scoped pair's ScopeCorrespondence on a PROVIDER breaking advance (unconfirmed + call recorded)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app } = await seedV1(store, unitOfWork, registry);
+
+    // A counterpart app with an active PROVIDER spec whose IR lacks the `projects` container.
+    store.specs.set("spec-counterpart-v1", {
+      id: "spec-counterpart-v1",
+      appId: "app-counterpart",
+      role: "PROVIDER",
+      rawDocument: {},
+      parsedIR: [
+        { resourceRef: "tasks", name: "tasks", operations: [], schemas: [], crossResourceRefs: [] },
+      ],
+      analysisExclusions: [],
+      version: 1,
+      contentHash: "sha256:counterpart",
+      status: "active",
+      createdAt: CONFIRMED_AT,
+    });
+    const pair = `${app.id}:issues|app-counterpart:tasks`;
+    const correspondence: ScopeCorrespondence = {
+      id: "corr-1",
+      resourcePairRef: pair,
+      scopeIdentityKey: [{ sourceScopeKey: "owner", targetFieldPath: "title" }],
+      // The target container `projects` is absent from the counterpart IR → a container-gone break.
+      targetContainerRef: { appId: "app-counterpart", resourceRef: "projects" },
+      sourceContainerRef: { appId: app.id, resourceRef: "repos" },
+      confirmedBy: "op",
+      confirmedAt: CONFIRMED_AT,
+    };
+    store.scopeCorrespondences.set(pair, correspondence);
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, providerSpecBreakingListRename(), "PROVIDER", tx),
+    );
+
+    // SL-5.3 — the correspondence was re-validated (the wiring) and returned to unconfirmed.
+    expect(store.correspondenceRevalidations.map((r) => r.correspondenceId)).toContain("corr-1");
+    expect(store.scopeCorrespondences.get(pair)?.confirmedBy).toBeNull();
+  });
+
+  it("SL-5.3: a CONSUMER breaking advance re-validates NO ScopeCorrespondence (a correspondence correlates a PROVIDER sync pair)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const consumerApp = seedApp(store, { id: "app-consumer", name: "Consumer" });
+    const consumerDoc = (titleType: "string" | "integer"): Record<string, unknown> => ({
+      openapi: "3.0.0",
+      info: { title: "Consumer", version: "1.0.0" },
+      paths: {
+        "/issues": {
+          get: {
+            operationId: "listIssues",
+            tags: ["issue"],
+            responses: {
+              "200": {
+                description: "ok",
+                content: {
+                  "application/json": {
+                    schema: { type: "array", items: { $ref: "#/components/schemas/Issue" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Issue: {
+            type: "object",
+            properties: { id: { type: "integer" }, title: { type: titleType } },
+            required: ["id"],
+          },
+        },
+      },
+    });
+    await unitOfWork.run((tx) =>
+      registry.ingestSpec(consumerApp.id, consumerDoc("string"), "CONSUMER", [], tx),
+    );
+    // A correspondence whose token names the consumer's `issues` resource would false-match
+    // `listByResourceSide` — the PROVIDER-role gate is what prevents re-validating it.
+    const pair = `${consumerApp.id}:issues|app-counterpart:tasks`;
+    store.scopeCorrespondences.set(pair, {
+      id: "corr-consumer",
+      resourcePairRef: pair,
+      scopeIdentityKey: [{ sourceScopeKey: "owner", targetFieldPath: "title" }],
+      targetContainerRef: { appId: "app-counterpart", resourceRef: "projects" },
+      sourceContainerRef: { appId: consumerApp.id, resourceRef: "repos" },
+      confirmedBy: "op",
+      confirmedAt: CONFIRMED_AT,
+    });
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(consumerApp.id, consumerDoc("integer"), "CONSUMER", tx),
+    );
+
+    expect(store.correspondenceRevalidations).toEqual([]);
+    expect(store.scopeCorrespondences.get(pair)?.confirmedBy).toBe("op"); // untouched
+  });
+});
+
+/**
+ * SL-5 pure operational-ref helpers, unit-tested directly so the poll-operation resolution
+ * and the retain-verbatim carry-forward are provable without a whole ingest round.
+ */
+describe("SL-5 pure operational-ref helpers", () => {
+  function issuesIr(operationIds: string[]): Ir {
+    return [
+      {
+        resourceRef: "issues",
+        name: "issues",
+        operations: operationIds.map((operationId) => ({
+          operationId,
+          method: "get" as const,
+          path: "/issues",
+          parameters: [],
+        })),
+        schemas: [],
+        crossResourceRefs: [],
+      },
+    ];
+  }
+
+  describe("pollOperationResolves", () => {
+    const ir = issuesIr(["listIssues", "getIssue"]);
+
+    it("resolves a bare operationId that still exists", () => {
+      expect(pollOperationResolves("listIssues", ir)).toBe(true);
+    });
+    it("resolves the serialized resourceRef/operationId form (first-slash split)", () => {
+      expect(pollOperationResolves("issues/getIssue", ir)).toBe(true);
+    });
+    it("is false for a removed / renamed operation", () => {
+      expect(pollOperationResolves("issuesIndex", ir)).toBe(false);
+      expect(pollOperationResolves("issues/issuesIndex", ir)).toBe(false);
+    });
+    it("splits only on the FIRST slash (a synthetic slash-bearing operationId)", () => {
+      const synthetic = issuesIr(["get /issues/{id}"]);
+      expect(pollOperationResolves("issues/get /issues/{id}", synthetic)).toBe(true);
+    });
+  });
+
+  describe("carryForwardResourceBindingVerbatim", () => {
+    const confirmedAt = new Date("2026-07-20T00:00:00.000Z");
+    const prior: ResourceBinding = {
+      id: "old-binding",
+      apiSpecId: "old-spec",
+      resourceRef: "issues",
+      nativeIdRef: { value: { kind: "field", path: "id" }, confirmedBy: "op", confirmedAt },
+      // A ref whose IR target is GONE from the new IR — the additive carry-forward would DROP
+      // it; the verbatim (breaking) one copies it so re-validation can retain-unconfirm it.
+      collectionReadRef: {
+        value: { kind: "operation", operationId: "listIssues" },
+        confirmedBy: "op",
+        confirmedAt,
+      },
+      scopePathBindings: [],
+    };
+
+    it("copies the whole binding verbatim onto the new version — every ref + confirmation retained, nothing dropped", () => {
+      const carried = carryForwardResourceBindingVerbatim(
+        prior,
+        "new-spec",
+        "new-binding",
+        issuesIr(["issuesIndex"]), // `listIssues` is gone, yet the ref is still carried
+      );
+      expect(carried).toEqual({
+        ...prior,
+        id: "new-binding",
+        apiSpecId: "new-spec",
+      });
+      // Contrast with the additive drop: that ref would be undefined there, retained here.
+      expect(carried?.collectionReadRef).toEqual(prior.collectionReadRef);
+    });
+
+    it("returns undefined when the resource group is gone from the new IR (the whole binding is moot)", () => {
+      expect(
+        carryForwardResourceBindingVerbatim(prior, "new-spec", "new-binding", []),
+      ).toBeUndefined();
     });
   });
 });
