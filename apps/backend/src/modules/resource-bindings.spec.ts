@@ -120,9 +120,23 @@ class FakeUnitOfWork implements UnitOfWork {
       approvedMappings: {
         listActiveBySpecId: (): Promise<never[]> => Promise.resolve([]),
         repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
+        markStale: (): Promise<undefined> => Promise.resolve(undefined),
       },
       audit: { insert: (): Promise<void> => Promise.resolve() },
       detectionJobs: { enqueueScoped: (): Promise<void> => Promise.resolve() },
+      // SL-4 breaking-reaction ports — unused by the SS-19 confirm path exercised here.
+      mappingArtifacts: {
+        listFieldMappings: (): Promise<never[]> => Promise.resolve([]),
+        listOperationMappings: (): Promise<never[]> => Promise.resolve([]),
+      },
+      downstreamArtifacts: {
+        listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
+      },
+      graph: {
+        recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
+        recomputeAdapterEdge: (): Promise<void> => Promise.resolve(),
+      },
+      cacheInvalidator: { invalidateEndpoint: (): void => {} },
       emit: (): Promise<void> => Promise.resolve(),
     } satisfies TxStores;
     return work(stores);

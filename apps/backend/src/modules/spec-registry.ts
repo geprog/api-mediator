@@ -7,7 +7,9 @@ import type {
   AppCapabilities,
   ApprovedMapping,
   AuditLogEntry,
+  FieldMapping,
   Ir,
+  OperationMapping,
   ResourceBinding,
 } from "@mediator/domain";
 import { stripUndefined } from "@mediator/domain";
@@ -22,7 +24,7 @@ import {
   type SpecDiff,
 } from "@mediator/ir";
 
-import type { TxStores } from "./persistence.js";
+import type { EndpointCacheInvalidator, TxStores } from "./persistence.js";
 
 /**
  * A spec that has already been parsed to its IR + content hash, ready to persist
@@ -199,13 +201,22 @@ export class SpecRegistry {
    *    transaction (DT-2). The delta becomes an **ordinary** `MappingProposal` reviewed
    *    through the Phase-3 flow — nothing is auto-approved (SL-3.3).
    *
-   * Deliberately **out of scope here** (owned by later slices, so the boundary stays
-   * clean): any **breaking**-change reaction — a breaking diff advances the version but
-   * marks no mapping `stale`, re-pins nothing, and carries nothing forward (SL-4…SL-6).
-   * **No `SpecIngested` is emitted** on any branch (that event triggers a *full* detection
-   * analysis; the SL-2…SL-6 reactions are the diff's scoped consumers instead). After a
-   * **breaking** advance an active mapping may still reference the now-`superseded`
-   * prior version — the expected intermediate the breaking reactions resolve.
+   * 6. **Breaking reaction (SL-4)** — when the diff classifies **breaking**, the
+   *    {@link applyBreakingReaction} runs in this same transaction: **only** the mappings
+   *    that reference a changed element go `status = stale` (staying pinned to their
+   *    reviewed/superseded version — SL-4.3), every mapping referencing no changed
+   *    element re-pins exactly as the additive case (SL-2), the version's exclusions +
+   *    bindings carry forward, and — coupled — each stale endpoint's cache is dropped
+   *    (XI-2) and each affected `GraphEdge` recomputes (GR-2/GR-3). A stale mapping's
+   *    `SyncRule`s pause and its `AdapterBinding`s fail `mapping-stale` as derived
+   *    conditions (nothing writes their `status`).
+   *
+   * Deliberately **out of scope here** (owned by sibling slices): re-validating the
+   * spec's operational refs — `ResourceBinding`s / `pollOperationRef` / scope artifacts —
+   * back to unconfirmed (**SL-5**), and producing each stale mapping's **successor**
+   * re-review proposal (**SL-6**). **No `SpecIngested` is emitted** on any branch (that
+   * event triggers a *full* detection analysis; the SL-2…SL-6 reactions are the diff's
+   * scoped consumers instead).
    */
   public async ingestNewVersion(
     appId: string,
@@ -277,9 +288,12 @@ export class SpecRegistry {
       return { kind: "advanced", newSpec: repinnedNewSpec, supersededSpec, diff };
     }
 
-    // A breaking advance stops here (SL-4…SL-6 own its reaction): no re-pin, no
-    // carry-forward, no stale-marking.
-    return { kind: "advanced", newSpec, supersededSpec, diff };
+    // SL-4 — the breaking reaction, in this same transaction: mark ONLY the mappings that
+    // reference a changed element `stale`, re-pin the rest exactly as SL-2, carry the
+    // version's exclusions + bindings forward, and — coupled — drop the stale endpoints'
+    // caches (XI-2) and recompute the affected graph edges (GR-2/GR-3).
+    const stalenessNewSpec = await this.applyBreakingReaction(supersededSpec, newSpec, diff, tx);
+    return { kind: "advanced", newSpec: stalenessNewSpec, supersededSpec, diff };
   }
 
   /**
@@ -314,19 +328,117 @@ export class SpecRegistry {
     // (1) Re-pin every active mapping pinned to the superseded version + audit each.
     const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
     for (const mapping of mappings) {
-      const pair = repinnedSpecPair(mapping, supersededSpec.id, newSpec.id);
-      await tx.approvedMappings.repinSpecs(mapping.id, pair.sourceSpecId, pair.targetSpecId);
-      await tx.audit.insert(repinAuditEntry(mapping, supersededSpec, newSpec, now));
+      await this.#repinMapping(mapping, supersededSpec, newSpec, tx, now);
     }
 
-    // (2) Carry forward the analysis exclusions, dropping any that no longer resolve.
+    // (2/3) Carry forward the version's `analysisExclusions` + `ResourceBinding`s.
+    return this.#carryForwardVersionArtifacts(supersededSpec, newSpec, tx);
+  }
+
+  /**
+   * **SL-4 — the breaking reaction to a `SpecDiff`.** Runs entirely on the
+   * version-advance transaction, so the stale-marks, re-pins, carried-forward artifacts,
+   * audit rows, and graph recompute commit atomically with the advance.
+   *
+   * 1. **Precise mark-stale (SL-4.1) — the load-bearing invariant.** For every `active`
+   *    `ApprovedMapping` pinned to the now-`superseded` version, match its **referenced
+   *    elements on the changed side** ({@link mappingChangedSideRefs} — the side that
+   *    pinned the superseded spec) against the diff's **breaking** change locations
+   *    ({@link computeBreakingAffectedKeys}). A mapping that references a changed element
+   *    ({@link mappingReferencesChangedElement}) goes `status = stale`; a mapping that
+   *    references **no** changed element is re-pinned to the new version exactly as SL-2 —
+   *    "no more, no less". The matching is conservative in the dangerous direction (a
+   *    field/schema change stales any mapping referencing that resource; only cross-
+   *    resource / cross-operation precision distinguishes the untouched), so an ambiguous
+   *    reference prefers `stale` (a false-stale is re-reviewable; a false-active silently
+   *    serves a shape that changed).
+   * 2. **Staleness lives on the mapping (SL-4.2/4.3).** {@link markStale} sets **only**
+   *    `status`; a stale mapping **stays pinned** to its reviewed (superseded) version
+   *    (re-review — SL-6 — produces its successor against the new version). Its derived
+   *    `SyncRule`s/`AdapterBinding`s keep their own `status`; the rule pauses and the
+   *    binding fails `mapping-stale` as **derived** conditions (nothing writes a rule/
+   *    binding status).
+   * 3. **Advance the rest (SL-4.1).** Unaffected mappings re-pin + audit, and the version's
+   *    `analysisExclusions` + `ResourceBinding`s carry forward — identical to the additive
+   *    case (SL-2). *(Returning a broken bound ref to unconfirmed is SL-5's job, not here.)*
+   * 4. **Coupled cache + graph (SL-4.6).** {@link reactToStaleTransitions} drops each
+   *    stale endpoint's cache (XI-2) and recomputes each affected `(app pair)` `GraphEdge`
+   *    (GR-2/GR-3), so no cache or graph masks the pause.
+   *
+   * Returns the new `ApiSpec` reflecting its carried-forward `analysisExclusions`.
+   */
+  private async applyBreakingReaction(
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    diff: SpecDiff,
+    tx: TxStores,
+  ): Promise<ApiSpec> {
+    const now = new Date();
+    const affected = computeBreakingAffectedKeys(diff);
+
+    const mappings = await tx.approvedMappings.listActiveBySpecId(supersededSpec.id);
+    const staleMappings: ApprovedMapping[] = [];
+    for (const mapping of mappings) {
+      const fields = await tx.mappingArtifacts.listFieldMappings(mapping.id);
+      const operations = await tx.mappingArtifacts.listOperationMappings(mapping.id);
+      const refs = mappingChangedSideRefs(mapping, supersededSpec.id, fields, operations);
+      if (mappingReferencesChangedElement(refs, affected)) {
+        // SL-4.1/4.2/4.3 — stale, and STAYS pinned to the reviewed (superseded) version.
+        await tx.approvedMappings.markStale(mapping.id);
+        await tx.audit.insert(staleAuditEntry(mapping, supersededSpec, newSpec, now));
+        staleMappings.push(mapping);
+      } else {
+        // SL-4.1 — references no changed element → advance exactly as the additive case.
+        await this.#repinMapping(mapping, supersededSpec, newSpec, tx, now);
+      }
+    }
+
+    const updatedNewSpec = await this.#carryForwardVersionArtifacts(supersededSpec, newSpec, tx);
+
+    // SL-4.6 — coupled cache drop (XI-2) + graph recompute (GR-2/GR-3) for the stale set,
+    // AFTER the stale status is written so the graph aggregate reads the paused/stale state.
+    await this.#reactToStaleTransitions(staleMappings, tx);
+
+    return updatedNewSpec;
+  }
+
+  /**
+   * SL-2.1/2.2/2.5 — re-pin one mapping to the new version (only its pinned spec ids
+   * change) and record the re-pin audit row. Shared by the additive reaction and the
+   * breaking reaction's unaffected-mapping path.
+   */
+  async #repinMapping(
+    mapping: ApprovedMapping,
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    tx: TxStores,
+    now: Date,
+  ): Promise<void> {
+    const pair = repinnedSpecPair(mapping, supersededSpec.id, newSpec.id);
+    await tx.approvedMappings.repinSpecs(mapping.id, pair.sourceSpecId, pair.targetSpecId);
+    await tx.audit.insert(repinAuditEntry(mapping, supersededSpec, newSpec, now));
+  }
+
+  /**
+   * SL-2.4 — carry the version-level artifacts forward to the new version: the prior
+   * version's `analysisExclusions` (dropping any group the new IR no longer resolves) and
+   * its `ResourceBinding`s (re-created as fresh rows, dropping refs the new IR no longer
+   * resolves — verbatim confirmations otherwise). A per-version concern shared by both
+   * reactions. (Returning a *breaking*-invalidated bound ref to unconfirmed is SL-5's
+   * separate job; this carry-forward is the same for both diff branches.) Returns the new
+   * `ApiSpec` reflecting its carried-forward `analysisExclusions`.
+   */
+  async #carryForwardVersionArtifacts(
+    supersededSpec: ApiSpec,
+    newSpec: ApiSpec,
+    tx: TxStores,
+  ): Promise<ApiSpec> {
     const carriedExclusions = carryForwardAnalysisExclusions(
       supersededSpec.analysisExclusions,
       newSpec.parsedIR,
     );
     const updated = await tx.apiSpecs.updateAnalysisExclusions(newSpec.id, carriedExclusions);
 
-    // (3) Carry forward the resource bindings as fresh rows on the new version.
     const priorBindings = await tx.resourceBindings.listByApiSpecId(supersededSpec.id);
     const carriedBindings = priorBindings.flatMap((prior) => {
       const carried = carryForwardResourceBinding(
@@ -342,6 +454,259 @@ export class SpecRegistry {
     }
 
     return updated ?? { ...newSpec, analysisExclusions: carriedExclusions };
+  }
+
+  /**
+   * **SL-4.6 / XI-2 / GR-2/GR-3 — the coupled cache + graph reactions to the stale set.**
+   * For each stale mapping (each keyed by its version-agnostic `(sourceApp → targetApp)`
+   * app pair — consumer = source, backend = target for a consumer-provider mapping):
+   *
+   * - recompute its `GraphEdge` **within this transaction** via the GR seam (sync edge for
+   *   a peer-peer mapping, adapter edge for a consumer-provider one), so the projection
+   *   shows the paused/stale status and no stale edge masks the pause; and
+   * - for a consumer-provider mapping, drop **every** `AdapterEndpoint` whose binding's
+   *   mapping went stale through the SAME by-endpoint `invalidateEndpoint` seam CO-6 uses
+   *   (XI-2 / CH-5.3). The drop is coarse, correctness-safe, needs no transaction, and
+   *   must **never** fail the transition ({@link invalidateEndpointSafely} guards it).
+   *
+   * Edge recomputes are deduped by app pair and endpoint drops by id, so overlapping
+   * stale mappings never re-drop or re-recompute. A peer-peer mapping has no adapter
+   * bindings → no cache drop; a consumer-provider mapping has no sync rules → no sync edge.
+   */
+  async #reactToStaleTransitions(
+    staleMappings: readonly ApprovedMapping[],
+    tx: TxStores,
+  ): Promise<void> {
+    const recomputedSyncEdges = new Set<string>();
+    const recomputedAdapterEdges = new Set<string>();
+    const invalidatedEndpoints = new Set<string>();
+
+    for (const mapping of staleMappings) {
+      // A JSON tuple is a collision-free key even if an app id contains a separator
+      // character — and never a NUL byte.
+      const pairKey = JSON.stringify([mapping.sourceAppId, mapping.targetAppId]);
+      if (mapping.variant === "peer-peer") {
+        if (!recomputedSyncEdges.has(pairKey)) {
+          recomputedSyncEdges.add(pairKey);
+          await tx.graph.recomputeSyncEdge(mapping.sourceAppId, mapping.targetAppId);
+        }
+        continue;
+      }
+
+      // consumer-provider: consumer = sourceApp, backend = targetApp (data-model.md).
+      if (!recomputedAdapterEdges.has(pairKey)) {
+        recomputedAdapterEdges.add(pairKey);
+        await tx.graph.recomputeAdapterEdge(mapping.sourceAppId, mapping.targetAppId);
+      }
+      const bindings = await tx.downstreamArtifacts.listAdapterBindingsByMapping(mapping.id);
+      for (const binding of bindings) {
+        if (invalidatedEndpoints.has(binding.adapterEndpointId)) continue;
+        invalidatedEndpoints.add(binding.adapterEndpointId);
+        invalidateEndpointSafely(tx.cacheInvalidator, binding.adapterEndpointId);
+      }
+    }
+  }
+}
+
+// ── SL-4 pure helpers (the breaking mark-stale matching policy) ─────────────────
+
+/**
+ * The elements a **breaking** `SpecDiff` invalidated, bucketed by the granularity a
+ * mapping's referenced refs can be matched against precisely (SL-4.1). Derived once from
+ * the diff (SL-1.6 — no re-diffing); only `breaking` changes contribute (an additive
+ * change never breaks a referenced element). Carries only version-stable structural
+ * identifiers — never IR payload, never a secret.
+ *
+ * - **`resources`** — a whole resource group was **removed** (`resource-group-removed`):
+ *   **every** ref into that resource (field or operation) is broken.
+ * - **`fieldResources`** — a **schema/field**-level breaking change (`schema-removed`,
+ *   `field-removed`/`-type-changed`/`-requiredness-changed`, a required `field-added`):
+ *   the resource's data shape changed, so **field** refs into that resource are broken.
+ *   A `FieldMapping` ref is `resourceRef/record-relative-path` and carries neither the
+ *   schema name nor a resolvable field identity, and a newly-required field breaks
+ *   writers that do not even map it — so a field/schema change is matched at the
+ *   **resource** granularity for field refs (conservative: it may stale a same-resource
+ *   mapping that only touched an unchanged field, a re-reviewable false-stale, but never
+ *   leaves a broken reference `active`).
+ * - **`operations`** — an **operation/parameter**-level breaking change
+ *   (`operation-removed`/`-signature-changed`/`-ambiguous`, `request`/`response-body-changed`,
+ *   any `parameter-*`): the **exact** `resourceRef/operationId` call broke. Matched by
+ *   exact operation ref (a mapping using a *different* operation of the same resource
+ *   stays active), since an operation ref is a reconstructible, provable identity.
+ */
+export interface BreakingAffectedKeys {
+  readonly resources: ReadonlySet<string>;
+  readonly fieldResources: ReadonlySet<string>;
+  readonly operations: ReadonlySet<string>;
+}
+
+/** SL-4.1 — bucket a breaking `SpecDiff`'s change locations into {@link BreakingAffectedKeys}. Pure. */
+export function computeBreakingAffectedKeys(diff: SpecDiff): BreakingAffectedKeys {
+  const resources = new Set<string>();
+  const fieldResources = new Set<string>();
+  const operations = new Set<string>();
+  for (const change of diff.changes) {
+    if (change.classification !== "breaking") continue; // only breaking changes break a ref
+    const location = change.location;
+    switch (location.level) {
+      case "resource":
+        resources.add(location.resourceRef);
+        break;
+      case "schema":
+      case "field":
+        fieldResources.add(location.resourceRef);
+        break;
+      case "operation":
+      case "parameter":
+        operations.add(operationRefOf(location.resourceRef, location.operationId));
+        break;
+    }
+  }
+  return { resources, fieldResources, operations };
+}
+
+/**
+ * A mapping's referenced elements **on the changed-spec side** (the side pinned to the
+ * superseded version — SL-4.1). Split by ref kind so each is matched against the change
+ * bucket that can break it:
+ *
+ * - `fieldRefs` — `FieldMapping.{source,target}Path` (plus a source-side aggregate/
+ *   expression's `transformConfig.additionalInputPaths`, which are read too, so a change
+ *   to an additional input still stales the mapping).
+ * - `operationRefs` — `OperationMapping.{source,target}OperationRef`.
+ * - `paramRefs` — target-side operation-input refs (`OperationMapping.targetIdParamRef`,
+ *   `FieldMapping.targetLookupParamRef`), matched to their owning operation.
+ */
+export interface MappingChangedSideRefs {
+  readonly fieldRefs: readonly string[];
+  readonly operationRefs: readonly string[];
+  readonly paramRefs: readonly string[];
+}
+
+/**
+ * SL-4.1 — extract a mapping's referenced refs **on the changed side**: source refs when
+ * the mapping pinned the superseded spec as source, target refs when as target (both for
+ * a self-referential mapping). Pure.
+ */
+export function mappingChangedSideRefs(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
+  supersededSpecId: string,
+  fields: readonly FieldMapping[],
+  operations: readonly OperationMapping[],
+): MappingChangedSideRefs {
+  const useSource = mapping.sourceSpecId === supersededSpecId;
+  const useTarget = mapping.targetSpecId === supersededSpecId;
+  const fieldRefs: string[] = [];
+  const operationRefs: string[] = [];
+  const paramRefs: string[] = [];
+
+  for (const field of fields) {
+    if (useSource) {
+      fieldRefs.push(field.sourcePath);
+      // Additional aggregate/expression inputs are source-side reads too (never a secret —
+      // resource-qualified IR paths), so a break to one of them must stale the mapping.
+      for (const extra of field.transformConfig?.additionalInputPaths ?? []) {
+        fieldRefs.push(extra);
+      }
+    }
+    if (useTarget) {
+      fieldRefs.push(field.targetPath);
+      if (field.targetLookupParamRef !== undefined) {
+        paramRefs.push(field.targetLookupParamRef);
+      }
+    }
+  }
+  for (const operation of operations) {
+    if (useSource) {
+      operationRefs.push(operation.sourceOperationRef);
+    }
+    if (useTarget) {
+      operationRefs.push(operation.targetOperationRef);
+      if (operation.targetIdParamRef !== undefined) {
+        paramRefs.push(operation.targetIdParamRef);
+      }
+    }
+  }
+  return { fieldRefs, operationRefs, paramRefs };
+}
+
+/**
+ * **SL-4.1 — the load-bearing predicate: does the mapping reference a changed element?**
+ * Pure. Matches each changed-side ref against the affected buckets:
+ *
+ * - a **field** ref matches when its resource had a whole-resource removal (`resources`)
+ *   or a schema/field-level change (`fieldResources`);
+ * - an **operation** ref matches its resource's removal (`resources`) or the **exact**
+ *   broken operation (`operations`);
+ * - a **parameter** ref matches its resource's removal or its owning operation's break.
+ *
+ * The asymmetry is deliberate (SL-4's "direction of danger"): field/schema changes match
+ * at resource granularity (conservative — a same-resource unchanged-field mapping may
+ * false-stale, which is re-reviewable), while operation changes match the exact operation
+ * (precise — a mapping using a sibling operation stays active). Under-marking (leaving a
+ * broken reference `active`) is impossible for any element that was actually touched.
+ */
+export function mappingReferencesChangedElement(
+  refs: MappingChangedSideRefs,
+  affected: BreakingAffectedKeys,
+): boolean {
+  for (const fieldRef of refs.fieldRefs) {
+    const resource = resourceOfRef(fieldRef);
+    if (affected.resources.has(resource) || affected.fieldResources.has(resource)) {
+      return true;
+    }
+  }
+  for (const operationRef of refs.operationRefs) {
+    if (affected.resources.has(resourceOfRef(operationRef))) return true;
+    if (affected.operations.has(operationRef)) return true;
+  }
+  for (const paramRef of refs.paramRefs) {
+    if (affected.resources.has(resourceOfRef(paramRef))) return true;
+    if (affected.operations.has(operationPrefixOfParamRef(paramRef))) return true;
+  }
+  return false;
+}
+
+/** The `resourceRef/operationId` form of an operation change location (mirrors the approval serializer). */
+function operationRefOf(resourceRef: string, operationId: string): string {
+  return `${resourceRef}/${operationId}`;
+}
+
+/**
+ * The resource-group portion of any serialized ref (field `issues/title`, operation
+ * `issues/updateIssue`, parameter `issues/updateIssue#id`): a `resourceRef` never contains
+ * a `/`, so everything before the first `/` is the resource. Mirrors the single definition
+ * in `@mediator/domain` `fieldResourceRef` / the artifact-instantiation `resourceRefOf`.
+ */
+function resourceOfRef(ref: string): string {
+  const slash = ref.indexOf("/");
+  return slash === -1 ? ref : ref.slice(0, slash);
+}
+
+/**
+ * The owning `resourceRef/operationId` of a parameter ref (`resourceRef/operationId#param`
+ * — the approval serializer's form), so a parameter break matches its operation.
+ */
+function operationPrefixOfParamRef(paramRef: string): string {
+  const hash = paramRef.indexOf("#");
+  return hash === -1 ? paramRef : paramRef.slice(0, hash);
+}
+
+/**
+ * XI-2.5 — invoke the by-endpoint cache drop so it can **never** fail the triggering
+ * transition. The drop is a synchronous, in-process, correctness-safe cache eviction, so
+ * a throw here would be a defect — but a stale-transition must commit regardless (a missed
+ * drop only costs a spurious hit until `cacheTtl`, which RP-3's `mapping-stale` guard makes
+ * loud anyway). Swallow deliberately; nothing the invalidator sees is a secret.
+ */
+function invalidateEndpointSafely(
+  cacheInvalidator: EndpointCacheInvalidator,
+  endpointId: string,
+): void {
+  try {
+    cacheInvalidator.invalidateEndpoint(endpointId);
+  } catch {
+    // Intentionally ignored — see the doc comment.
   }
 }
 
@@ -514,12 +879,7 @@ function repinAuditEntry(
   newSpec: ApiSpec,
   now: Date,
 ): AuditLogEntry {
-  const side =
-    mapping.sourceSpecId === supersededSpec.id
-      ? mapping.targetSpecId === supersededSpec.id
-        ? "source+target"
-        : "source"
-      : "target";
+  const side = changedSide(mapping, supersededSpec.id);
   return {
     id: randomUUID(),
     type: "mapping-decision",
@@ -528,4 +888,40 @@ function repinAuditEntry(
     details: `re-pinned ${side} spec ${supersededSpec.id} -> ${newSpec.id} (v${String(newSpec.version)})`,
     timestamp: now,
   };
+}
+
+/**
+ * SL-4.1 — the audit row that records one mapping going `stale` because it references a
+ * changed element. Same `mapping-decision`/`system` shape and metadata-only discipline as
+ * {@link repinAuditEntry} (no dedicated stale audit type is coined — no migration in this
+ * slice): the side whose spec broke and the superseded/new spec ids, never a secret. Makes
+ * the stale transition queryable in the audit log alongside the re-pins (SL-4.5).
+ */
+function staleAuditEntry(
+  mapping: ApprovedMapping,
+  supersededSpec: ApiSpec,
+  newSpec: ApiSpec,
+  now: Date,
+): AuditLogEntry {
+  const side = changedSide(mapping, supersededSpec.id);
+  return {
+    id: randomUUID(),
+    type: "mapping-decision",
+    actor: "system",
+    relatedMappingId: mapping.id,
+    details: `marked stale: references a changed element on the ${side} spec ${supersededSpec.id} (breaking advance -> ${newSpec.id} v${String(newSpec.version)}); stays pinned to ${supersededSpec.id}`,
+    timestamp: now,
+  };
+}
+
+/** Which side of a mapping pinned the now-superseded spec — for audit `details` (metadata only). */
+function changedSide(
+  mapping: Pick<ApprovedMapping, "sourceSpecId" | "targetSpecId">,
+  supersededSpecId: string,
+): "source" | "target" | "source+target" {
+  return mapping.sourceSpecId === supersededSpecId
+    ? mapping.targetSpecId === supersededSpecId
+      ? "source+target"
+      : "source"
+    : "target";
 }
