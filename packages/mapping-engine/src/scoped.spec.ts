@@ -1,4 +1,4 @@
-import type { MappingProposal } from "@mediator/domain";
+import type { FieldMapping, MappingProposal, OperationMapping } from "@mediator/domain";
 import { FakeProvider } from "@mediator/llm";
 import { describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,7 @@ import {
   giteaMilestones,
   issuesToTasksPeerPeer,
   makeSpec,
+  malformedPeerPeerDetail,
   tasksToIssuesPeerPeer,
   vikunjaTasks,
 } from "./fixtures.js";
@@ -20,7 +21,7 @@ import {
   runScopedAdditiveAnalysis,
   type SpecSource,
 } from "./run.js";
-import { analyzeAdditiveDelta } from "./scoped.js";
+import { analyzeAdditiveDelta, analyzeReReview, buildReReviewPriorFeedback } from "./scoped.js";
 
 /**
  * SL-3 — the scoped additive-delta analysis. Every LLM call is the deterministic
@@ -451,5 +452,202 @@ describe("runScopedAdditiveAnalysis — the worker-side scoped runner", () => {
 describe("createDbPriorProposalSource surface", () => {
   it("is exported (wired in the worker background over MappingProposalRepository)", () => {
     expect(typeof createDbPriorProposalSource).toBe("function");
+  });
+});
+
+// ── SL-6 — the scoped breaking re-review analysis ─────────────────────────────
+
+const STALE_MAPPING_ID = "mapping-issues-tasks-v1";
+
+/** The `issues → tasks` stale mapping's approved content (peer-peer). */
+const staleFields: FieldMapping[] = [
+  {
+    id: "fm-title",
+    mappingId: STALE_MAPPING_ID,
+    sourcePath: "issues/title",
+    targetPath: "tasks/title",
+    transform: "rename",
+    isIdentityKey: true,
+  },
+  {
+    id: "fm-body",
+    mappingId: STALE_MAPPING_ID,
+    sourcePath: "issues/body",
+    targetPath: "tasks/description",
+    transform: "rename",
+  },
+];
+const staleOperations: OperationMapping[] = [
+  {
+    id: "om-list",
+    mappingId: STALE_MAPPING_ID,
+    sourceOperationRef: "issues/issueListIssues",
+    targetOperationRef: "tasks/vikunjaListTasks",
+    action: "read",
+  },
+];
+
+describe("buildReReviewPriorFeedback (SL-6.2)", () => {
+  it("groups a peer-peer mapping's fields + operations by proposal-oriented resource pair", () => {
+    const byPair = buildReReviewPriorFeedback({ fields: staleFields, operations: staleOperations });
+
+    const entries = byPair.get(JSON.stringify(["issues", "tasks"])) ?? [];
+    expect(entries).toHaveLength(3);
+    const title = entries.find((entry) => entry.sourceRef === "issues/title");
+    expect(title?.targetRef).toBe("tasks/title");
+    expect(title?.note).toContain("identity-key");
+    const operation = entries.find((entry) => entry.sourceRef === "issues/issueListIssues");
+    expect(operation?.targetRef).toBe("tasks/vikunjaListTasks");
+    expect(operation?.note).toContain("action=read");
+  });
+
+  it("inverts a consumer-provider response-phase field's source/target orientation", () => {
+    const responseField: FieldMapping = {
+      id: "fm-resp",
+      mappingId: "m",
+      // Response phase: sourcePath is the backend (target-spec) field, targetPath the consumer.
+      sourcePath: "tasks/title",
+      targetPath: "todos/title",
+      phase: "response",
+      transform: "rename",
+    };
+
+    const byPair = buildReReviewPriorFeedback({ fields: [responseField], operations: [] });
+
+    // The pair is oriented consumer(source-spec) → backend(target-spec): ["todos","tasks"].
+    const entries = byPair.get(JSON.stringify(["todos", "tasks"])) ?? [];
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.sourceRef).toBe("todos/title");
+    expect(entries[0]?.targetRef).toBe("tasks/title");
+    expect(entries[0]?.note).toContain("phase=response");
+  });
+});
+
+describe("analyzeReReview — detail-only re-review with priorFeedback (SL-6)", () => {
+  // Gitea v2 (issues) — the successor's source spec; vikunja (tasks) the counterpart.
+  const successorSource = makeSpec({
+    id: "spec-gitea-v2",
+    appId: "app-gitea",
+    role: "PROVIDER",
+    version: 2,
+    parsedIR: [giteaIssues, giteaMilestones],
+  });
+  const counterpart = makeSpec({
+    id: "spec-vikunja",
+    appId: "app-vikunja",
+    role: "PROVIDER",
+    parsedIR: [vikunjaTasks],
+  });
+
+  it("skips stage 1, threads priorFeedback into the detail call, and tags reReviewOf (SL-6.1/6.2/6.4)", async () => {
+    const provider = new FakeProvider({
+      // No shortlist scripted at all: a stage-1 call here would throw loudly.
+      detail: { "issues=>tasks@peer-peer": [issuesToTasksPeerPeer] },
+    });
+    const shortlistSpy = vi.spyOn(provider, "shortlistResourcePairs");
+    const detailSpy = vi.spyOn(provider, "generateMappingProposal");
+
+    const result = await analyzeReReview({
+      staleMappingId: STALE_MAPPING_ID,
+      source: successorSource,
+      target: counterpart,
+      variant: "peer-peer",
+      affectedPairs: [{ sourceResource: "issues", targetResource: "tasks" }],
+      priorContent: { fields: staleFields, operations: staleOperations },
+      deps: makeDeps(provider),
+    });
+
+    // SL-6.1 — stage 1 was never called; the correspondence is already established.
+    expect(shortlistSpy).not.toHaveBeenCalled();
+
+    // SL-6.2 — the one detail call carried the stale mapping's approved content as priorFeedback.
+    expect(detailSpy).toHaveBeenCalledTimes(1);
+    const context = detailSpy.mock.calls[0]?.[0];
+    expect((context?.priorFeedback ?? []).map((f) => f.sourceRef).sort()).toEqual([
+      "issues/body",
+      "issues/issueListIssues",
+      "issues/title",
+    ]);
+
+    // SL-6.3/6.4 — an ordinary pending proposal, pinned to the new version, tagged re-review.
+    expect(result.proposal.status).toBe("pending");
+    expect(result.proposal.reReviewOf).toBe(STALE_MAPPING_ID);
+    expect(result.proposal.sourceSpecId).toBe("spec-gitea-v2");
+    expect(result.proposal.targetSpecId).toBe("spec-vikunja");
+    const pairs = result.proposal.shortlistResult?.candidatePairs ?? [];
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({
+      sourceResource: "issues",
+      targetResource: "tasks",
+      analysisFailed: false,
+    });
+    expect(pairs[0]?.rationale).toContain("stage 1 skipped");
+    expect(result.items.length).toBeGreaterThan(0);
+  });
+
+  it("dedupes repeated affected pairs into one detail call", async () => {
+    const provider = new FakeProvider({
+      detail: { "issues=>tasks@peer-peer": [issuesToTasksPeerPeer] },
+    });
+    const detailSpy = vi.spyOn(provider, "generateMappingProposal");
+
+    await analyzeReReview({
+      staleMappingId: STALE_MAPPING_ID,
+      source: successorSource,
+      target: counterpart,
+      variant: "peer-peer",
+      affectedPairs: [
+        { sourceResource: "issues", targetResource: "tasks" },
+        { sourceResource: "issues", targetResource: "tasks" },
+      ],
+      priorContent: { fields: staleFields, operations: staleOperations },
+      deps: makeDeps(provider),
+    });
+
+    expect(detailSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the pair analysisFailed when its detail call exhausts the retry ceiling (SL-6.5)", async () => {
+    const provider = new FakeProvider({
+      // Malformed to the ceiling — the corrective retry never succeeds.
+      detail: { "issues=>tasks@peer-peer": [malformedPeerPeerDetail] },
+    });
+
+    const result = await analyzeReReview({
+      staleMappingId: STALE_MAPPING_ID,
+      source: successorSource,
+      target: counterpart,
+      variant: "peer-peer",
+      affectedPairs: [{ sourceResource: "issues", targetResource: "tasks" }],
+      priorContent: { fields: staleFields, operations: staleOperations },
+      deps: makeDeps(provider),
+    });
+
+    // The proposal survives; the pair surfaces distinctly (not silently lost).
+    expect(result.proposal.status).toBe("pending");
+    expect(result.proposal.reReviewOf).toBe(STALE_MAPPING_ID);
+    const pairs = result.proposal.shortlistResult?.candidatePairs ?? [];
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]?.analysisFailed).toBe(true);
+    expect(result.items).toEqual([]);
+  });
+
+  it("surfaces a removed resource as analysisFailed rather than crashing (SL-6.5)", async () => {
+    const provider = new FakeProvider({}); // any detail call would be for a resolvable pair
+    const result = await analyzeReReview({
+      staleMappingId: STALE_MAPPING_ID,
+      source: successorSource,
+      target: counterpart,
+      variant: "peer-peer",
+      // `gone` no longer exists in the new IR — the correspondence's resource was removed.
+      affectedPairs: [{ sourceResource: "gone", targetResource: "tasks" }],
+      priorContent: { fields: [], operations: [] },
+      deps: makeDeps(provider),
+    });
+
+    const pairs = result.proposal.shortlistResult?.candidatePairs ?? [];
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]?.analysisFailed).toBe(true);
+    expect(result.proposal.reReviewOf).toBe(STALE_MAPPING_ID);
   });
 });

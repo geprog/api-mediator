@@ -106,5 +106,13 @@ export const mappingProposalSchema = z.object({
   shortlistResult: shortlistResultSchema.nullable(),
   status: mappingProposalStatusSchema,
   createdAt: z.date(),
+  // SL-6 — the `stale` `ApprovedMapping` this proposal **re-reviews** (a breaking
+  // spec change's successor path). Present only on a re-review proposal produced by
+  // the scoped re-analysis; **absent** on every ordinary (Phase-2 / SL-3) proposal.
+  // Approving a proposal that carries it stamps the resulting **successor** mapping's
+  // `predecessorMappingId`, the link SL-7 adoption follows (see
+  // `docs/glossary.md` `Successor mapping`; `docs/requirements/phase-6-spec-update-lifecycle.md`
+  // SL-6.4). A version-agnostic id, never a secret.
+  reReviewOf: z.string().optional(),
 });
 export type MappingProposal = z.infer<typeof mappingProposalSchema>;

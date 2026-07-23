@@ -35,6 +35,8 @@ function normalizeApprovedMapping(mapping: ApprovedMapping): ApprovedMapping {
   return stripUndefined({
     ...mapping,
     counterpartMappingId: mapping.counterpartMappingId ?? undefined,
+    // SL-6/SL-7 — mirror the real mapper's NULL → absent collapse of the successor link.
+    predecessorMappingId: mapping.predecessorMappingId ?? undefined,
   });
 }
 

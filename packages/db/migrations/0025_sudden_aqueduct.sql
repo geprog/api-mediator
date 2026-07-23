@@ -1,0 +1,4 @@
+ALTER TABLE "approved_mapping" ADD COLUMN "predecessor_mapping_id" uuid;--> statement-breakpoint
+ALTER TABLE "mapping_proposal" ADD COLUMN "re_review_of" uuid;--> statement-breakpoint
+ALTER TABLE "approved_mapping" ADD CONSTRAINT "approved_mapping_predecessor_mapping_id_approved_mapping_id_fk" FOREIGN KEY ("predecessor_mapping_id") REFERENCES "public"."approved_mapping"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "mapping_proposal" ADD CONSTRAINT "mapping_proposal_re_review_of_approved_mapping_id_fk" FOREIGN KEY ("re_review_of") REFERENCES "public"."approved_mapping"("id") ON DELETE no action ON UPDATE no action;

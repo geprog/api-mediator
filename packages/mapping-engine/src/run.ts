@@ -1,18 +1,29 @@
 import {
   ApiSpecRepository,
+  ApprovedMappingRepository,
   type Database,
   type DbHandle,
+  MappingArtifactsRepository,
   MappingProposalRepository,
   tx,
 } from "@mediator/db";
-import type { ApiSpec, MappingProposal, MappingProposalItem } from "@mediator/domain";
+import type {
+  ApiSpec,
+  ApprovedMapping,
+  FieldMapping,
+  MappingProposal,
+  MappingProposalItem,
+  OperationMapping,
+} from "@mediator/domain";
 
 import { type CandidateAnalysisResult, type DetectionDeps, detectForSpec } from "./detection.js";
 import { type CandidateSpecPair, enumerateCandidatePairs } from "./enumerate.js";
 import {
   type AdditiveAnalysisScope,
   type EstablishedResourcePair,
+  type ReReviewResourcePair,
   analyzeAdditiveDelta,
+  analyzeReReview,
 } from "./scoped.js";
 
 /**
@@ -284,5 +295,145 @@ export function createDbPriorProposalSource(db: DbHandle): PriorProposalSource {
         ...fromB.filter((proposal) => proposal.targetSpecId === specIdA),
       ];
     },
+  };
+}
+
+// ── SL-6 scoped breaking re-review analysis (persisting, worker-triggered) ─────
+
+/**
+ * Reads a `stale` mapping and its approved content, which the scoped re-review needs
+ * to build the successor's direction (`getById`) and the `priorFeedback` fed into the
+ * detail calls (`listFieldMappings`/`listOperationMappings` — SL-6.2). Mirrors the
+ * `ApprovedMappingRepository`/`MappingArtifactsRepository` reads it wraps.
+ */
+export interface StaleMappingSource {
+  getById(id: string): Promise<ApprovedMapping | undefined>;
+  listFieldMappings(mappingId: string): Promise<FieldMapping[]>;
+  listOperationMappings(mappingId: string): Promise<OperationMapping[]>;
+}
+
+/** One stale mapping's re-review descriptor (from the `re-review` `DetectionJobScope`). */
+export interface ReReviewStaleMapping {
+  /** The `stale` `ApprovedMapping` to produce the successor of. */
+  readonly staleMappingId: string;
+  /** The resource pairs the breaking change touched (SL-6.1), `source → target` oriented. */
+  readonly affectedPairs: readonly ReReviewResourcePair[];
+}
+
+/** The scoped re-review job the worker hands to {@link runScopedReReviewAnalysis}. */
+export interface ScopedReReviewJob {
+  /** The newly-ingested (now-`active`) breaking version the successors pin to on the changed side. */
+  readonly newSpecId: string;
+  /** The prior (now-`superseded`) version the stale mappings stay pinned to (SL-4.3). */
+  readonly supersededSpecId: string;
+  /** One descriptor per mapping the breaking advance marked `stale`. */
+  readonly staleMappings: readonly ReReviewStaleMapping[];
+}
+
+/** The dependency set the scoped re-review entry point needs. */
+export interface RunScopedReReviewDeps extends DetectionDeps {
+  readonly specSource: SpecSource;
+  readonly proposalStore: ProposalStore;
+  readonly staleMappings: StaleMappingSource;
+}
+
+/**
+ * **SL-6 — analyze (scoped, detail-only) and persist the breaking re-review proposals
+ * for one breaking version-advance.** For every stale-mapping descriptor the job carries:
+ *
+ * 1. reads the `stale` `ApprovedMapping` and computes the **successor's** direction —
+ *    the mapping's spec pair with the changed side advanced from `supersededSpecId` to
+ *    `newSpecId` (the counterpart side is carried forward, so the successor pins the new
+ *    version on exactly the side that broke);
+ * 2. fetches the two successor-direction specs (one is the new version, the other the
+ *    unchanged active counterpart) and the stale mapping's approved content;
+ * 3. runs {@link analyzeReReview} — a detail call per affected resource pair (no stage 1),
+ *    with the approved content as `priorFeedback` — yielding an ordinary re-review
+ *    `MappingProposal` tagged `reReviewOf = staleMappingId`.
+ *
+ * All resulting proposals persist in **one atomic** `persistAll` — a fault mid-persist
+ * leaves nothing to duplicate on the worker's crash-reclaim retry, and the enqueue's
+ * partial-unique index already collapses a redelivered trigger to one job, so each
+ * successor proposal is produced once (SL-6.6 idempotence). Nothing is approved here —
+ * every proposal is `pending` (or `failed`), reviewed through the ordinary Phase-3 flow
+ * (SL-6.3). A stale mapping whose row vanished, or whose counterpart spec is no longer
+ * resolvable, is skipped (defensive) rather than crashing the whole run; the
+ * reconciliation sweep (RC-3) re-derives a genuinely-lost trigger.
+ */
+export async function runScopedReReviewAnalysis(
+  job: ScopedReReviewJob,
+  deps: RunScopedReReviewDeps,
+): Promise<DetectionRunResult> {
+  const newSpec = await deps.specSource.getById(job.newSpecId);
+  if (newSpec === undefined) {
+    throw new Error(`runScopedReReviewAnalysis: no ApiSpec with id ${job.newSpecId}`);
+  }
+
+  const specById = async (specId: string): Promise<ApiSpec | undefined> =>
+    specId === newSpec.id ? newSpec : deps.specSource.getById(specId);
+
+  const analyses: CandidateAnalysisResult[] = [];
+  for (const descriptor of job.staleMappings) {
+    const staleMapping = await deps.staleMappings.getById(descriptor.staleMappingId);
+    if (staleMapping === undefined) {
+      continue; // defensive: a stale row is retained, so this should resolve
+    }
+
+    // The successor's direction: advance the changed side (pinned to the superseded
+    // version) to the new version, carry the counterpart side forward unchanged.
+    const successorSourceSpecId =
+      staleMapping.sourceSpecId === job.supersededSpecId
+        ? job.newSpecId
+        : staleMapping.sourceSpecId;
+    const successorTargetSpecId =
+      staleMapping.targetSpecId === job.supersededSpecId
+        ? job.newSpecId
+        : staleMapping.targetSpecId;
+
+    const [source, target] = await Promise.all([
+      specById(successorSourceSpecId),
+      specById(successorTargetSpecId),
+    ]);
+    if (source === undefined || target === undefined) {
+      continue; // the counterpart spec is no longer resolvable — nothing to re-review against
+    }
+
+    const [fields, operations] = await Promise.all([
+      deps.staleMappings.listFieldMappings(staleMapping.id),
+      deps.staleMappings.listOperationMappings(staleMapping.id),
+    ]);
+
+    analyses.push(
+      await analyzeReReview({
+        staleMappingId: staleMapping.id,
+        source,
+        target,
+        variant: staleMapping.variant,
+        affectedPairs: descriptor.affectedPairs,
+        priorContent: { fields, operations },
+        deps,
+      }),
+    );
+  }
+
+  await deps.proposalStore.persistAll(
+    analyses.map((analysis) => ({ proposal: analysis.proposal, items: analysis.items })),
+  );
+
+  return { newSpecId: job.newSpecId, analyses };
+}
+
+/**
+ * A {@link StaleMappingSource} over `ApprovedMappingRepository` +
+ * `MappingArtifactsRepository` bound to a db handle: the stale mapping row and its
+ * approved field/operation children the re-review reads.
+ */
+export function createDbStaleMappingSource(db: DbHandle): StaleMappingSource {
+  const mappings = new ApprovedMappingRepository(db);
+  const artifacts = new MappingArtifactsRepository(db);
+  return {
+    getById: (id) => mappings.getById(id),
+    listFieldMappings: (mappingId) => artifacts.listFieldMappings(mappingId),
+    listOperationMappings: (mappingId) => artifacts.listOperationMappings(mappingId),
   };
 }

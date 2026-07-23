@@ -1,4 +1,11 @@
-import type { ApiSpec, MappingProposal, MappingProposalItem } from "@mediator/domain";
+import type {
+  ApiSpec,
+  ApprovedMapping,
+  FieldMapping,
+  MappingProposal,
+  MappingProposalItem,
+  OperationMapping,
+} from "@mediator/domain";
 import { FakeProvider } from "@mediator/llm";
 import { describe, expect, it } from "vitest";
 
@@ -10,7 +17,13 @@ import {
   tasksToIssuesPeerPeer,
   vikunjaSpec,
 } from "./fixtures.js";
-import { type ProposalStore, runDetectionForSpec, type SpecSource } from "./run.js";
+import {
+  type ProposalStore,
+  runDetectionForSpec,
+  runScopedReReviewAnalysis,
+  type SpecSource,
+  type StaleMappingSource,
+} from "./run.js";
 
 /**
  * In-memory fakes that mirror the real repo semantics ([[fakes-must-mirror-real-repos]]):
@@ -112,6 +125,139 @@ describe("runDetectionForSpec — persistence orchestration", () => {
     const proposalStore = new InMemoryProposalStore();
     await expect(
       runDetectionForSpec("missing", { ...detectionDeps(provider), specSource, proposalStore }),
+    ).rejects.toThrow(/no ApiSpec with id missing/);
+  });
+});
+
+describe("runScopedReReviewAnalysis — the worker-side scoped re-review runner (SL-6)", () => {
+  const STALE_ID = "mapping-issues-tasks-v1";
+  // Gitea advances v1 → v2 (a breaking change); vikunja is the unchanged counterpart.
+  const giteaV2: ApiSpec = { ...giteaSpec, id: "spec-gitea-v2", version: 2 };
+  const staleMapping: ApprovedMapping = {
+    id: STALE_ID,
+    // Stays pinned to the reviewed (superseded) version on the changed side (SL-4.3).
+    sourceSpecId: "spec-gitea-v1",
+    targetSpecId: "spec-vikunja",
+    sourceAppId: "app-gitea",
+    targetAppId: "app-vikunja",
+    variant: "peer-peer",
+    approvedBy: "operator@example.test",
+    approvedAt: new Date("2026-07-01T00:00:00.000Z"),
+    status: "stale",
+  };
+  const staleFields: FieldMapping[] = [
+    {
+      id: "fm-title",
+      mappingId: STALE_ID,
+      sourcePath: "issues/title",
+      targetPath: "tasks/title",
+      transform: "rename",
+      isIdentityKey: true,
+    },
+  ];
+  const staleOps: OperationMapping[] = [
+    {
+      id: "om-list",
+      mappingId: STALE_ID,
+      sourceOperationRef: "issues/issueListIssues",
+      targetOperationRef: "tasks/vikunjaListTasks",
+      action: "read",
+    },
+  ];
+
+  class InMemoryStaleMappingSource implements StaleMappingSource {
+    public constructor(private readonly present: boolean = true) {}
+    public getById(id: string): Promise<ApprovedMapping | undefined> {
+      return Promise.resolve(this.present && id === STALE_ID ? staleMapping : undefined);
+    }
+    public listFieldMappings(id: string): Promise<FieldMapping[]> {
+      return Promise.resolve(id === STALE_ID ? staleFields : []);
+    }
+    public listOperationMappings(id: string): Promise<OperationMapping[]> {
+      return Promise.resolve(id === STALE_ID ? staleOps : []);
+    }
+  }
+
+  it("produces a successor proposal pinned to the new version, linked to the stale predecessor", async () => {
+    const provider = new FakeProvider({
+      // No shortlist scripted → a stage-1 call would throw loudly (detail-only path).
+      detail: { "issues=>tasks@peer-peer": [issuesToTasksPeerPeer] },
+    });
+    // v1 is superseded → NOT in the active set; the successor pins the active v2 + counterpart.
+    const specSource = new InMemorySpecSource([giteaV2, vikunjaSpec]);
+    const proposalStore = new InMemoryProposalStore();
+
+    const result = await runScopedReReviewAnalysis(
+      {
+        newSpecId: "spec-gitea-v2",
+        supersededSpecId: "spec-gitea-v1",
+        staleMappings: [
+          {
+            staleMappingId: STALE_ID,
+            affectedPairs: [{ sourceResource: "issues", targetResource: "tasks" }],
+          },
+        ],
+      },
+      {
+        ...detectionDeps(provider),
+        specSource,
+        proposalStore,
+        staleMappings: new InMemoryStaleMappingSource(),
+      },
+    );
+
+    expect(result.newSpecId).toBe("spec-gitea-v2");
+    expect(proposalStore.rows).toHaveLength(1);
+    const proposal = proposalStore.rows[0]?.proposal;
+    expect(proposal?.status).toBe("pending");
+    // The successor is a distinct proposal pinned to the NEW version on the changed side …
+    expect(proposal?.sourceSpecId).toBe("spec-gitea-v2");
+    expect(proposal?.targetSpecId).toBe("spec-vikunja");
+    // … tagged with the stale predecessor so approval yields the successor's predecessor link.
+    expect(proposal?.reReviewOf).toBe(STALE_ID);
+    expect(proposalStore.rows[0]?.items.length).toBeGreaterThan(0);
+  });
+
+  it("skips a stale descriptor whose mapping row no longer exists (defensive)", async () => {
+    const provider = new FakeProvider({});
+    const specSource = new InMemorySpecSource([giteaV2, vikunjaSpec]);
+    const proposalStore = new InMemoryProposalStore();
+
+    const result = await runScopedReReviewAnalysis(
+      {
+        newSpecId: "spec-gitea-v2",
+        supersededSpecId: "spec-gitea-v1",
+        staleMappings: [
+          {
+            staleMappingId: STALE_ID,
+            affectedPairs: [{ sourceResource: "issues", targetResource: "tasks" }],
+          },
+        ],
+      },
+      {
+        ...detectionDeps(provider),
+        specSource,
+        proposalStore,
+        staleMappings: new InMemoryStaleMappingSource(false),
+      },
+    );
+
+    expect(result.analyses).toEqual([]);
+    expect(proposalStore.rows).toEqual([]);
+  });
+
+  it("throws when the newly-ingested spec does not exist", async () => {
+    const provider = new FakeProvider({});
+    await expect(
+      runScopedReReviewAnalysis(
+        { newSpecId: "missing", supersededSpecId: "spec-gitea-v1", staleMappings: [] },
+        {
+          ...detectionDeps(provider),
+          specSource: new InMemorySpecSource([]),
+          proposalStore: new InMemoryProposalStore(),
+          staleMappings: new InMemoryStaleMappingSource(),
+        },
+      ),
     ).rejects.toThrow(/no ApiSpec with id missing/);
   });
 });

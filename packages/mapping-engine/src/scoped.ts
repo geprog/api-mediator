@@ -1,13 +1,22 @@
-import type { ApiSpec, CandidatePair, NoCounterpartResource } from "@mediator/domain";
+import type {
+  ApiSpec,
+  CandidatePair,
+  FieldMapping,
+  MappingVariant,
+  NoCounterpartResource,
+  OperationMapping,
+} from "@mediator/domain";
+import type { PriorMappingFeedback } from "@mediator/llm";
 
 import {
   analyzeCandidate,
   shortlistCall,
   type CandidateAnalysisResult,
   type DetectionDeps,
+  type PriorFeedbackLookup,
   type ShortlistOutcome,
 } from "./detection.js";
-import type { CandidateSpecPair } from "./enumerate.js";
+import { unorderedPairKey, type CandidateSpecPair } from "./enumerate.js";
 import type { LlmCallMetrics } from "./metrics.js";
 import { buildSpecSummaryIR, inScopeResources } from "./summaries.js";
 
@@ -218,4 +227,185 @@ export async function analyzeAdditiveDelta(args: {
     metrics: shortlistMetric ?? syntheticShortlistMetric(),
   };
   return runDirections(candidates, newSpec, counterpart, outcome, deps);
+}
+
+// ── SL-6 — the scoped breaking re-review analysis (detail-only, priorFeedback) ──
+
+/**
+ * One affected resource pair of a stale mapping, in the mapping's `source → target`
+ * orientation — the SL-6.1 unit of re-analysis (one detail call, no shortlist).
+ */
+export interface ReReviewResourcePair {
+  readonly sourceResource: string;
+  readonly targetResource: string;
+}
+
+/** The stale mapping's approved content, fed back as `priorFeedback` (SL-6.2). */
+export interface PriorMappingContent {
+  readonly fields: readonly FieldMapping[];
+  readonly operations: readonly OperationMapping[];
+}
+
+/** The rationale stamped on an SL-6 forced re-review pair (stage 1 skipped — correspondence already established). */
+const RE_REVIEW_PAIR_RATIONALE =
+  "Breaking change touched this established resource pair — scoped detail re-review (stage 1 skipped).";
+
+/**
+ * The resource-group portion of a serialized IR path/operation ref (`issues/title`,
+ * `issues/updateIssue`): a `resourceRef` never contains a `/`, so the resource is
+ * everything before the **first** `/` (mirrors the approval serializer / SL-4's
+ * `resourceOfRef`). A whole-resource ref (no `/`) is its own resource.
+ */
+function resourceOf(ref: string): string {
+  const slash = ref.indexOf("/");
+  return slash === -1 ? ref : ref.slice(0, slash);
+}
+
+/**
+ * The **proposal-oriented** `{ sourceRef, targetRef }` of a `FieldMapping`: which
+ * path references the source spec vs. the target spec. A consumer-provider
+ * **response**-phase field inverts the convention (`sourcePath` is the backend /
+ * target-spec field and `targetPath` the consumer / source-spec field), exactly as
+ * SL-4's `mappingChangedSideRefs` reads it; a peer-peer / request-phase field is
+ * `sourcePath → source`, `targetPath → target`.
+ */
+function orientedFieldRefs(field: FieldMapping): { sourceRef: string; targetRef: string } {
+  const inverted = field.phase === "response";
+  return {
+    sourceRef: inverted ? field.targetPath : field.sourcePath,
+    targetRef: inverted ? field.sourcePath : field.targetPath,
+  };
+}
+
+/** A collision-free `{ sourceResource, targetResource }` key (visible JSON, never a NUL byte). */
+function reReviewPairKey(sourceResource: string, targetResource: string): string {
+  return JSON.stringify([sourceResource, targetResource]);
+}
+
+/** A short, metadata-only note describing an approved field correspondence (transform kind / phase / identity). */
+function fieldFeedbackNote(field: FieldMapping): string {
+  const parts = [`transform=${field.transform}`];
+  if (field.phase !== undefined) parts.push(`phase=${field.phase}`);
+  if (field.isIdentityKey === true) parts.push("identity-key");
+  return `prior approved field mapping (${parts.join(", ")})`;
+}
+
+/**
+ * **SL-6.2 — group the stale mapping's approved content into per-resource-pair
+ * `priorFeedback`.** Each `FieldMapping`/`OperationMapping` becomes one
+ * {@link PriorMappingFeedback} (its source/target refs + a metadata-only note),
+ * bucketed under the proposal-oriented resource pair it belongs to, so the detail
+ * call for a given pair is fed exactly that pair's prior correspondences. Pure and
+ * **metadata-only** — resource-qualified IR refs + transform kinds, never a value or
+ * a secret.
+ */
+export function buildReReviewPriorFeedback(
+  content: PriorMappingContent,
+): Map<string, PriorMappingFeedback[]> {
+  const byPair = new Map<string, PriorMappingFeedback[]>();
+  const push = (sourceRef: string, targetRef: string, note: string): void => {
+    const key = reReviewPairKey(resourceOf(sourceRef), resourceOf(targetRef));
+    const bucket = byPair.get(key);
+    const entry: PriorMappingFeedback = { sourceRef, targetRef, note };
+    if (bucket === undefined) {
+      byPair.set(key, [entry]);
+    } else {
+      bucket.push(entry);
+    }
+  };
+  for (const field of content.fields) {
+    const { sourceRef, targetRef } = orientedFieldRefs(field);
+    push(sourceRef, targetRef, fieldFeedbackNote(field));
+  }
+  for (const operation of content.operations) {
+    push(
+      operation.sourceOperationRef,
+      operation.targetOperationRef,
+      `prior approved operation mapping (action=${operation.action})`,
+    );
+  }
+  return byPair;
+}
+
+/**
+ * **SL-6 — the scoped breaking re-review analysis for ONE stale mapping, reusing the
+ * Phase-2 detail runner *scoped* rather than a second pipeline.** Given the successor's
+ * `source`/`target` specs (the stale mapping's spec pair with the changed side advanced
+ * to the new version), the affected resource pairs the breaking change touched, and the
+ * stale mapping's approved content, it:
+ *
+ * - injects the affected pairs straight into an `ok` {@link ShortlistOutcome} (a
+ *   synthetic, zero-cost shortlist metric — **no** stage-1 call, since the correspondence
+ *   is already established — SL-6.1), so `analyzeCandidate` runs only its detail calls;
+ * - threads the stale mapping's approved content as **`priorFeedback`** per resource pair
+ *   (SL-6.2), so unaffected correspondences come back intact;
+ * - stamps the resulting ordinary `MappingProposal` with `reReviewOf = staleMappingId`
+ *   (SL-6.3/6.4), the link approval turns into the successor's `predecessorMappingId`.
+ *
+ * The result is an **ordinary** `CandidateAnalysisResult` (a `pending`/`failed`
+ * `MappingProposal` + its items) reviewed through the ordinary Phase-3 flow — nothing is
+ * auto-approved (SL-6.3). A detail call for a resource whose group was removed resolves to
+ * no IR group and is marked `analysisFailed` on the pair (SL-6.5 — surfaced, never silently
+ * lost), exactly as a first-time detail failure. Pure over its injected `DetectionDeps`;
+ * the persisting {@link runScopedReReviewAnalysis} (see `run.ts`) supplies the specs,
+ * the stale content, and persistence.
+ */
+export async function analyzeReReview(args: {
+  readonly staleMappingId: string;
+  readonly source: ApiSpec;
+  readonly target: ApiSpec;
+  readonly variant: MappingVariant;
+  readonly affectedPairs: readonly ReReviewResourcePair[];
+  readonly priorContent: PriorMappingContent;
+  readonly deps: DetectionDeps;
+}): Promise<CandidateAnalysisResult> {
+  const { staleMappingId, source, target, variant, affectedPairs, priorContent, deps } = args;
+
+  // Dedupe the affected pairs (a breaking change may touch a resource pair through
+  // several fields/operations); forge each into a forced detail pair.
+  const seen = new Set<string>();
+  const forcedPairs: CandidatePair[] = [];
+  for (const pair of affectedPairs) {
+    const key = reReviewPairKey(pair.sourceResource, pair.targetResource);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    forcedPairs.push({
+      sourceResource: pair.sourceResource,
+      targetResource: pair.targetResource,
+      confidence: 1,
+      rationale: RE_REVIEW_PAIR_RATIONALE,
+    });
+  }
+
+  const priorFeedbackByPair = buildReReviewPriorFeedback(priorContent);
+  const priorFeedbackFor: PriorFeedbackLookup = (sourceResourceRef, targetResourceRef) =>
+    priorFeedbackByPair.get(reReviewPairKey(sourceResourceRef, targetResourceRef));
+
+  // No stage-1 call: the affected pairs ARE the shortlist (canonical = the successor's
+  // own source → target orientation, so `analyzeCandidate` maps them through unchanged).
+  const outcome: ShortlistOutcome = {
+    status: "ok",
+    canonicalSourceId: source.id,
+    canonicalTargetId: target.id,
+    candidatePairs: forcedPairs,
+    noCounterpartResources: [],
+    metrics: syntheticShortlistMetric(),
+  };
+  const candidate: CandidateSpecPair = {
+    sourceSpecId: source.id,
+    targetSpecId: target.id,
+    variant,
+    unorderedKey: unorderedPairKey(source.id, target.id),
+  };
+
+  const result = await analyzeCandidate(
+    candidate,
+    { source, target },
+    outcome,
+    deps,
+    priorFeedbackFor,
+  );
+  // SL-6.3/6.4 — tag the ordinary proposal as this stale mapping's re-review, the link
+  // approval turns into the successor's `predecessorMappingId` (the SL-7 adoption seam).
+  return { ...result, proposal: { ...result.proposal, reReviewOf: staleMappingId } };
 }

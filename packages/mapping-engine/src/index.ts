@@ -44,6 +44,7 @@ export {
   type CandidateAnalysisResult,
   type DetectionDeps,
   detectForSpec,
+  type PriorFeedbackLookup,
   resolveShortlist,
   shortlistCall,
   type ShortlistCallResult,
@@ -53,13 +54,18 @@ export {
 export {
   type AdditiveAnalysisScope,
   analyzeAdditiveDelta,
+  analyzeReReview,
+  buildReReviewPriorFeedback,
   type EstablishedResourcePair,
+  type PriorMappingContent,
+  type ReReviewResourcePair,
 } from "./scoped.js";
 
 export {
   createDbPriorProposalSource,
   createDbProposalStore,
   createDbSpecSource,
+  createDbStaleMappingSource,
   deriveEstablishedPairs,
   type DetectionRunResult,
   type PersistableProposal,
@@ -68,7 +74,12 @@ export {
   runDetectionForSpec,
   type RunDetectionDeps,
   runScopedAdditiveAnalysis,
+  runScopedReReviewAnalysis,
   type RunScopedDeps,
+  type RunScopedReReviewDeps,
+  type ReReviewStaleMapping,
   type ScopedAnalysisJob,
+  type ScopedReReviewJob,
   type SpecSource,
+  type StaleMappingSource,
 } from "./run.js";

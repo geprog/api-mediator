@@ -24,6 +24,7 @@ import {
   carryForwardResourceBindingVerbatim,
   computeAdditiveAnalysisScope,
   computeBreakingAffectedKeys,
+  computeReReviewAffectedPairs,
   mappingChangedSideRefs,
   mappingReferencesChangedElement,
   pollOperationResolves,
@@ -1103,6 +1104,96 @@ describe("SpecRegistry.ingestNewVersion breaking reaction (SL-4)", () => {
     ]);
     expect(store.cacheInvalidations).toEqual(["endpoint-consumer"]);
   });
+
+  // ── SL-6 — the scoped re-review trigger wired into the breaking branch ──
+  it("records ONE re-review job carrying a descriptor per stale mapping, in the breaking tx (SL-6.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // One mapping references the changed `issues.title` (stales); one references only the
+    // unchanged `labels` (re-pins, no re-review).
+    store.approvedMappings.set("m-issues", peerPeer("m-issues", v1.id, PEER_SPEC_B, PEER_APP_B));
+    seedFieldMapping(store, "m-issues", "issues/title", "issues/title");
+    seedOperationMapping(store, "m-issues", "issues/issueListIssues", "issues/issueListIssues");
+    store.approvedMappings.set("m-labels", peerPeer("m-labels", v1.id, PEER_SPEC_C, PEER_APP_C));
+    seedFieldMapping(store, "m-labels", "labels/name", "labels/name");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+
+    // Exactly ONE scoped job, for the NEW version, carrying a `re-review` scope.
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+    const job = store.scopedDetectionJobs[0];
+    expect(job?.apiSpecId).toBe(outcome.newSpec.id);
+    if (job?.scope.kind !== "re-review") throw new Error("expected a re-review scope");
+    // The changed side's superseded version (the successors advance it to the new version).
+    expect(job.scope.supersededSpecId).toBe(v1.id);
+    // Only the stale mapping is re-reviewed; the re-pinned one is not.
+    expect(job.scope.staleMappings.map((descriptor) => descriptor.staleMappingId)).toEqual([
+      "m-issues",
+    ]);
+    // SL-6.1 — the descriptor carries the affected resource pair (both sides named `issues`).
+    expect(job.scope.staleMappings[0]?.affectedPairs).toEqual([
+      { sourceResource: "issues", targetResource: "issues" },
+    ]);
+  });
+
+  it("records NO re-review job when the breaking advance stales no mapping (SL-6.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // The only mapping references the unchanged `labels` → re-pinned, never stale.
+    store.approvedMappings.set("m-labels", peerPeer("m-labels", v1.id, PEER_SPEC_C, PEER_APP_C));
+    seedFieldMapping(store, "m-labels", "labels/name", "labels/name");
+
+    const outcome = await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+    if (outcome.kind !== "advanced") throw new Error("expected advanced");
+    expect(outcome.diff.classification).toBe("breaking");
+
+    // No stale mapping → no re-review job (nothing to re-review).
+    expect(store.scopedDetectionJobs).toEqual([]);
+    expect(store.approvedMappings.get("m-labels")?.status).toBe("active");
+  });
+
+  it("re-review job covers two stale mappings from one breaking advance in a single job (SL-6.1)", async () => {
+    const store = new InMemoryStore();
+    const unitOfWork = new FakeUnitOfWork(store);
+    const registry = new SpecRegistry();
+    const { app, v1 } = await seedV1(store, unitOfWork, registry);
+
+    // Two mappings both referencing the changed `issues.title`, toward different counterparts.
+    store.approvedMappings.set(
+      "m-issues-b",
+      peerPeer("m-issues-b", v1.id, PEER_SPEC_B, PEER_APP_B),
+    );
+    seedFieldMapping(store, "m-issues-b", "issues/title", "issues/title");
+    store.approvedMappings.set(
+      "m-issues-c",
+      peerPeer("m-issues-c", v1.id, PEER_SPEC_C, PEER_APP_C),
+    );
+    seedFieldMapping(store, "m-issues-c", "issues/title", "issues/title");
+
+    await unitOfWork.run((tx) =>
+      registry.ingestNewVersion(app.id, retypedTitleDoc(), "PROVIDER", tx),
+    );
+
+    // Many stale mappings → still ONE job (the per-spec partial-unique index), with both descriptors.
+    expect(store.scopedDetectionJobs).toHaveLength(1);
+    const job = store.scopedDetectionJobs[0];
+    if (job?.scope.kind !== "re-review") throw new Error("expected a re-review scope");
+    expect(job.scope.staleMappings.map((descriptor) => descriptor.staleMappingId).sort()).toEqual([
+      "m-issues-b",
+      "m-issues-c",
+    ]);
+  });
 });
 
 /**
@@ -1765,5 +1856,89 @@ describe("SL-5 pure operational-ref helpers", () => {
         carryForwardResourceBindingVerbatim(prior, "new-spec", "new-binding", []),
       ).toBeUndefined();
     });
+  });
+});
+
+/**
+ * SL-6.1 pure affected-pair computation — the resource pairs a stale mapping's re-review
+ * re-analyzes, unit-tested directly so the pair grouping + changed-side matching (incl. the
+ * response-phase inversion and the empty fallback) is provable without a whole ingest round.
+ */
+describe("computeReReviewAffectedPairs (SL-6.1 pure)", () => {
+  const SUPERSEDED = "spec-old";
+  // A breaking `issues.title` retype: only `issues` is a changed field resource.
+  const affected = computeBreakingAffectedKeys({
+    classification: "breaking",
+    changes: [
+      {
+        kind: "field-type-changed",
+        classification: "breaking",
+        location: {
+          level: "field",
+          resourceRef: "issues",
+          schemaName: "Issue",
+          fieldName: "title",
+        },
+        reason: "test",
+      },
+    ],
+  });
+
+  it("returns only the resource pair whose changed-side resource was touched", () => {
+    const mapping = { sourceSpecId: SUPERSEDED, targetSpecId: "spec-other" };
+    const fields: FieldMapping[] = [
+      {
+        id: "f1",
+        mappingId: "m",
+        sourcePath: "issues/title",
+        targetPath: "tasks/title",
+        transform: "rename",
+      },
+      {
+        id: "f2",
+        mappingId: "m",
+        sourcePath: "labels/name",
+        targetPath: "tags/name",
+        transform: "rename",
+      },
+    ];
+    expect(computeReReviewAffectedPairs(mapping, SUPERSEDED, fields, [], affected)).toEqual([
+      { sourceResource: "issues", targetResource: "tasks" },
+    ]);
+  });
+
+  it("inverts a consumer-provider response field's orientation when matching the changed side", () => {
+    // The mapping's TARGET spec is the changed provider; a response field's sourcePath is the backend field.
+    const mapping = { sourceSpecId: "spec-consumer", targetSpecId: SUPERSEDED };
+    const fields: FieldMapping[] = [
+      {
+        id: "f1",
+        mappingId: "m",
+        sourcePath: "issues/title",
+        targetPath: "con-issues/title",
+        transform: "rename",
+        phase: "response",
+      },
+    ];
+    // Proposal orientation is source-spec (consumer) → target-spec (backend).
+    expect(computeReReviewAffectedPairs(mapping, SUPERSEDED, fields, [], affected)).toEqual([
+      { sourceResource: "con-issues", targetResource: "issues" },
+    ]);
+  });
+
+  it("falls back to all resource pairs if none matched (belt-and-suspenders, SL-6.5)", () => {
+    const mapping = { sourceSpecId: SUPERSEDED, targetSpecId: "spec-other" };
+    const fields: FieldMapping[] = [
+      {
+        id: "f1",
+        mappingId: "m",
+        sourcePath: "labels/name",
+        targetPath: "tags/name",
+        transform: "rename",
+      },
+    ];
+    expect(computeReReviewAffectedPairs(mapping, SUPERSEDED, fields, [], affected)).toEqual([
+      { sourceResource: "labels", targetResource: "tags" },
+    ]);
   });
 });

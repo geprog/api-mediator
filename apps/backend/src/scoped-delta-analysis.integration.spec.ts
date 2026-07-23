@@ -346,6 +346,9 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
       runDetection: () => Promise.reject(new Error("full detection not expected for a scoped job")),
       runScopedDetection: async (job) => {
         if (job.scope === null) throw new Error("scoped job carries no scope");
+        if (job.scope.kind !== "additive-delta") {
+          throw new Error(`unexpected scope kind ${job.scope.kind} for the additive-delta test`);
+        }
         await runScopedAdditiveAnalysis(
           {
             newSpecId: job.apiSpecId,

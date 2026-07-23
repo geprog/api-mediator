@@ -270,6 +270,11 @@ export class ApprovalService {
     const now = this.#now();
     let mapping: ApprovedMapping;
     if (existing === undefined) {
+      // SL-6.4 — a **re-review** proposal (`reReviewOf` set) is pinned to the new spec
+      // version, so no active mapping exists for its directional pair and this is a fresh
+      // insert: the resulting row is the stale predecessor's **successor**, stamped with
+      // `predecessorMappingId` so SL-7 adoption can find it both ways. `stripUndefined`
+      // collapses the absent link on an ordinary (non-re-review) approval.
       mapping = await stores.approvedMappings.insert(
         stripUndefined({
           id: mappingId,
@@ -281,6 +286,7 @@ export class ApprovalService {
           approvedBy: actor,
           approvedAt: now,
           status: "active" as const,
+          predecessorMappingId: proposal.reReviewOf,
         }),
       );
     } else {

@@ -767,3 +767,102 @@ describe("AS-6 emit and counterpart linking", () => {
     expect("counterpartMappingId" in result.mapping).toBe(false);
   });
 });
+
+// ── SL-6.4: approving a re-review proposal yields the stale mapping's successor ─────
+describe("SL-6 successor link (predecessorMappingId)", () => {
+  const STALE_ID = "stale-predecessor-1";
+
+  /** A peer-peer re-review proposal (`reReviewOf` set) plus its retained stale predecessor. */
+  function setupReReview(): {
+    fake: FakeApprovalPersistence;
+    service: ApprovalService;
+    fx: PeerPeerFixture;
+  } {
+    const fake = new FakeApprovalPersistence();
+    const fx = peerPeerFixture();
+    fake.seedSpec(fx.sourceSpec);
+    fake.seedSpec(fx.targetSpec);
+    // The proposal is the successor re-review of a stale predecessor mapping (SL-6).
+    fake.seedProposal({ ...fx.proposal, reReviewOf: STALE_ID }, fx.allItems);
+    // The stale predecessor: a distinct, retained row pinned to its (superseded) prior version.
+    const stalePredecessor: ApprovedMapping = {
+      id: STALE_ID,
+      sourceSpecId: "old-source-spec",
+      targetSpecId: fx.targetSpec.id,
+      sourceAppId: fx.appAId,
+      targetAppId: fx.appBId,
+      variant: "peer-peer",
+      approvedBy: "reviewer:previous",
+      approvedAt: NOW,
+      status: "stale",
+    };
+    fake.seedApprovedMapping(stalePredecessor);
+    return { fake, service: makeService(fake), fx };
+  }
+
+  it("stamps the fresh successor's predecessorMappingId from the proposal's reReviewOf (SL-6.4)", async () => {
+    const { fake, service, fx } = setupReReview();
+    await service.decideItem(
+      { itemId: fx.items.titleField.id, decision: { kind: "accept" } },
+      ACTOR,
+    );
+
+    const result = await service.approve({ proposalId: fx.proposal.id }, ACTOR);
+    if (result.outcome === "rejected") throw new Error("unexpected rejected");
+
+    // A distinct NEW successor row (not the retained stale predecessor), pinned to the
+    // proposal's (new-version) spec pair, linked to its predecessor for SL-7 to adopt.
+    expect(result.mapping.id).not.toBe(STALE_ID);
+    expect(result.mapping.status).toBe("active");
+    expect(result.mapping.predecessorMappingId).toBe(STALE_ID);
+    expect(result.mapping.sourceSpecId).toBe(fx.sourceSpec.id);
+    expect(result.mapping.targetSpecId).toBe(fx.targetSpec.id);
+
+    // The stale predecessor is retained, untouched — two rows now coexist for audit.
+    expect(fake.approvedMappings.get(STALE_ID)?.status).toBe("stale");
+    expect(fake.approvedMappings.size).toBe(2);
+
+    // SL-7 finds "the successor of this stale mapping" by the predecessor link (either way).
+    const successor = [...fake.approvedMappings.values()].find(
+      (mapping) => mapping.predecessorMappingId === STALE_ID,
+    );
+    expect(successor?.id).toBe(result.mapping.id);
+  });
+
+  it("stamps the successor once and carries it through an incremental second approve (SL-6.4)", async () => {
+    const { fake, service, fx } = setupReReview();
+    await service.decideItem(
+      { itemId: fx.items.titleField.id, decision: { kind: "accept" } },
+      ACTOR,
+    );
+    const first = await service.approve({ proposalId: fx.proposal.id }, ACTOR);
+    if (first.outcome === "rejected") throw new Error("unexpected rejected");
+
+    // A later incremental approve updates the SAME successor in place — the link persists.
+    await service.decideItem(
+      { itemId: fx.items.stateField.id, decision: { kind: "accept" } },
+      ACTOR,
+    );
+    const second = await service.approve({ proposalId: fx.proposal.id }, ACTOR);
+    if (second.outcome === "rejected") throw new Error("unexpected rejected");
+
+    expect(second.mapping.id).toBe(first.mapping.id);
+    expect(fake.approvedMappings.get(first.mapping.id)?.predecessorMappingId).toBe(STALE_ID);
+    // Still exactly the successor + the retained stale predecessor.
+    expect(fake.approvedMappings.size).toBe(2);
+  });
+
+  it("leaves an ordinary (non-re-review) approval's mapping with no predecessor link", async () => {
+    const { service, fx } = setupPeerPeer();
+    await service.decideItem(
+      { itemId: fx.items.titleField.id, decision: { kind: "accept" } },
+      ACTOR,
+    );
+    const result = await service.approve({ proposalId: fx.proposal.id }, ACTOR);
+    if (result.outcome === "rejected") throw new Error("unexpected rejected");
+
+    // The absent link stays absent (NULL → absent key, like counterpartMappingId).
+    expect(result.mapping.predecessorMappingId).toBeUndefined();
+    expect("predecessorMappingId" in result.mapping).toBe(false);
+  });
+});
