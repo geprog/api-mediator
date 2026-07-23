@@ -145,11 +145,18 @@ export interface PriorProposalSource {
 
 /** The scoped-analysis job the worker hands to {@link runScopedAdditiveAnalysis}. */
 export interface ScopedAnalysisJob {
-  /** The newly-ingested (now-`active`) additive version to analyze the delta of. */
+  /** The `active` spec to analyze the scoped delta of (SL-3: the newly-ingested additive version; SL-9: the spec whose exclusion was removed). */
   readonly newSpecId: string;
-  /** The prior (now-`superseded`) version, whose established shortlists SL-3.2 reuses. */
-  readonly supersededSpecId: string;
-  /** The structural scope the additive diff produced (SL-3.1 groups / SL-3.2 changed resources). */
+  /**
+   * The prior (now-`superseded`) version, whose established shortlists SL-3.2 reuses.
+   *
+   * **Absent for an SL-9 re-inclusion**: no version advance happened, so there is no
+   * prior lineage to read established pairs from — and a re-inclusion carries no
+   * `changedResources`, which are the only thing those pairs serve. When it is absent
+   * the prior-proposal lookup is skipped entirely.
+   */
+  readonly supersededSpecId?: string;
+  /** The structural scope to analyze (SL-3.1 groups / SL-3.2 changed resources; SL-9 puts the re-included groups in the SL-3.1 bucket). */
   readonly scope: AdditiveAnalysisScope;
 }
 
@@ -208,11 +215,18 @@ export function deriveEstablishedPairs(
  * unordered pair — a scoped stage-1 shortlist for new groups and detail-only for changed
  * resources — and persists all resulting delta proposals in **one atomic** `persistAll`.
  *
+ * **Also serves SL-9 re-inclusion**, which is analytically the same job: a resource group
+ * newly in analysis scope for this spec gets one scoped shortlist against each counterpart
+ * plus a detail call per shortlisted pair. The worker passes the re-included `resourceRef`s
+ * as `scope.newResourceGroups` with no `supersededSpecId` (the only SL-3-specific input),
+ * so both triggers share this one pipeline rather than a near-duplicate copy
+ * (mapping-engine.md *Scoping down* — *Re-inclusion*).
+ *
  * Idempotent to re-run (DT-2/SL-3.5): the worker only ever re-runs this after a crash
  * reclaim, and the enqueue's partial-unique index already guarantees a redelivered ingest
  * produces one job. Persistence is all-or-nothing, so a fault mid-persist leaves nothing to
  * duplicate on the retry. Nothing here approves anything — every delta proposal is `pending`
- * (or `failed`), reviewed through the ordinary Phase-3 flow (SL-3.3).
+ * (or `failed`), reviewed through the ordinary Phase-3 flow (SL-3.3/SL-9.2).
  */
 export async function runScopedAdditiveAnalysis(
   job: ScopedAnalysisJob,
@@ -248,16 +262,23 @@ export async function runScopedAdditiveAnalysis(
     if (counterpart === undefined) {
       continue; // defensive: enumeration only yields active counterparts
     }
-    const priorProposals = await deps.priorProposals.listForSpecPair(
-      job.supersededSpecId,
-      counterpartId,
-    );
-    const establishedPairs = deriveEstablishedPairs(
-      priorProposals,
-      job.supersededSpecId,
-      counterpartId,
-      job.scope.changedResources,
-    );
+    // SL-3.2 reads the already-shortlisted pairs off the prior lineage's proposals. An
+    // SL-9 re-inclusion has no superseded version (and no `changedResources`), so the
+    // lookup is skipped and every re-included group takes the SL-3.1 shortlist path.
+    const { supersededSpecId } = job;
+    let establishedPairs: EstablishedResourcePair[] = [];
+    if (supersededSpecId !== undefined) {
+      const priorProposals = await deps.priorProposals.listForSpecPair(
+        supersededSpecId,
+        counterpartId,
+      );
+      establishedPairs = deriveEstablishedPairs(
+        priorProposals,
+        supersededSpecId,
+        counterpartId,
+        job.scope.changedResources,
+      );
+    }
     const results = await analyzeAdditiveDelta({
       newSpec,
       counterpart,

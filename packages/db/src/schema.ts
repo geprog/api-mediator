@@ -405,14 +405,21 @@ export const detectionJobStatusEnum = pgEnum("detection_job_status", DETECTION_J
  *   worker runs a **detail-only** re-analysis (no shortlist) per affected resource
  *   pair of each `stale` mapping, with the stale mapping's approved content passed as
  *   `priorFeedback`, producing each stale mapping's **successor** re-review proposal.
+ * - `kind = "re-inclusion"` — a **scoped** re-inclusion job (Phase-6 SL-9): the operator
+ *   removed a resource group from `ApiSpec.analysisExclusions`, so the worker runs the
+ *   **same** scoped incremental analysis SL-3.1 runs for an additively-added group — one
+ *   scoped shortlist for the re-included resource's summary against each counterpart
+ *   spec, then a detail call per shortlisted pair.
  *
  * It is **infrastructure** (durability/scheduling), not a glossary entity — the
  * structural scope the Spec Registry derives **once** from the `SpecDiff` (SL-1.6
  * "one classification, many consumers"), recorded in the ingest/advance transaction
- * and read by the worker outside it (DT-2). It carries only version-stable
- * `resourceRef`s, spec ids, and `ApprovedMapping` ids — no IR payload, never a secret.
+ * and read by the worker outside it (DT-2); the SL-9 variant is recorded in the
+ * exclusions-replace transaction instead, by the same record-intent-in-tx discipline.
+ * It carries only version-stable `resourceRef`s, spec ids, and `ApprovedMapping` ids —
+ * no IR payload, never a secret.
  */
-export type DetectionJobScope = AdditiveDeltaScope | ReReviewScope;
+export type DetectionJobScope = AdditiveDeltaScope | ReReviewScope | ReInclusionScope;
 
 /** SL-3 — the scoped additive-delta job descriptor (a `resource-group-added` / in-scope additive diff). */
 export interface AdditiveDeltaScope {
@@ -454,6 +461,25 @@ export interface ReReviewStaleMappingScope {
 export interface ReReviewResourcePair {
   readonly sourceResource: string;
   readonly targetResource: string;
+}
+
+/**
+ * SL-9 — the scoped **re-inclusion** job descriptor: the operator removed one or more
+ * resource groups from an already-registered spec's `ApiSpec.analysisExclusions`, which
+ * puts them back **in analysis scope** for the SAME spec version.
+ *
+ * Deliberately a distinct variant rather than a reuse of {@link AdditiveDeltaScope}: a
+ * re-inclusion has **no** superseded version (no version advance happened) and **no**
+ * `changedResources` bucket — it carries exactly "these `resourceRef`s on this spec, vs.
+ * every counterpart". The analysis it drives is nevertheless *identical* to SL-3.1's, so
+ * the worker maps it straight onto the shared `runScopedAdditiveAnalysis` rather than
+ * standing up a second pipeline (mapping-engine.md *Scoping down* — *Re-inclusion*).
+ */
+export interface ReInclusionScope {
+  /** Discriminant — the reaction that recorded this scope (SL-9 exclusion removal). */
+  readonly kind: "re-inclusion";
+  /** `resourceRef`s put back in scope by removing them from `analysisExclusions` — a scoped shortlist + detail per counterpart, exactly as SL-3.1 treats a newly-added group. */
+  readonly reincludedResourceGroups: readonly string[];
 }
 
 /**
@@ -929,7 +955,8 @@ export const mappingDetectionJob = pgTable(
     // NULL until the job reaches a terminal state (`completed`/`failed`).
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     // NULL for a full detection job (DT-1/DT-2); a {@link DetectionJobScope} for a
-    // scoped additive-delta job (SL-3). The column the worker branches on.
+    // scoped job (SL-3 additive delta, SL-6 re-review, SL-9 re-inclusion). The column
+    // the worker branches on.
     scope: jsonb("scope").$type<DetectionJobScope>(),
   },
   (table) => [

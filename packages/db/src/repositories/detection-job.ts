@@ -22,7 +22,7 @@ export interface DetectionJob {
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly finishedAt: Date | null;
-  /** `null` for a full detection job (DT-1/DT-2); a scope descriptor for a scoped SL-3 job. */
+  /** `null` for a full detection job (DT-1/DT-2); a scope descriptor for a scoped job (SL-3/SL-6/SL-9). */
   readonly scope: DetectionJobScope | null;
 }
 
@@ -34,8 +34,9 @@ export interface ClaimedDetectionJob {
   readonly attempts: number;
   /**
    * `null` → a **full** detection job (the worker runs `runDetectionForSpec`); a
-   * {@link DetectionJobScope} → a **scoped** SL-3 additive-delta job (the worker
-   * runs the scoped incremental analysis over the descriptor's new elements).
+   * {@link DetectionJobScope} → a **scoped** job (SL-3 additive delta, SL-6 re-review,
+   * SL-9 re-inclusion), whose `kind` selects the scoped analysis the worker runs over
+   * the descriptor's elements.
    */
   readonly scope: DetectionJobScope | null;
 }
@@ -55,11 +56,12 @@ export interface DetectionJobEnqueueOps {
    */
   enqueue(apiSpecId: string): Promise<void>;
   /**
-   * Record intent to run a **scoped** additive-delta analysis for `apiSpecId`
-   * (SL-3), carrying the {@link DetectionJobScope} descriptor, idempotently under
-   * the same partial UNIQUE index as {@link enqueue}: a redelivered ingest / a
-   * re-derivation collapses to one job, so the delta proposal is produced once
-   * (SL-3.5). Recorded inside the additive version-advance transaction.
+   * Record intent to run a **scoped** analysis for `apiSpecId`, carrying the
+   * {@link DetectionJobScope} descriptor, idempotently under the same partial UNIQUE
+   * index as {@link enqueue}: a redelivered ingest / a re-derivation collapses to one
+   * job, so the scoped proposal is produced once (SL-3.5). Recorded inside the
+   * transaction that caused it — the additive version-advance (SL-3/SL-6) or the
+   * `analysisExclusions` replace (SL-9 re-inclusion).
    */
   enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void>;
 }

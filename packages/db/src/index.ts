@@ -88,6 +88,7 @@ export {
   type DetectionJobScope,
   type DetectionJobStatus,
   type OrderingQueueStatus,
+  type ReInclusionScope,
   type ReReviewResourcePair,
   type ReReviewScope,
   type ReReviewStaleMappingScope,

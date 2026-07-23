@@ -127,6 +127,8 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
   // are analyzed, branching on the scope's `kind`:
   //  - SL-3 `additive-delta` — the prior-proposal source resolves the SL-3.2
   //    "already-shortlisted" pairs from persisted shortlists;
+  //  - SL-9 `re-inclusion` — the SAME scoped runner as SL-3, with the re-included groups
+  //    in the SL-3.1 bucket and no superseded lineage (no version advance happened);
   //  - SL-6 `re-review` — the stale-mapping source supplies each stale mapping's approved
   //    content (`priorFeedback`) for its detail-only successor re-analysis.
   const priorProposals = createDbPriorProposalSource(db);
@@ -144,6 +146,26 @@ export function buildDetectionBackground(deps: DetectionBackgroundDeps): Detecti
           scope: {
             newResourceGroups: scope.newResourceGroups,
             changedResources: scope.changedResources,
+          },
+        },
+        { ...runDetectionDeps, priorProposals },
+      );
+      sink.onDetectionRun(result);
+      return;
+    }
+    if (scope.kind === "re-inclusion") {
+      // SL-9 — an exclusion the operator removed puts those resource groups back in scope
+      // for the SAME spec version. That is exactly SL-3.1's "a resource group newly in
+      // scope": one scoped shortlist per counterpart, then detail for what gets
+      // shortlisted. No `supersededSpecId` (nothing was superseded) and no
+      // `changedResources`, so no prior-proposal lookup runs. The result is an ordinary
+      // `pending` MappingProposal reviewed through the Phase-3 flow (SL-9.2).
+      const result = await runScopedAdditiveAnalysis(
+        {
+          newSpecId: job.apiSpecId,
+          scope: {
+            newResourceGroups: scope.reincludedResourceGroups,
+            changedResources: [],
           },
         },
         { ...runDetectionDeps, priorProposals },
