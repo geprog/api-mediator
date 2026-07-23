@@ -88,6 +88,7 @@ export {
   type DetectionJobScope,
   type DetectionJobStatus,
   type OrderingQueueStatus,
+  type ReInclusionScope,
   type ReReviewResourcePair,
   type ReReviewScope,
   type ReReviewStaleMappingScope,
@@ -228,4 +229,5 @@ export {
   type SyncRuleAdvance,
   type SyncRuleConfigPatch,
   type SyncRuleEnableTransition,
+  type UnfinishedDetectionJob,
 } from "./repositories/index.js";

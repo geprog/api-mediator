@@ -1,4 +1,4 @@
-import { and, eq, lt, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, notExists, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import {
@@ -22,7 +22,7 @@ export interface DetectionJob {
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly finishedAt: Date | null;
-  /** `null` for a full detection job (DT-1/DT-2); a scope descriptor for a scoped SL-3 job. */
+  /** `null` for a full detection job (DT-1/DT-2); a scope descriptor for a scoped job (SL-3/SL-6/SL-9). */
   readonly scope: DetectionJobScope | null;
 }
 
@@ -34,9 +34,22 @@ export interface ClaimedDetectionJob {
   readonly attempts: number;
   /**
    * `null` → a **full** detection job (the worker runs `runDetectionForSpec`); a
-   * {@link DetectionJobScope} → a **scoped** SL-3 additive-delta job (the worker
-   * runs the scoped incremental analysis over the descriptor's new elements).
+   * {@link DetectionJobScope} → a **scoped** job (SL-3 additive delta, SL-6 re-review,
+   * SL-9 re-inclusion), whose `kind` selects the scoped analysis the worker runs over
+   * the descriptor's elements.
    */
+  readonly scope: DetectionJobScope | null;
+}
+
+/**
+ * The un-finished (`pending`/`running`) job that blocks a spec's enqueue under the
+ * partial UNIQUE index, read **under a row lock** by {@link
+ * DetectionJobEnqueueOps.lockUnfinishedJob}.
+ */
+export interface UnfinishedDetectionJob {
+  readonly id: string;
+  readonly status: DetectionJobStatus;
+  /** `null` for a full detection job; the frozen descriptor for a scoped one. */
   readonly scope: DetectionJobScope | null;
 }
 
@@ -55,13 +68,35 @@ export interface DetectionJobEnqueueOps {
    */
   enqueue(apiSpecId: string): Promise<void>;
   /**
-   * Record intent to run a **scoped** additive-delta analysis for `apiSpecId`
-   * (SL-3), carrying the {@link DetectionJobScope} descriptor, idempotently under
-   * the same partial UNIQUE index as {@link enqueue}: a redelivered ingest / a
-   * re-derivation collapses to one job, so the delta proposal is produced once
-   * (SL-3.5). Recorded inside the additive version-advance transaction.
+   * Record intent to run a **scoped** analysis for `apiSpecId`, carrying the
+   * {@link DetectionJobScope} descriptor, under the same partial UNIQUE index as
+   * {@link enqueue}. Recorded inside the transaction that caused it — the additive
+   * version-advance (SL-3/SL-6) or the `analysisExclusions` replace (SL-9).
+   *
+   * **Returns whether a row was actually inserted.** A scoped job freezes its payload
+   * in the row, so a collapse against an un-finished job **discards work** rather than
+   * deduplicating it (unlike {@link enqueue}, whose full job re-derives from current
+   * state at run time). Callers that cannot afford a silent loss must inspect this
+   * result and resolve the collapse — see {@link lockUnfinishedJob}.
    */
-  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void>;
+  enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<boolean>;
+  /**
+   * Lock and read the spec's un-finished job — the row a failed
+   * {@link enqueueScoped} collapsed against — so the caller can resolve the collapse
+   * inside the same transaction.
+   *
+   * Locked `FOR UPDATE` **without** `SKIP LOCKED`, which is what makes the resolution
+   * race-free against the worker's claim: whoever takes the row first wins. If the
+   * claim wins, this blocks and then observes `running`; if this wins, the claim's
+   * `SKIP LOCKED` passes the row over until the resolution commits.
+   */
+  lockUnfinishedJob(apiSpecId: string): Promise<UnfinishedDetectionJob | undefined>;
+  /**
+   * Replace a job's frozen `scope` descriptor — the SL-9 merge of newly re-included
+   * resource groups into a still-`pending` re-inclusion job. Only ever called on a row
+   * this transaction already holds a lock on (via {@link lockUnfinishedJob}).
+   */
+  updateScope(id: string, scope: DetectionJobScope): Promise<void>;
 }
 
 /**
@@ -131,15 +166,47 @@ export class DetectionJobRepository implements DetectionJobEnqueueOps, Detection
       .onConflictDoNothing();
   }
 
-  public async enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void> {
-    // Same idempotency as {@link enqueue} — the partial UNIQUE index over
-    // `(api_spec_id) WHERE status in ('pending','running')` collapses a redelivered
-    // ingest / a re-derivation to one job, so the scoped delta proposal is produced
-    // once (SL-3.5). The only difference from a full job is the carried `scope`.
-    await this.db
+  public async enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<boolean> {
+    // The partial UNIQUE index over `(api_spec_id) WHERE status in ('pending','running')`
+    // collapses this against an un-finished job, so a redelivered ingest / re-derivation
+    // produces one job (SL-3.5). `RETURNING` distinguishes "inserted" from "collapsed":
+    // a scoped job's payload is FROZEN in the row, so a collapse silently discards this
+    // descriptor's work — the caller decides whether that is acceptable.
+    const rows = await this.db
       .insert(mappingDetectionJob)
       .values({ apiSpecId, status: "pending", scope })
-      .onConflictDoNothing();
+      .onConflictDoNothing()
+      .returning({ id: mappingDetectionJob.id });
+    return rows.length > 0;
+  }
+
+  public async lockUnfinishedJob(apiSpecId: string): Promise<UnfinishedDetectionJob | undefined> {
+    // FOR UPDATE **without** SKIP LOCKED: the worker's claim uses SKIP LOCKED, so
+    // exactly one of {this resolution, that claim} proceeds at a time and the loser
+    // re-reads the settled status.
+    const [row] = await this.db
+      .select({
+        id: mappingDetectionJob.id,
+        status: mappingDetectionJob.status,
+        scope: mappingDetectionJob.scope,
+      })
+      .from(mappingDetectionJob)
+      .where(
+        and(
+          eq(mappingDetectionJob.apiSpecId, apiSpecId),
+          inArray(mappingDetectionJob.status, ["pending", "running"]),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (row === undefined) {
+      return undefined;
+    }
+    return { id: row.id, status: row.status, scope: row.scope ?? null };
+  }
+
+  public async updateScope(id: string, scope: DetectionJobScope): Promise<void> {
+    await this.db.update(mappingDetectionJob).set({ scope }).where(eq(mappingDetectionJob.id, id));
   }
 
   public async reclaimStale(olderThan: Date): Promise<number> {

@@ -18,8 +18,10 @@ import {
   vikunjaSpec,
 } from "./fixtures.js";
 import {
+  type PriorProposalSource,
   type ProposalStore,
   runDetectionForSpec,
+  runScopedAdditiveAnalysis,
   runScopedReReviewAnalysis,
   type SpecSource,
   type StaleMappingSource,
@@ -259,5 +261,59 @@ describe("runScopedReReviewAnalysis — the worker-side scoped re-review runner 
         },
       ),
     ).rejects.toThrow(/no ApiSpec with id missing/);
+  });
+});
+
+/**
+ * **SL-9 — the re-inclusion path through the shared scoped runner.** A re-inclusion has
+ * no superseded lineage (no version advance happened) and no `changedResources`, so it
+ * passes no `supersededSpecId` at all. The prior-proposal lookup that SL-3.2 needs must
+ * therefore be skipped **entirely**, not merely have its result discarded — otherwise
+ * every SL-9 job would hit the DB for a lineage that does not exist.
+ *
+ * The `PriorProposalSource` here rejects on any call, so reinstating an unconditional
+ * `listForSpecPair` fails this test instead of silently breaking every re-inclusion at
+ * runtime (integration specs do not run under `pnpm verify`).
+ */
+describe("runScopedAdditiveAnalysis — re-inclusion: no supersededSpecId (SL-9)", () => {
+  const forbiddenPriorProposals: PriorProposalSource = {
+    listForSpecPair: () =>
+      Promise.reject(new Error("a re-inclusion must not read prior proposals: no prior lineage")),
+  };
+
+  it("analyzes the re-included group without ever reading prior proposals", async () => {
+    const provider = new FakeProvider({
+      shortlist: { "issues=>tasks": [giteaVikunjaShortlist] },
+      detail: {
+        "issues=>tasks@peer-peer": [issuesToTasksPeerPeer],
+        "tasks=>issues@peer-peer": [tasksToIssuesPeerPeer],
+      },
+    });
+    const specSource = new InMemorySpecSource([giteaSpec, vikunjaSpec]);
+    const proposalStore = new InMemoryProposalStore();
+
+    const result = await runScopedAdditiveAnalysis(
+      {
+        newSpecId: giteaSpec.id,
+        // No `supersededSpecId` — exactly what the SL-9 worker branch passes.
+        scope: { newResourceGroups: ["issues"], changedResources: [] },
+      },
+      {
+        ...detectionDeps(provider),
+        specSource,
+        proposalStore,
+        priorProposals: forbiddenPriorProposals,
+      },
+    );
+
+    // Peer-peer → both directional proposals, persisted, ordinary and pending.
+    expect(result.analyses).toHaveLength(2);
+    expect(proposalStore.rows).toHaveLength(2);
+    for (const { proposal } of proposalStore.rows) {
+      expect(proposal.status).toBe("pending");
+      expect(proposal.shortlistResult?.candidatePairs).toEqual([
+        { ...giteaVikunjaShortlist.candidatePairs[0], analysisFailed: false },
+      ]);
+    }
   });
 });

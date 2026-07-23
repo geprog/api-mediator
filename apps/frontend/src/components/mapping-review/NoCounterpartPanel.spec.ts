@@ -102,4 +102,31 @@ describe("NoCounterpartPanel (RU-3)", () => {
     // Exclusions still render (they are not part of the shortlist).
     expect(wrapper.find('[data-testid="excluded-audit"]').exists()).toBe(true);
   });
+
+  /**
+   * SL-9.4 — an excluded resource is listed **as excluded**, in its own group, and
+   * carries no "analyze anyway" action even for an operator: re-inclusion (removing it
+   * from `analysisExclusions`) is the only way to analyze it, so the operator's declared
+   * scope stays the single source of truth rather than being overridable from the review
+   * screen.
+   */
+  it("offers an operator no way to analyze an excluded resource (SL-9.4)", () => {
+    const wrapper = mountPanel(false);
+
+    // The excluded resource lives in the excluded group, tagged `excluded` — NOT in the
+    // no-counterpart group, so it never reads as "the shortlist found nothing".
+    const excludedGroup = wrapper.get('[data-testid="excluded-group"]');
+    expect(excludedGroup.find('[data-testid="excluded-audit"]').exists()).toBe(true);
+    expect(excludedGroup.text()).toContain("excluded");
+    expect(wrapper.get('[data-testid="no-counterpart-group"]').text()).not.toContain("audit");
+
+    // No escape hatch of any kind for it: no analyze button, no counterpart input.
+    expect(wrapper.find('[data-testid="no-counterpart-analyze-audit"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="no-counterpart-input-audit"]').exists()).toBe(false);
+    expect(excludedGroup.findAll("button")).toHaveLength(0);
+    expect(excludedGroup.findAll("input")).toHaveLength(0);
+
+    // ...and the panel says why re-inclusion is the only path.
+    expect(excludedGroup.text()).toContain("analyze anyway");
+  });
 });

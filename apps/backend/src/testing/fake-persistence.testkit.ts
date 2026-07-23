@@ -8,6 +8,7 @@ import type {
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
   SourceScopeRefPatch,
+  UnfinishedDetectionJob,
 } from "@mediator/db";
 import type {
   AdapterBinding,
@@ -113,6 +114,21 @@ export class InMemoryStore {
     readonly apiSpecId: string;
     readonly scope: DetectionJobScope;
   }[] = [];
+  /**
+   * SL-9 — the un-finished (`pending`/`running`) `mapping_detection_job` blocking this
+   * spec's enqueue, mirroring the real partial UNIQUE index over
+   * `(api_spec_id) WHERE status in ('pending','running')`. Seed it to exercise the
+   * collapse-resolution branches (merge / fold / 409); left `undefined`, a scoped
+   * enqueue simply inserts, as it does against an empty table.
+   */
+  public unfinishedDetectionJob:
+    | {
+        readonly apiSpecId: string;
+        readonly id: string;
+        status: "pending" | "running";
+        scope: DetectionJobScope | null;
+      }
+    | undefined = undefined;
   /** SL-4 — a mapping's approved `FieldMapping`/`OperationMapping` children, read by the breaking reaction to match referenced elements against the diff. */
   public readonly fieldMappings: FieldMapping[] = [];
   public readonly operationMappings: OperationMapping[] = [];
@@ -541,15 +557,41 @@ class FakeAuditRepo implements AuditTxRepo {
 }
 
 /**
- * Mirrors {@link DetectionJobRepository.enqueueScoped} at the port level: records the
- * scoped-analysis intent so a test can assert the SL-3 trigger fired in-tx. The
- * real repo is idempotent under the partial-unique index; the fake records each
- * call (idempotency is proven against the real repo in the integration test).
+ * Mirrors {@link DetectionJobRepository}'s enqueue/collapse-resolution semantics at the
+ * port level, so the SL-9 branches a test drives here match the real repository
+ * ([[fakes-must-mirror-real-repos]]):
+ *
+ * - `enqueueScoped` inserts and returns `true` **only** when no un-finished job blocks
+ *   the spec — mirroring `ON CONFLICT DO NOTHING … RETURNING` against the partial UNIQUE
+ *   index — and returns `false` (recording nothing) when one does;
+ * - `lockUnfinishedJob` returns that blocking job (the real one additionally takes a
+ *   `FOR UPDATE` row lock, which has no in-memory analogue);
+ * - `updateScope` rewrites the blocking job's frozen descriptor in place.
  */
 class FakeDetectionJobRepo implements DetectionJobTxRepo {
   public constructor(private readonly store: InMemoryStore) {}
-  public enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<void> {
+
+  public enqueueScoped(apiSpecId: string, scope: DetectionJobScope): Promise<boolean> {
+    if (this.store.unfinishedDetectionJob?.apiSpecId === apiSpecId) {
+      return Promise.resolve(false);
+    }
     this.store.scopedDetectionJobs.push({ apiSpecId, scope });
+    return Promise.resolve(true);
+  }
+
+  public lockUnfinishedJob(apiSpecId: string): Promise<UnfinishedDetectionJob | undefined> {
+    const blocking = this.store.unfinishedDetectionJob;
+    if (blocking === undefined || blocking.apiSpecId !== apiSpecId) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve({ id: blocking.id, status: blocking.status, scope: blocking.scope });
+  }
+
+  public updateScope(id: string, scope: DetectionJobScope): Promise<void> {
+    const blocking = this.store.unfinishedDetectionJob;
+    if (blocking !== undefined && blocking.id === id) {
+      blocking.scope = scope;
+    }
     return Promise.resolve();
   }
 }
@@ -572,6 +614,12 @@ export class FakeUnitOfWork implements UnitOfWork {
       approvedMappings: new Map(this.store.approvedMappings),
       auditLog: [...this.store.auditLog],
       scopedDetectionJobs: [...this.store.scopedDetectionJobs],
+      // SL-9 — copied by value: a resolved collapse mutates this row's `scope` in place,
+      // and a rolled-back transaction must un-mutate it.
+      unfinishedDetectionJob:
+        this.store.unfinishedDetectionJob === undefined
+          ? undefined
+          : { ...this.store.unfinishedDetectionJob },
       fieldMappings: [...this.store.fieldMappings],
       operationMappings: [...this.store.operationMappings],
       adapterBindings: [...this.store.adapterBindings],
@@ -619,6 +667,7 @@ export class FakeUnitOfWork implements UnitOfWork {
     approvedMappings: Map<string, ApprovedMapping>;
     auditLog: AuditLogEntry[];
     scopedDetectionJobs: { readonly apiSpecId: string; readonly scope: DetectionJobScope }[];
+    unfinishedDetectionJob: InMemoryStore["unfinishedDetectionJob"];
     fieldMappings: FieldMapping[];
     operationMappings: OperationMapping[];
     adapterBindings: AdapterBinding[];
@@ -637,6 +686,7 @@ export class FakeUnitOfWork implements UnitOfWork {
     replaceMap(this.store.approvedMappings, snapshot.approvedMappings);
     replaceArray(this.store.auditLog, snapshot.auditLog);
     replaceArray(this.store.scopedDetectionJobs, snapshot.scopedDetectionJobs);
+    this.store.unfinishedDetectionJob = snapshot.unfinishedDetectionJob;
     replaceArray(this.store.fieldMappings, snapshot.fieldMappings);
     replaceArray(this.store.operationMappings, snapshot.operationMappings);
     replaceArray(this.store.adapterBindings, snapshot.adapterBindings);

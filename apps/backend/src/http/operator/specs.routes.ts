@@ -15,7 +15,7 @@ import { buildIr, IrError } from "@mediator/ir";
 import type { FastifyInstance } from "fastify";
 
 import { BadRequestError, NotFoundError } from "../../app-errors.js";
-import { requireOperator, requireViewer } from "../auth/index.js";
+import { getPrincipal, requireOperator, requireViewer } from "../auth/index.js";
 import {
   toApiSpecMetadataDto,
   toResourceBindingDto,
@@ -30,7 +30,9 @@ import { idParamSchema, type OperatorApiDeps } from "./deps.js";
  * - `GET /api/specs/:id/resource-bindings` — the spec's bindings, each ref's
  *   value + confirmed/unconfirmed/not-applicable state (RB-3); `viewer`.
  * - `PATCH /api/specs/:id/analysis-exclusions` — replace the exclusion list
- *   (SI-4); mutation, `operator` only (OA-2 crit 6).
+ *   (SI-4); mutation, `operator` only (OA-2 crit 6). Removing an exclusion
+ *   additionally triggers the SL-9 scoped re-inclusion analysis, attributed to the
+ *   authenticated operator.
  * - `POST /api/specs/preview` — **stateless** preview-parse (AR-3/SI-4): parse a
  *   document to IR + resource groups, creating no `RegisteredApp`/`ApiSpec`. It
  *   mutates no landscape state, so it is `viewer`-readable (not an OA-2 mutation).
@@ -95,7 +97,8 @@ export function registerSpecRoutes(app: FastifyInstance, deps: OperatorApiDeps):
         request.body,
         "analysis-exclusions request",
       );
-      const updated = await deps.exclusionsReplacer.replace(id, body.analysisExclusions);
+      const actor = getPrincipal(request).identity;
+      const updated = await deps.exclusionsReplacer.replace(id, body.analysisExclusions, actor);
       return updateAnalysisExclusionsResponseSchema.parse(toApiSpecMetadataDto(updated));
     },
   );

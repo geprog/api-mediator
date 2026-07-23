@@ -11,6 +11,7 @@ export {
   type DetectionJob,
   type DetectionJobEnqueueOps,
   type DetectionJobWorkerOps,
+  type UnfinishedDetectionJob,
 } from "./detection-job.js";
 export {
   OrderingQueueRepository,
