@@ -1,5 +1,5 @@
 import type { ApprovedMapping } from "@mediator/domain";
-import { and, desc, eq, or } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapApprovedMappingRow, toApprovedMappingInsert } from "../mappers/approved-mapping.js";
@@ -281,5 +281,52 @@ export class ApprovedMappingRepository {
       .update(approvedMapping)
       .set({ counterpartMappingId })
       .where(eq(approvedMapping.id, id));
+  }
+
+  /**
+   * **AL-2.4 — archive a mapping whose app is being deregistered.** Sets **only**
+   * `status = 'archived'`: "`ApprovedMapping`s involving the app are archived … retained
+   * for audit, never executed again" (`docs/architecture/extensibility.md` *App
+   * lifecycle*). The pinned spec ids, the counterpart/predecessor links, and the approved
+   * children are untouched — an archived mapping stays fully readable as history.
+   *
+   * Reached from **any** status (`active`/`suspended`/`stale`/`superseded`), so — unlike
+   * the SL-10 transitions — there is no compare-and-set guard: the app is gone whatever
+   * the mapping was doing. Leaving `active` frees the
+   * `approved_mapping_active_direction_uq` slot for the directional spec pair, which is
+   * correct: no live mapping remains over a deregistered app's specs. Idempotent
+   * (re-archiving an archived row rewrites the same value). Returns the updated mapping,
+   * or `undefined` when no row with `id` exists.
+   */
+  public async markArchived(id: string): Promise<ApprovedMapping | undefined> {
+    const [row] = await this.db
+      .update(approvedMapping)
+      .set({ status: "archived" })
+      .where(eq(approvedMapping.id, id))
+      .returning();
+    return row === undefined ? undefined : mapApprovedMappingRow(row);
+  }
+
+  /**
+   * **AL-2.4 — clear every `counterpartMappingId` *pointing at* an archived mapping.**
+   * The reverse-direction link is only meaningful between two live mappings, so once the
+   * deregister cascade archives one side, "`counterpartMappingId` links pointing at
+   * archived rows are cleared" (`docs/architecture/extensibility.md` *App lifecycle*) —
+   * the archived row itself keeps its own column, since it is history.
+   *
+   * Keyed by the **pointed-at** ids (never by app), so a survivor on the other side of a
+   * bidirectional peer pair is found whatever app it belongs to. Returns the ids of the
+   * rows actually cleared; an empty input clears nothing.
+   */
+  public async clearCounterpartsPointingAt(mappingIds: readonly string[]): Promise<string[]> {
+    if (mappingIds.length === 0) {
+      return [];
+    }
+    const cleared = await this.db
+      .update(approvedMapping)
+      .set({ counterpartMappingId: null })
+      .where(inArray(approvedMapping.counterpartMappingId, [...mappingIds]))
+      .returning({ id: approvedMapping.id });
+    return cleared.map((row) => row.id);
   }
 }

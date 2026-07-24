@@ -259,6 +259,11 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
         listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
         listAdapterBindingsByBackendApp: (): Promise<never[]> => Promise.resolve([]),
+        // AL-2 deregister-cascade ports — unused here; every call rejects loudly.
+        deleteAdapterEndpointsByConsumerApp: () => Promise.reject(new Error("unused")),
+        deleteAdapterBindingsByBackendApp: () => Promise.reject(new Error("unused")),
+        listAdapterBindingsByEndpoint: () => Promise.reject(new Error("unused")),
+        markAdapterEndpointCompositionRequired: () => Promise.reject(new Error("unused")),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
@@ -267,12 +272,26 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
       // SL-5 operational-ref re-validation ports — this SL-3 additive spec never reaches the
       // breaking branch, so `scopeLifecycle` is never invoked (a rejecting guard proves it).
-      syncRules: { clearPollOperationRef: (): Promise<void> => Promise.resolve() },
-      scopeCorrespondences: { listByResourceSide: (): Promise<never[]> => Promise.resolve([]) },
+      syncRules: {
+        clearPollOperationRef: (): Promise<void> => Promise.resolve(),
+        deleteByApp: () => Promise.reject(new Error("unused")),
+      },
+      scopeCorrespondences: {
+        listByResourceSide: (): Promise<never[]> => Promise.resolve([]),
+        listByApp: () => Promise.reject(new Error("unused")),
+      },
       scopeLifecycle: {
         revalidateSpecBindings: () => Promise.reject(new Error("unused on the additive path")),
         revalidateCorrespondence: () => Promise.reject(new Error("unused on the additive path")),
       },
+      // AL-2 deregister-cascade ports — unused here; every call rejects loudly.
+      syncStateArchival: {
+        listRecordLinkIdsByApp: () => Promise.reject(new Error("unused")),
+        archiveRecordLinksByApp: () => Promise.reject(new Error("unused")),
+        archiveSyncFieldStatesByRecordLinks: () => Promise.reject(new Error("unused")),
+        archiveScopeLinksByCorrespondence: () => Promise.reject(new Error("unused")),
+      },
+      credentials: { deleteByAppId: () => Promise.reject(new Error("unused")) },
       emit: () => Promise.reject(new Error("advance must not emit")),
     };
   }

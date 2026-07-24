@@ -4,6 +4,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  CredentialRepository,
   DetectionJobRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
@@ -49,6 +50,7 @@ import { ConflictError } from "./app-errors.js";
 import { validateBindingHealth } from "./http/adapter-runtime/serve/planner.js";
 import { ApprovedMappingSuspensionService } from "./modules/approved-mapping-suspension.js";
 import { GraphProjection } from "./modules/graph/index.js";
+import { dbSyncStateArchival } from "./modules/persistence.js";
 import type { CredentialTxStore, TxStores } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
 import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
@@ -345,6 +347,10 @@ suite("SL-10 manual suspend / resume of an ApprovedMapping (requires Postgres)",
         scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
         scopeLinks: new ScopeLinkRepository(handle),
       }),
+      // AL-2 — the deregister cascade's seams; unused by this suite, wired so
+      // the hand-built `TxStores` stays complete.
+      syncStateArchival: dbSyncStateArchival(handle),
+      credentials: new CredentialRepository(handle),
       emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
     };
   }

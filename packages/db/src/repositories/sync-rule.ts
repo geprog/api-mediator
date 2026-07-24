@@ -9,7 +9,7 @@ import type {
   SyncRuleStatus,
   TargetDriftCheck,
 } from "@mediator/domain";
-import { eq } from "drizzle-orm";
+import { eq, inArray, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import type { DbHandle } from "../client.js";
@@ -378,5 +378,30 @@ export class SyncRuleRepository {
       return;
     }
     await this.db.update(syncRule).set(set).where(eq(syncRule.id, id));
+  }
+
+  /**
+   * **AL-2.2 — delete every `SyncRule` of an app being deregistered.** A rule carries
+   * no app column of its own; it belongs to an app through its `ApprovedMapping`, so
+   * the set is "every rule whose mapping names `appId` on **either** side" — the app
+   * is equally gone as a poll source and as a write target.
+   *
+   * A hard **delete**, not a status flip: "its `SyncRule`s and `AdapterBinding`s are
+   * deleted" (`docs/architecture/extensibility.md` *App lifecycle*, deregister
+   * cascade). Its owned `poll_snapshot` / `poll_scope_state` rows follow through their
+   * `ON DELETE CASCADE`. The mapping rows themselves are **archived, never deleted**
+   * (AL-2.4), so this cannot ride on the mapping's own cascade and is issued
+   * explicitly. Returns the deleted rule ids (the cascade summary counts them).
+   */
+  public async deleteByApp(appId: string): Promise<string[]> {
+    const appMappings = this.db
+      .select({ id: approvedMapping.id })
+      .from(approvedMapping)
+      .where(or(eq(approvedMapping.sourceAppId, appId), eq(approvedMapping.targetAppId, appId)));
+    const deleted = await this.db
+      .delete(syncRule)
+      .where(inArray(syncRule.approvedMappingId, appMappings))
+      .returning({ id: syncRule.id });
+    return deleted.map((row) => row.id);
   }
 }

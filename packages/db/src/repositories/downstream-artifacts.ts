@@ -462,6 +462,45 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
   }
 
   /**
+   * **AL-2.3 — tear down a deregistered consumer app's whole adapter surface.** Deletes
+   * every `AdapterEndpoint` the app registered as a `CONSUMER`; its `AdapterBinding`s and
+   * `AdapterWriteOutcome` rows follow through their `ON DELETE CASCADE`. Afterwards
+   * callers of that surface hit **nothing** — not `not-yet-mapped`: with no endpoint row
+   * *and* no mounted (archived) consumer spec, the operation is not routed at all
+   * (`docs/architecture/extensibility.md` *App lifecycle*; RT-4.3).
+   *
+   * Returns the deleted endpoint ids so the caller can drop their cached entries after
+   * commit (XI-2 / CH-5.3). Deliberately unfiltered by status: a `disabled` or
+   * `composition-required` endpoint of a departing app goes with it too.
+   */
+  public async deleteAdapterEndpointsByConsumerApp(consumerAppId: string): Promise<string[]> {
+    const deleted = await this.db
+      .delete(adapterEndpoint)
+      .where(eq(adapterEndpoint.consumerAppId, consumerAppId))
+      .returning({ id: adapterEndpoint.id });
+    return deleted.map((row) => row.id);
+  }
+
+  /**
+   * **AL-2.2 — delete every `AdapterBinding` a deregistered app *backs*.** The mirror of
+   * {@link listAdapterBindingsByBackendApp}: the departing app can no longer serve any
+   * consumer operation, so its bindings are deleted rather than left failing
+   * `backend-disabled` (that is AL-1's reversible condition, not this destructive one).
+   *
+   * Returns the **distinct** `adapterEndpointId`s the deleted bindings hung off — other
+   * consumers' endpoints, which the caller then re-inspects: one left with **no**
+   * bindings reverts to serving `not-yet-mapped` (RT-3.1). Their cached entries are
+   * dropped after commit (XI-2).
+   */
+  public async deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<string[]> {
+    const deleted = await this.db
+      .delete(adapterBinding)
+      .where(eq(adapterBinding.backendAppId, backendAppId))
+      .returning({ adapterEndpointId: adapterBinding.adapterEndpointId });
+    return [...new Set(deleted.map((row) => row.adapterEndpointId))];
+  }
+
+  /**
    * **Successor adoption re-point (Phase-5 CO-7.1/7.2).** Point every `AdapterBinding`
    * currently on the `superseded` mapping at its `successor`, changing **only**
    * `approvedMappingId` — the binding's composed serving state (`role`,
