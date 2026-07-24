@@ -9,9 +9,10 @@ import type {
   ScopeLink,
   SyncFieldState,
 } from "@mediator/domain";
+import { resolveRequest } from "@mediator/adapter-engine";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { BadRequestError, NotFoundError } from "../app-errors.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../app-errors.js";
 import { FakeUnitOfWork, InMemoryStore } from "../testing/fake-persistence.testkit.js";
 import { APP_LIFECYCLE_AUDIT_PREFIX, AppLifecycleService } from "./app-lifecycle.js";
 
@@ -360,7 +361,7 @@ describe("AppLifecycleService.deregister (AL-2)", () => {
 
       const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
 
-      expect(summary.adapterEndpointsRevertedToNotYetMapped).toBe(1);
+      expect(summary.adapterEndpointsLeftWithoutBindings).toBe(1);
       // `ep-solo` lost its only binding → composition-required, and with no active
       // binding the RT-3 rule answers `not-yet-mapped` (the endpoint row still exists).
       expect(store.adapterEndpoints.get("ep-solo")?.status).toBe("composition-required");
@@ -368,7 +369,7 @@ describe("AppLifecycleService.deregister (AL-2)", () => {
       expect(store.adapterEndpoints.get("ep-shared")?.status).toBe("active");
     });
 
-    it("leaves a DISABLED binding-less endpoint disabled (the revert is the guarded CO-1.3 move)", async () => {
+    it("leaves a DISABLED binding-less endpoint disabled — it answers endpoint-disabled, not not-yet-mapped", async () => {
       seedApp(APP, APP_NAME);
       seedApp(CONSUMER, "Portal");
       seedEndpoint("ep-off", CONSUMER, "disabled");
@@ -376,10 +377,142 @@ describe("AppLifecycleService.deregister (AL-2)", () => {
 
       const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
 
-      expect(summary.adapterEndpointsRevertedToNotYetMapped).toBe(1);
-      // An operator's deliberate `disabled` is NOT overwritten: it stays distinguishable
-      // from `not-yet-mapped` (RT-3.2 vs RT-3.1).
+      // The count is "lost its last backend", NOT "now answers not-yet-mapped": an
+      // operator's deliberate `disabled` is not overwritten by the guarded CO-1.3 move,
+      // and `resolveRequest` checks `endpoint-disabled` FIRST (RT-3.2 before RT-3.1), so
+      // this endpoint keeps answering `endpoint-disabled`. Naming the count after the
+      // cascade effect rather than the answer keeps the audit row honest.
+      expect(summary.adapterEndpointsLeftWithoutBindings).toBe(1);
       expect(store.adapterEndpoints.get("ep-off")?.status).toBe("disabled");
+      expect(
+        resolveRequest({ endpoint: store.adapterEndpoints.get("ep-off"), bindings: [] }),
+      ).toEqual({ kind: "endpoint-disabled", endpointId: "ep-off" });
+    });
+
+    it("an ACTIVE binding-less endpoint really does answer not-yet-mapped afterwards", async () => {
+      seedLandscape();
+
+      await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(
+        resolveRequest({ endpoint: store.adapterEndpoints.get("ep-solo"), bindings: [] }),
+      ).toEqual({ kind: "not-yet-mapped", endpointId: "ep-solo" });
+    });
+  });
+
+  // ── AL-2.2 — the cross-backend chain (AD-6.3's self-FK has no delete action) ──
+
+  describe("a cross-backend fanout-merge chain (AD-6.3)", () => {
+    /**
+     * The shape that made the app **undeletable** before the fix: endpoint `E` under
+     * `fanout-merge` with `B1` backed by the departing app and a SURVIVING `B2` backed by
+     * another app that `dependsOnBindingId = B1` and reads `B1`'s response through
+     * `chainInputs`. Chaining is same-endpoint but **not** same-backend, so a bare
+     * `DELETE … WHERE backend_app_id = $1` aborts on
+     * `adapter_binding_depends_on_same_endpoint_fk`.
+     */
+    function seedChain(): void {
+      seedApp(APP, APP_NAME);
+      seedApp(CONSUMER, "Portal");
+      seedApp(OTHER, "Bystander");
+      seedEndpoint("ep-chained", CONSUMER);
+      seedBinding("b-upstream", APP, "ep-chained");
+      const downstream: AdapterBinding = {
+        id: "b-downstream",
+        adapterEndpointId: "ep-chained",
+        backendAppId: OTHER,
+        backendOperationId: "issues/getIssue",
+        approvedMappingId: "cp-1",
+        role: "supplement",
+        status: "active",
+        executionOrder: 1,
+        dependsOnBindingId: "b-upstream",
+        chainInputs: [{ upstreamFieldPath: "id", targetParamRef: "issues/getIssue#issueId" }],
+      };
+      store.adapterBindings.push(downstream);
+    }
+
+    it("deregisters successfully instead of aborting on the self-FK", async () => {
+      seedChain();
+
+      const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(summary.adapterBindingsDeleted).toBe(1);
+      expect(store.adapterBindings.map((binding) => binding.id)).toEqual(["b-downstream"]);
+    });
+
+    it("unchains the SURVIVOR: dependsOnBindingId and chainInputs are cleared together", async () => {
+      seedChain();
+
+      const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(summary.adapterBindingsUnchained).toBe(1);
+      const survivor = store.adapterBindings[0];
+      // Both cleared, and cleared to an ABSENT key (how the mapper reads the NULL
+      // columns) — a survivor keeping `chainInputs` would read a response that no
+      // longer has a producer.
+      expect(survivor?.dependsOnBindingId).toBeUndefined();
+      expect(survivor?.chainInputs).toBeUndefined();
+      // Everything else about the survivor is untouched — it still serves.
+      expect(survivor).toMatchObject({ id: "b-downstream", status: "active", role: "supplement" });
+    });
+
+    it("flags the survivor's endpoint composition-required — it must not serve a broken chain", async () => {
+      seedChain();
+
+      await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(store.adapterEndpoints.get("ep-chained")?.status).toBe("composition-required");
+    });
+
+    it("counts nothing unchained when the departing app backs BOTH ends of the chain", async () => {
+      seedChain();
+      // Re-back the downstream with the departing app: both rows go in one statement, so
+      // there is no survivor to detach and nothing to report as a broken composition.
+      const downstream = store.adapterBindings.find((binding) => binding.id === "b-downstream");
+      if (downstream === undefined) throw new Error("expected the downstream binding");
+      store.adapterBindings[store.adapterBindings.indexOf(downstream)] = {
+        ...downstream,
+        backendAppId: APP,
+      };
+
+      const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(summary.adapterBindingsDeleted).toBe(2);
+      expect(summary.adapterBindingsUnchained).toBe(0);
+      expect(store.adapterBindings).toHaveLength(0);
+      // The endpoint lost every binding, so it reverts rather than being flagged twice.
+      expect(summary.adapterEndpointsLeftWithoutBindings).toBe(1);
+      expect(store.adapterEndpoints.get("ep-chained")?.status).toBe("composition-required");
+    });
+
+    it("leaves NO surviving binding pointing at a deleted one — the invariant the self-FK enforces", async () => {
+      seedChain();
+      // A second chain, so the sweep is exercised over more than one survivor.
+      store.adapterBindings.push({
+        id: "b-downstream-2",
+        adapterEndpointId: "ep-chained",
+        backendAppId: OTHER,
+        backendOperationId: "issues/listIssues",
+        approvedMappingId: "cp-1",
+        role: "supplement",
+        status: "active",
+        executionOrder: 1,
+        dependsOnBindingId: "b-upstream",
+        chainInputs: [{ upstreamFieldPath: "id", targetParamRef: "issues/getIssue#issueId" }],
+      });
+
+      const { summary } = await service.deregister(APP, OPERATOR, APP_NAME);
+
+      expect(summary.adapterBindingsUnchained).toBe(2);
+      const surviving = new Set(store.adapterBindings.map((binding) => binding.id));
+      for (const binding of store.adapterBindings) {
+        // The FK's invariant, checked directly: every chain reference still resolves.
+        if (binding.dependsOnBindingId !== undefined) {
+          expect(surviving.has(binding.dependsOnBindingId)).toBe(true);
+        }
+      }
+      expect(store.adapterBindings.every((b) => b.dependsOnBindingId === undefined)).toBe(true);
     });
   });
 
@@ -641,6 +774,42 @@ describe("AppLifecycleService.deregister (AL-2)", () => {
 
       expect(result.app.status).toBe("disabled");
       expect(result.summary.credentialsDeleted).toBe(1);
+    });
+
+    it("AL-3: cannot be re-enabled afterwards — a departed app is not a disabled one", async () => {
+      seedLandscape();
+
+      await service.deregister(APP, OPERATOR, APP_NAME);
+
+      // The row is `disabled` like an AL-1 disable, but ALL of its specs are archived,
+      // which is what identifies a deregistered app until a durable marker exists.
+      await expect(service.enable(APP, OPERATOR)).rejects.toBeInstanceOf(ConflictError);
+      await expect(service.enable(APP, OPERATOR)).rejects.toThrow(
+        /was deregistered .* cannot be re-enabled/,
+      );
+      expect(store.apps.get(APP)?.status).toBe("disabled");
+      // Nothing of the cascade was undone by the attempt.
+      expect(store.specs.get("spec-gitea")?.status).toBe("archived");
+      expect(store.approvedMappings.get("pp-1")?.status).toBe("archived");
+    });
+
+    it("an ordinary AL-1 disable is still re-enabled — the guard reads specs, not the status", async () => {
+      seedLandscape();
+
+      await service.disable(APP, OPERATOR);
+      const reEnabled = await service.enable(APP, OPERATOR);
+
+      // A disabled app keeps its `active` specs (a disable archives nothing), so the
+      // AL-3 guard does not fire and AL-1.3 is untouched.
+      expect(reEnabled.status).toBe("active");
+    });
+
+    it("an app with NO specs at all is still enableable — that is not the deregistered state", async () => {
+      // "Found no active spec" and "every spec is archived" are different facts; only the
+      // second is a deregistration. A spec-less row must not be trapped `disabled`.
+      seedApp(APP, APP_NAME, "disabled");
+
+      await expect(service.enable(APP, OPERATOR)).resolves.toMatchObject({ status: "active" });
     });
   });
 

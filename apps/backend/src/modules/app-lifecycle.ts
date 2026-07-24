@@ -100,9 +100,33 @@ export class AppLifecycleService {
 
   /**
    * **AL-1.3 — re-enable a `disabled` app.** Throws `NotFoundError` (unknown app) or
-   * `ConflictError` (the app is already `active`). This **lifts the condition and
-   * restores nothing**: rules resume under their stored `status` and poll on from their
-   * stored cursors/snapshots, so no re-backfill is performed and no re-approval needed.
+   * `ConflictError` (the app is already `active`, or it was **deregistered** — see
+   * below). This **lifts the condition and restores nothing**: rules resume under their
+   * stored `status` and poll on from their stored cursors/snapshots, so no re-backfill is
+   * performed and no re-approval needed.
+   *
+   * ## Why a deregistered app cannot be re-enabled (AL-3)
+   *
+   * AL-2 retains the `RegisteredApp` row and leaves it `disabled` (there is no third
+   * status without a migration — see {@link deregister}), which would otherwise make a
+   * departed app indistinguishable from a temporarily-disabled one and let AL-4's UI
+   * offer "enable" on it. Re-enabling resurrects **nothing** (every mapping/spec/link is
+   * archived and nothing un-archives them; `listMountableConsumerApps` reads
+   * `ApiSpecRepository.listActive()`, so the consumer surface stays unmounted), but it is
+   * still a zombie the API should refuse.
+   *
+   * The guard uses the state the cascade already leaves behind rather than a new column:
+   * **an app that has `ApiSpec`s but none of them `active` was deregistered.** AL-2 is
+   * the only path that archives *every* spec of an app — a version advance supersedes the
+   * old version **and** writes a new `active` one (SL-1), and SL-4 staleness moves
+   * mappings, not specs — so an AL-1-disabled app always keeps at least one `active` spec.
+   *
+   * The `specs.length > 0` half matters: "no specs at all" is a *different* state (an app
+   * row that never got one) and must stay enableable, so the predicate says "its lineages
+   * were archived", never merely "I found nothing". When the durable marker lands (the
+   * preferred shape is a nullable `registered_app.deregistered_at`, which composes with
+   * the existing non-`active` gates rather than breaking every `status` comparison), this
+   * switches to reading it.
    */
   public enable(appId: string, actor: string): Promise<RegisteredApp> {
     return this.#transition(appId, actor, "enable");
@@ -235,6 +259,15 @@ export class AppLifecycleService {
       if (existing.status !== expectedFrom) {
         throw new ConflictError(conflictMessage(appId, existing.status, action));
       }
+      // AL-3 — a `disabled` app whose specs exist but NONE is `active` was DEREGISTERED,
+      // not disabled: refuse to bring it back. See `enable`'s note for why this predicate
+      // identifies a departed app exactly, and why the state carries no marker yet.
+      if (action === "enable") {
+        const specs = await tx.apiSpecs.listByAppId(appId);
+        if (specs.length > 0 && !specs.some((spec) => spec.status === "active")) {
+          throw new ConflictError(deregisteredMessage(appId));
+        }
+      }
 
       const updated =
         action === "disable"
@@ -340,8 +373,20 @@ export interface AppDeregistrationSummary {
   readonly adapterEndpointsTornDown: number;
   /** AL-2.2 — bindings deleted on *other* consumers' endpoints (the app backed them). */
   readonly adapterBindingsDeleted: number;
-  /** AL-2.2 — surviving endpoints left with no bindings, now serving `not-yet-mapped`. */
-  readonly adapterEndpointsRevertedToNotYetMapped: number;
+  /**
+   * AL-2.2 — surviving endpoints left with **no** bindings. Each now answers
+   * `not-yet-mapped` (RT-3.1) — except one an operator had already `disabled`, which
+   * keeps answering `endpoint-disabled` (RT-3.2 is checked first, and the cascade
+   * deliberately does not overwrite that deliberate state). So this counts the *cascade
+   * effect* — "lost its last backend" — not a claim about the answer each one gives.
+   */
+  readonly adapterEndpointsLeftWithoutBindings: number;
+  /**
+   * AL-2.2 — **surviving** bindings whose `dependsOnBindingId`/`chainInputs` were cleared
+   * because the deregistered app backed their chain's upstream (a cross-backend
+   * `fanout-merge` chain). Their endpoints are flagged `composition-required`.
+   */
+  readonly adapterBindingsUnchained: number;
   /** AL-2.4 — `ApprovedMapping`s archived (retained for audit, never executed again). */
   readonly approvedMappingsArchived: number;
   /** AL-2.4 — `counterpartMappingId` links **pointing at** those archived rows, cleared. */
@@ -466,20 +511,33 @@ async function runDeregisterCascade(
 
   // ── AL-2.2 — delete the bindings the app BACKS on other consumers' endpoints. ──
   // Read first: the rows give both the count and the endpoints to re-inspect/invalidate.
+  // The delete itself unchains any surviving cross-backend downstream before removing
+  // the rows (AD-6.3's self-FK has no delete action), and reports what it detached.
   const backed = await tx.downstreamArtifacts.listAdapterBindingsByBackendApp(appId);
-  const affectedEndpointIds = await tx.downstreamArtifacts.deleteAdapterBindingsByBackendApp(appId);
-  let reverted = 0;
-  for (const endpointId of affectedEndpointIds) {
+  const deletion = await tx.downstreamArtifacts.deleteAdapterBindingsByBackendApp(appId);
+  let leftWithoutBindings = 0;
+  for (const endpointId of deletion.endpointIds) {
     const remaining = await tx.downstreamArtifacts.listAdapterBindingsByEndpoint(endpointId);
     if (remaining.length > 0) {
       continue;
     }
-    // No bindings at all → RT-3.1 already answers `not-yet-mapped`. Flag it
-    // `composition-required` too (the guarded CO-1.3 transition, a no-op on a `disabled`
-    // or already-flagged endpoint) so the endpoint reads as awaiting a backend and a
-    // later single-binding attach can auto-activate it again (CO-1.2).
+    // No bindings at all → RT-3.1 answers `not-yet-mapped` (unless the endpoint is
+    // `disabled`, which keeps answering `endpoint-disabled` — RT-3.2 is checked first).
+    // Flag it `composition-required` too (the guarded CO-1.3 transition, a no-op on a
+    // `disabled` or already-flagged endpoint) so the endpoint reads as awaiting a backend
+    // and a later single-binding attach can auto-activate it again (CO-1.2).
     await tx.downstreamArtifacts.markAdapterEndpointCompositionRequired(endpointId);
-    reverted += 1;
+    leftWithoutBindings += 1;
+  }
+  // A survivor that lost its upstream keeps serving, but its composition lost a step:
+  // flag its endpoint `composition-required` so the operator re-composes rather than the
+  // endpoint serving a chain wired to a response nobody produces. Disjoint from the loop
+  // above by construction — an endpoint with an unchained survivor still has bindings.
+  const unchainedEndpointIds = [
+    ...new Set(deletion.unchained.map((binding) => binding.adapterEndpointId)),
+  ];
+  for (const endpointId of unchainedEndpointIds) {
+    await tx.downstreamArtifacts.markAdapterEndpointCompositionRequired(endpointId);
   }
 
   // ── AL-2.2 — delete every SyncRule of every mapping naming the app. ──
@@ -531,7 +589,8 @@ async function runDeregisterCascade(
       syncRulesDeleted: deletedRules.length,
       adapterEndpointsTornDown: tornDown.length,
       adapterBindingsDeleted: backed.length,
-      adapterEndpointsRevertedToNotYetMapped: reverted,
+      adapterEndpointsLeftWithoutBindings: leftWithoutBindings,
+      adapterBindingsUnchained: deletion.unchained.length,
       approvedMappingsArchived: archivedMappingIds.length,
       counterpartLinksCleared: clearedCounterparts.length,
       apiSpecsArchived: archivedSpecs,
@@ -575,6 +634,15 @@ function conflictMessage(
   return action === "disable"
     ? `RegisteredApp ${appId} is ${status}; only an active app can be disabled.`
     : `RegisteredApp ${appId} is ${status}; only a disabled app can be re-enabled.`;
+}
+
+/**
+ * AL-3 — the 409 for re-enabling a **deregistered** app. It names the remedy (register
+ * the system afresh), because the whole point of AL-3 is that a returning system becomes
+ * a **new** `RegisteredApp` rather than the old one waking up.
+ */
+function deregisteredMessage(appId: string): string {
+  return `RegisteredApp ${appId} was deregistered (all of its ApiSpecs are archived) and cannot be re-enabled; register the system again as a new app.`;
 }
 
 /** The 409 message when the compare-and-set found the row already moved on. */

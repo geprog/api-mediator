@@ -312,7 +312,9 @@ export class ApprovedMappingRepository {
    * The reverse-direction link is only meaningful between two live mappings, so once the
    * deregister cascade archives one side, "`counterpartMappingId` links pointing at
    * archived rows are cleared" (`docs/architecture/extensibility.md` *App lifecycle*) —
-   * the archived row itself keeps its own column, since it is history.
+   * an archived row is cleared only when something *else* archived its counterpart —
+   * which, for a bidirectional peer pair, means both rows end up cleared, since the
+   * cascade archives both directions and then clears every link pointing at either.
    *
    * Keyed by the **pointed-at** ids (never by app), so a survivor on the other side of a
    * bidirectional peer pair is found whatever app it belongs to. Returns the ids of the

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { RESOURCE_BINDING_REF_KINDS } from "@mediator/contracts";
 import type { CredentialMaterial } from "@mediator/credentials";
 import type {
+  AdapterBindingBackendDeletion,
   CredentialMetadata,
   DetectionJobScope,
   ResourceBindingRefPatch,
@@ -528,6 +529,24 @@ function uniqueViolation(constraint: string): Error & { code: string; constraint
 }
 
 /**
+ * A **pg-shaped** foreign-key violation (SQLSTATE `23503`) — what Postgres raises when a
+ * `DELETE` would leave a row referencing a removed one under a constraint with no delete
+ * action (the AD-6.3 `adapter_binding` self-FK). Same discipline as
+ * {@link uniqueViolation}: a real error shape, never a test-only sentinel.
+ */
+function foreignKeyViolation(
+  constraint: string,
+  table: string,
+): Error & { code: string; constraint: string } {
+  return Object.assign(
+    new Error(
+      `update or delete on table "${table}" violates foreign key constraint "${constraint}" on table "${table}"`,
+    ),
+    { code: "23503", constraint },
+  );
+}
+
+/**
  * Mirrors {@link ApprovedMappingRepository}'s SL-2 methods: the `active` mappings pinned
  * to a spec id (either side), the `suspended` ones the SL-10.5 breaking classification also
  * reads, a spec-ids-only re-pin that leaves every other column byte-identical, and the
@@ -730,17 +749,69 @@ class FakeDownstreamArtifactRepo implements DownstreamArtifactTxRepo {
     this.store.adapterBindings.push(...survivingBindings);
     return Promise.resolve([...doomedIds]);
   }
-  /** AL-2.2 — mirrors the real delete: returns the DISTINCT endpoints left behind. */
-  public deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<string[]> {
+  /**
+   * AL-2.2 — mirrors the real delete **including the composite same-endpoint self-FK**
+   * `adapter_binding_depends_on_same_endpoint_fk`, which has **no delete action**
+   * (AD-6.3): a surviving binding may not be left pointing at a deleted one. The fake
+   * therefore does exactly what the repository does — unchain the surviving downstreams
+   * first, then delete — and then **enforces the constraint**, rejecting with a pg-shaped
+   * `23503` if any survivor still references a removed row. Without that enforcement a
+   * cross-backend `fanout-merge` chain aborts the real cascade while the unit suite stays
+   * green ([[fakes-must-mirror-real-repos]]).
+   *
+   * Clearing writes an **absent** key, not `null`: `mapAdapterBindingRow` collapses the
+   * NULL columns to absent (`row.dependsOnBindingId ?? undefined`), so storing `null`
+   * here would be a shape the database never produces.
+   */
+  public deleteAdapterBindingsByBackendApp(
+    backendAppId: string,
+  ): Promise<AdapterBindingBackendDeletion> {
     const doomed = this.store.adapterBindings.filter(
       (binding) => binding.backendAppId === backendAppId,
     );
-    const surviving = this.store.adapterBindings.filter(
-      (binding) => binding.backendAppId !== backendAppId,
+    if (doomed.length === 0) {
+      return Promise.resolve({ endpointIds: [], unchained: [] });
+    }
+    const doomedIds = new Set(doomed.map((binding) => binding.id));
+
+    const unchained: { id: string; adapterEndpointId: string }[] = [];
+    const surviving = this.store.adapterBindings
+      .filter((binding) => !doomedIds.has(binding.id))
+      .map((binding) => {
+        if (
+          binding.dependsOnBindingId === undefined ||
+          !doomedIds.has(binding.dependsOnBindingId)
+        ) {
+          return binding;
+        }
+        const detached: AdapterBinding = { ...binding };
+        delete detached.dependsOnBindingId;
+        delete detached.chainInputs;
+        unchained.push({ id: binding.id, adapterEndpointId: binding.adapterEndpointId });
+        return detached;
+      });
+
+    // The constraint itself: after the delete, no surviving row may reference a removed
+    // one. Postgres raises this at the end of the DELETE statement. Unreachable while the
+    // detach above is correct — that is the point: it is the regression guard that fires
+    // the moment the detach is weakened, which is exactly the gap that let a green unit
+    // suite ship a cascade the database aborted.
+    const orphan = surviving.find(
+      (binding) =>
+        binding.dependsOnBindingId !== undefined && doomedIds.has(binding.dependsOnBindingId),
     );
+    if (orphan !== undefined) {
+      return Promise.reject(
+        foreignKeyViolation("adapter_binding_depends_on_same_endpoint_fk", "adapter_binding"),
+      );
+    }
+
     this.store.adapterBindings.length = 0;
     this.store.adapterBindings.push(...surviving);
-    return Promise.resolve([...new Set(doomed.map((binding) => binding.adapterEndpointId))]);
+    return Promise.resolve({
+      endpointIds: [...new Set(doomed.map((binding) => binding.adapterEndpointId))],
+      unchained,
+    });
   }
   /** The endpoint's remaining bindings, in any status (RT-3 decides from these). */
   public listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]> {

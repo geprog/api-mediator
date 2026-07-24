@@ -6,7 +6,7 @@ import type {
   GraphEdgeMetadata,
   SyncRule,
 } from "@mediator/domain";
-import { and, eq, exists, notExists, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, notInArray, or, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAdapterBindingRow, toAdapterBindingInsert } from "../mappers/adapter-binding.js";
@@ -36,6 +36,25 @@ import {
  * (`docs/architecture/data-model.md` `GraphEdge`), so no enum is coined here — the
  * projection writes the value it derives from the aggregate's rule/binding health.
  */
+/**
+ * **AL-2.2 — what deleting a backend app's `AdapterBinding`s left behind.** Two disjoint
+ * sets, because the caller reacts to them differently:
+ *
+ * - `endpointIds` — every endpoint a deleted binding hung off. The caller re-inspects
+ *   each: one left with **no** bindings serves `not-yet-mapped` (RT-3.1).
+ * - `unchained` — the **surviving** bindings whose `dependsOnBindingId`/`chainInputs`
+ *   were cleared because their upstream was one of the deleted rows (a cross-backend
+ *   `fanout-merge` chain). Their endpoints still have bindings, so they are never in the
+ *   binding-less set; the caller flags them `composition-required` instead — the chain
+ *   they were composed with is gone and the composition has to be redone.
+ *
+ * Both sets feed the by-endpoint cache drop (XI-2).
+ */
+export interface AdapterBindingBackendDeletion {
+  readonly endpointIds: readonly string[];
+  readonly unchained: readonly { readonly id: string; readonly adapterEndpointId: string }[];
+}
+
 export interface GraphEdgeStatusUpdate {
   readonly sourceNodeId: string;
   readonly targetNodeId: string;
@@ -487,17 +506,65 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
    * consumer operation, so its bindings are deleted rather than left failing
    * `backend-disabled` (that is AL-1's reversible condition, not this destructive one).
    *
+   * ## Why this is two statements, not one `DELETE`
+   *
+   * `adapter_binding_depends_on_same_endpoint_fk` is a composite **self**-foreign key
+   * `(depends_on_binding_id, adapter_endpoint_id) → (id, adapter_endpoint_id)` with **no
+   * delete action** (AD-6.3). Chaining is same-endpoint but **not** same-backend: under
+   * `fanout-merge` a binding may legitimately depend on any active binding of its
+   * endpoint, whatever app backs it (`adapter-composition/validate.ts` imposes no
+   * same-backend restriction). So a bare `DELETE … WHERE backend_app_id = $1` aborts on
+   * the end-of-statement FK check the moment a deleted binding is the **upstream of a
+   * surviving** one — which would make the backing app permanently undeletable.
+   *
+   * The upstream's departure is therefore made explicit first: every **surviving**
+   * binding that depended on a doomed one is **unchained** — `depends_on_binding_id` and
+   * `chain_inputs` cleared together, because `chainInputs` reads the upstream's response
+   * and a survivor keeping them would serve a composition wired to a response nobody
+   * will ever produce. Only then are the rows deleted.
+   *
+   * (The AL-2.3 tear-down needs none of this: `ON DELETE CASCADE` from `adapter_endpoint`
+   * removes a chain's upstream and downstream in one operation, and the FK is
+   * same-endpoint, so no cross-endpoint orphan is representable.)
+   *
    * Returns the **distinct** `adapterEndpointId`s the deleted bindings hung off — other
-   * consumers' endpoints, which the caller then re-inspects: one left with **no**
-   * bindings reverts to serving `not-yet-mapped` (RT-3.1). Their cached entries are
-   * dropped after commit (XI-2).
+   * consumers' endpoints the caller re-inspects (one left with **no** bindings serves
+   * `not-yet-mapped`, RT-3.1) — plus the surviving bindings it unchained, whose endpoints
+   * the caller flags `composition-required`: their composed configuration lost a step and
+   * must be re-composed rather than keep serving. Both sets feed the XI-2 cache drop.
    */
-  public async deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<string[]> {
-    const deleted = await this.db
-      .delete(adapterBinding)
-      .where(eq(adapterBinding.backendAppId, backendAppId))
-      .returning({ adapterEndpointId: adapterBinding.adapterEndpointId });
-    return [...new Set(deleted.map((row) => row.adapterEndpointId))];
+  public async deleteAdapterBindingsByBackendApp(
+    backendAppId: string,
+  ): Promise<AdapterBindingBackendDeletion> {
+    const doomed = await this.db
+      .select({ id: adapterBinding.id, adapterEndpointId: adapterBinding.adapterEndpointId })
+      .from(adapterBinding)
+      .where(eq(adapterBinding.backendAppId, backendAppId));
+    if (doomed.length === 0) {
+      return { endpointIds: [], unchained: [] };
+    }
+
+    const doomedIds = doomed.map((row) => row.id);
+    // Detach the survivors BEFORE the delete (the self-FK has no delete action). A doomed
+    // binding depending on another doomed one is excluded: both go in the same statement,
+    // so there is nothing to preserve and nothing to report as a broken composition.
+    const unchained = await this.db
+      .update(adapterBinding)
+      .set({ dependsOnBindingId: null, chainInputs: null })
+      .where(
+        and(
+          inArray(adapterBinding.dependsOnBindingId, doomedIds),
+          notInArray(adapterBinding.id, doomedIds),
+        ),
+      )
+      .returning({ id: adapterBinding.id, adapterEndpointId: adapterBinding.adapterEndpointId });
+
+    await this.db.delete(adapterBinding).where(eq(adapterBinding.backendAppId, backendAppId));
+
+    return {
+      endpointIds: [...new Set(doomed.map((row) => row.adapterEndpointId))],
+      unchained,
+    };
   }
 
   /**

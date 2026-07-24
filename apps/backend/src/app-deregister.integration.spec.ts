@@ -321,6 +321,18 @@ suite("AL-2 deregister a RegisteredApp and cascade (requires Postgres)", () => {
     return row;
   }
 
+  /**
+   * The `SyncRule`s belonging to an app — the same "rule → its mapping names the app on
+   * either side" join `SyncRuleRepository.deleteByApp` deletes over, as a **read**.
+   */
+  async function rulesOfApp(appId: string): Promise<{ id: string }[]> {
+    return db
+      .select({ id: syncRule.id })
+      .from(syncRule)
+      .innerJoin(approvedMapping, eq(syncRule.approvedMappingId, approvedMapping.id))
+      .where(or(eq(approvedMapping.sourceAppId, appId), eq(approvedMapping.targetAppId, appId)));
+  }
+
   /** The AL-2 audit rows for an app, oldest first. */
   async function auditFor(appId: string): Promise<{ actor: string; details: string | null }[]> {
     const rows = await db
@@ -670,6 +682,7 @@ suite("AL-2 deregister a RegisteredApp and cascade (requires Postgres)", () => {
         bindings: await downstream.listAdapterBindingsByEndpoint(soloEndpoint.id),
       }),
     ).toEqual({ kind: "not-yet-mapped", endpointId: soloEndpoint.id });
+    expect(summary.adapterEndpointsLeftWithoutBindings).toBe(1);
     // ...while the shared endpoint still SERVES (it kept an active binding).
     const sharedRow = await downstream.getAdapterEndpoint(
       consumer.id,
@@ -771,6 +784,108 @@ suite("AL-2 deregister a RegisteredApp and cascade (requires Postgres)", () => {
     expect(deregistration?.details).not.toContain("provider-secret-value");
   });
 
+  it("AL-2.2: a CROSS-BACKEND fanout-merge chain deregisters instead of aborting on the self-FK", async () => {
+    // The shape that made the backing app permanently undeletable: endpoint `E` under
+    // `fanout-merge` with `B1` backed by the departing provider `P` and a SURVIVING `B2`
+    // backed by `Q` that `dependsOnBindingId = B1` and reads B1's response through
+    // `chainInputs`. `adapter_binding_depends_on_same_endpoint_fk` is a composite self-FK
+    // with NO delete action (AD-6.3), and chaining is same-endpoint but NOT same-backend,
+    // so an unqualified `DELETE … WHERE backend_app_id = $1` aborts the whole cascade.
+    const departing = await makeApp(`AL-2 chain provider ${randomUUID()}`);
+    const surviving = await makeApp(`AL-2 chain backend ${randomUUID()}`);
+    const consumer = await makeApp(`AL-2 chain consumer ${randomUUID()}`);
+    const departingSpec = await seedSpec(departing.id);
+    const survivingSpec = await seedSpec(surviving.id);
+    const consumerSpec = await seedSpec(consumer.id, "CONSUMER");
+
+    const upstreamMapping = await seedMapping({
+      id: randomUUID(),
+      sourceSpecId: consumerSpec.id,
+      targetSpecId: departingSpec.id,
+      sourceAppId: consumer.id,
+      targetAppId: departing.id,
+      variant: "consumer-provider",
+      approvedBy: "reviewer:alice",
+      approvedAt: CREATED_AT,
+      status: "active",
+    });
+    const downstreamMapping = await seedMapping({
+      id: randomUUID(),
+      sourceSpecId: consumerSpec.id,
+      targetSpecId: survivingSpec.id,
+      sourceAppId: consumer.id,
+      targetAppId: surviving.id,
+      variant: "consumer-provider",
+      approvedBy: "reviewer:alice",
+      approvedAt: CREATED_AT,
+      status: "active",
+    });
+
+    const endpoint = await seedEndpoint({
+      id: randomUUID(),
+      consumerAppId: consumer.id,
+      consumerOperationId: `con-issues/getChained-${randomUUID()}`,
+      status: "active",
+      aggregationStrategy: "fanout-merge",
+      strictness: "degraded",
+    });
+    const upstreamId = randomUUID();
+    await seedBinding({
+      id: upstreamId,
+      adapterEndpointId: endpoint.id,
+      backendAppId: departing.id,
+      backendOperationId: "issues/getIssue",
+      approvedMappingId: upstreamMapping.id,
+      role: "primary",
+      status: "active",
+      executionOrder: 0,
+    });
+    const downstreamId = randomUUID();
+    await seedBinding({
+      id: downstreamId,
+      adapterEndpointId: endpoint.id,
+      backendAppId: surviving.id,
+      backendOperationId: "issues/getIssue",
+      approvedMappingId: downstreamMapping.id,
+      role: "supplement",
+      status: "active",
+      executionOrder: 1,
+      dependsOnBindingId: upstreamId,
+      chainInputs: [{ upstreamFieldPath: "id", targetParamRef: "issues/getIssue#issueId" }],
+    });
+
+    const artifacts = new DownstreamArtifactRepository(db);
+    // Baseline: the chain really is persisted the way the FK constrains it.
+    const seeded = await artifacts.listAdapterBindingsByEndpoint(endpoint.id);
+    expect(seeded.find((b) => b.id === downstreamId)?.dependsOnBindingId).toBe(upstreamId);
+
+    // The cascade completes rather than raising 23503 and rolling back.
+    const { summary } = await lifecycle.deregister(departing.id, OPERATOR, departing.name);
+
+    expect(summary.adapterBindingsDeleted).toBe(1);
+    expect(summary.adapterBindingsUnchained).toBe(1);
+    // The upstream is gone; the survivor is still there and still serving...
+    const after = await artifacts.listAdapterBindingsByEndpoint(endpoint.id);
+    expect(after.map((binding) => binding.id)).toEqual([downstreamId]);
+    // ...with its chain fields cleared TOGETHER, read back as absent keys: it must not
+    // keep a `chainInputs` reading a response nobody will ever produce.
+    expect(after[0]?.dependsOnBindingId).toBeUndefined();
+    expect(after[0]?.chainInputs).toBeUndefined();
+    expect(after[0]?.status).toBe("active");
+
+    // ...and the endpoint is flagged `composition-required`: its composed configuration
+    // lost a step, so it must be re-composed rather than serve a broken chain.
+    const endpointRow = await artifacts.getAdapterEndpoint(
+      consumer.id,
+      endpoint.consumerOperationId,
+    );
+    expect(endpointRow?.status).toBe("composition-required");
+    // It still has an active binding, so it keeps SERVING (it is not `not-yet-mapped`) —
+    // the flag is the operator's signal, not a runtime block.
+    expect(resolveRequest({ endpoint: endpointRow, bindings: after }).kind).toBe("serve");
+    expect(summary.adapterEndpointsLeftWithoutBindings).toBe(0);
+  });
+
   it("AL-3: re-registering the same system yields a NEW app that sees nothing of the prior one", async () => {
     const NAME = `AL-3 returning system ${randomUUID()}`;
     const BASE_URL = "https://al3-returning.example.test";
@@ -840,7 +955,9 @@ suite("AL-2 deregister a RegisteredApp and cascade (requires Postgres)", () => {
     expect(await specs.listByAppId(second.id)).toHaveLength(0);
     expect(await specs.findActiveByAppAndRole(second.id, "PROVIDER")).toBeUndefined();
     expect(await new ApprovedMappingRepository(db).listByAppId(second.id)).toHaveLength(0);
-    expect(await new SyncRuleRepository(db).deleteByApp(second.id)).toHaveLength(0);
+    // A read, never the destructive `deleteByApp`: the same join that method uses, so the
+    // assertion covers the real "rules of this app" set without mutating anything.
+    expect(await rulesOfApp(second.id)).toHaveLength(0);
     expect(await new RecordLinkRepository(db).listIdsByApp(second.id)).toHaveLength(0);
     expect(await new CredentialRepository(db).listByAppId(second.id)).toHaveLength(0);
 

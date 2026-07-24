@@ -185,6 +185,7 @@ export {
   ScopeLinkRepository,
   SyncFieldStateRepository,
   SyncRuleRepository,
+  type AdapterBindingBackendDeletion,
   type AdapterEdgeMemberFact,
   type AdapterWriteOutcomeOps,
   type ApplyCompositionInput,

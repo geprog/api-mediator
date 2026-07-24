@@ -1,6 +1,7 @@
 import type { CredentialMaterial } from "@mediator/credentials";
 import { CredentialStore, DbCredentialPersistence } from "@mediator/credentials";
 import type {
+  AdapterBindingBackendDeletion,
   CredentialMetadata,
   Database,
   DbHandle,
@@ -239,10 +240,15 @@ export interface DownstreamArtifactTxRepo {
    */
   deleteAdapterEndpointsByConsumerApp(consumerAppId: string): Promise<string[]>;
   /**
-   * AL-2.2 — delete every binding the app **backs** on *other* consumers' endpoints.
-   * Returns the distinct endpoint ids left behind, which the cascade re-inspects.
+   * AL-2.2 — delete every binding the app **backs** on *other* consumers' endpoints,
+   * first **unchaining** any surviving binding that depended on one of them (the
+   * composite same-endpoint self-FK has no delete action, and a cross-backend
+   * `fanout-merge` chain would otherwise abort the whole cascade — AD-6.3).
+   *
+   * Returns the endpoints left behind (re-inspected for the `not-yet-mapped` revert) and
+   * the survivors it unchained (whose endpoints are flagged `composition-required`).
    */
-  deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<string[]>;
+  deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBindingBackendDeletion>;
   /** AL-2.2 — an endpoint's remaining bindings; **none** means it serves `not-yet-mapped`. */
   listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]>;
   /**

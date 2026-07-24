@@ -50,6 +50,7 @@ export {
 } from "./parked-conflict.js";
 export {
   DownstreamArtifactRepository,
+  type AdapterBindingBackendDeletion,
   type AdapterEdgeMemberFact,
   type DownstreamArtifactOps,
   type GraphEdgeStatusUpdate,
