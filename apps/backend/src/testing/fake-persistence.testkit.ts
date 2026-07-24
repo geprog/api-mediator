@@ -32,6 +32,7 @@ import type { ScopeCorrespondenceSide } from "@mediator/ir";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { AnalysisExclusionsService } from "../modules/analysis-exclusions.js";
+import { AppLifecycleService } from "../modules/app-lifecycle.js";
 import { FakeApprovalPersistence } from "../modules/approval/approval.testkit.js";
 import type {
   CorrespondenceRevalidationResult,
@@ -188,6 +189,30 @@ class FakeAppRepo implements AppReader, AppTxRepo {
   }
   public list(): Promise<RegisteredApp[]> {
     return Promise.resolve([...this.store.apps.values()]);
+  }
+  /**
+   * AL-1.1 — mirrors the real compare-and-set (`WHERE id = … AND status = 'active'`): no
+   * row matches unless it is currently `active`, and **only** `status` moves.
+   */
+  public markDisabled(id: string): Promise<RegisteredApp | undefined> {
+    return Promise.resolve(this.#compareAndSet(id, "active", "disabled"));
+  }
+  /** AL-1.3 — mirrors the inverse compare-and-set: no row matches unless it is `disabled`. */
+  public markActive(id: string): Promise<RegisteredApp | undefined> {
+    return Promise.resolve(this.#compareAndSet(id, "disabled", "active"));
+  }
+  #compareAndSet(
+    id: string,
+    from: RegisteredApp["status"],
+    to: RegisteredApp["status"],
+  ): RegisteredApp | undefined {
+    const existing = this.store.apps.get(id);
+    if (existing === undefined || existing.status !== from) {
+      return undefined;
+    }
+    const updated: RegisteredApp = { ...existing, status: to };
+    this.store.apps.set(id, updated);
+    return updated;
   }
 }
 
@@ -453,6 +478,17 @@ class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
       ),
     );
   }
+  /**
+   * AL-1.5 — mirrors the real `listByAppId`: the app on **either** side, in **any**
+   * status, ordered by `id` so a cascade over them is deterministic.
+   */
+  public listByAppId(appId: string): Promise<ApprovedMapping[]> {
+    return Promise.resolve(
+      [...this.store.approvedMappings.values()]
+        .filter((mapping) => mapping.sourceAppId === appId || mapping.targetAppId === appId)
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    );
+  }
   public repinSpecs(
     id: string,
     sourceSpecId: string,
@@ -513,6 +549,12 @@ class FakeDownstreamArtifactRepo implements DownstreamArtifactTxReader {
       [...this.store.syncRules.values()].filter(
         (rule) => rule.approvedMappingId === approvedMappingId,
       ),
+    );
+  }
+  /** AL-1.5 / XI-2.2 — mirrors the real by-backend-app read: bindings in any status. */
+  public listAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBinding[]> {
+    return Promise.resolve(
+      this.store.adapterBindings.filter((b) => b.backendAppId === backendAppId),
     );
   }
 }
@@ -834,6 +876,10 @@ export function buildTestServer(
         repos: { apiSpecs: readers.specReader, resourceBindings: readers.bindingReader },
       }),
       exclusionsReplacer: new AnalysisExclusionsService({ unitOfWork }),
+      // AL-1 — the real lifecycle service over the in-memory `TxStores`, so the two
+      // transition routes are mounted and their persistence effects (status flip, audit
+      // attribution, graph recomputes, cache drops) are assertable on `store`.
+      appLifecycle: new AppLifecycleService({ unitOfWork, newId: randomUUID }),
       appReader: readers.appReader,
       specReader: readers.specReader,
       bindingReader: readers.bindingReader,

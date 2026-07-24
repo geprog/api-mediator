@@ -26,6 +26,7 @@ import {
 import { DbAdapterRequestHistoryReader, DbAdapterStateReader } from "./modules/adapter-state.js";
 import { AdapterTokenService } from "./modules/adapter-token/index.js";
 import { AnalysisExclusionsService } from "./modules/analysis-exclusions.js";
+import { AppLifecycleService } from "./modules/app-lifecycle.js";
 import { ApprovedMappingSuspensionService } from "./modules/approved-mapping-suspension.js";
 import {
   ApprovalService,
@@ -252,6 +253,16 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     }),
     // The SL-10 read surface behind `GET /api/approved-mappings` (metadata only).
     approvedMappingReader: new ApprovedMappingRepository(db),
+    // Phase-6 AL-1 — the reversible app disable/enable. Wired with the SAME shared seams as
+    // the SL-10 hold, so a transition recomputes the app's `GraphEdge`s in-transaction
+    // (GR-2/GR-3, the app staying a node) and drops the cached entries of the endpoints it
+    // backs after commit (XI-2.2/CH-5.3). It writes only `RegisteredApp.status`: the pause
+    // itself is derived at execution time by the poll gate and the resolution planner.
+    appLifecycle: new AppLifecycleService({
+      unitOfWork,
+      newId: randomUUID,
+      ...(deps.cacheInvalidator !== undefined ? { cacheInvalidator: deps.cacheInvalidator } : {}),
+    }),
     // Phase-5 adapter read surface (AP-1 state, AP-5 history + health): pooled, read-only,
     // metadata only. `DbAdapterStateReader` composes the composition/mapping/app/spec repos
     // behind the AP-1/AP-5.3 derivation; `DbAdapterRequestHistoryReader` reads the

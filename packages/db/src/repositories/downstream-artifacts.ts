@@ -446,6 +446,22 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
   }
 
   /**
+   * **AL-1.5 / XI-2.2 — the `AdapterBinding`s an app *backs*.** Every binding whose
+   * `backendAppId` is this app, in any status. The app-lifecycle transition reads it to
+   * target the by-endpoint cache drop: when the backend app is disabled those bindings
+   * start failing `backend-disabled`, so a response cached while they were healthy must
+   * not keep being served (XI-2.2). Keyed by the backend app — **not** by the app's own
+   * consumer endpoints, which keep serving.
+   */
+  public async listAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBinding[]> {
+    const rows = await this.db
+      .select()
+      .from(adapterBinding)
+      .where(eq(adapterBinding.backendAppId, backendAppId));
+    return rows.map(mapAdapterBindingRow);
+  }
+
+  /**
    * **Successor adoption re-point (Phase-5 CO-7.1/7.2).** Point every `AdapterBinding`
    * currently on the `superseded` mapping at its `successor`, changing **only**
    * `approvedMappingId` — the binding's composed serving state (`role`,

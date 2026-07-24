@@ -16,6 +16,7 @@ import type {
   ApprovedMappingReader,
   ApprovedMappingSuspensionMutator,
 } from "./approved-mappings.routes.js";
+import type { AppLifecycleMutator } from "./apps.routes.js";
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
@@ -73,6 +74,13 @@ export interface OperatorApiDeps {
    */
   readonly approvedMappingSuspension?: ApprovedMappingSuspensionMutator;
   readonly approvedMappingReader?: ApprovedMappingReader;
+  /**
+   * Phase-6 AL-1 — the reversible app disable/enable. Optional for the same reason as
+   * `approvedMappingSuspension`: the real composition root always provides it (so the two
+   * routes are mounted in production), while the in-memory unit harness — which has no
+   * real db/transaction — legitimately omits it and the routes are simply not registered.
+   */
+  readonly appLifecycle?: AppLifecycleMutator;
   /**
    * Phase-5 adapter **read** surface (AP-1 state, AP-5 health): the pooled reader over
    * `AdapterEndpoint`/`AdapterBinding` + the per-binding mapping/backend status the

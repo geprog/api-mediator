@@ -92,6 +92,10 @@ export interface BindingReader {
 export interface AppTxRepo {
   create(app: RegisteredApp): Promise<RegisteredApp>;
   getById(id: string): Promise<RegisteredApp | undefined>;
+  /** AL-1.1 — compare-and-set `active → disabled`; `undefined` when the row was not `active`. */
+  markDisabled(id: string): Promise<RegisteredApp | undefined>;
+  /** AL-1.3 — compare-and-set `disabled → active`; `undefined` when the row was not `disabled`. */
+  markActive(id: string): Promise<RegisteredApp | undefined>;
 }
 
 export interface SpecTxRepo {
@@ -151,6 +155,12 @@ export interface ApprovedMappingTxRepo {
   /** SL-2.1 — the `active` mappings pinned to `specId` on either side. */
   listActiveBySpecId(specId: string): Promise<ApprovedMapping[]>;
   /**
+   * AL-1.5 — every mapping the app participates in (either side, **any** status), whose
+   * `(sourceAppId, targetAppId)` pairs are the `GraphEdge`s an app-lifecycle transition
+   * recomputes.
+   */
+  listByAppId(appId: string): Promise<ApprovedMapping[]>;
+  /**
    * SL-10.5 — the `suspended` mappings pinned to `specId` on either side. The **breaking**
    * reaction classifies these alongside the `active` set: a manual operator hold does not
    * stop a `SpecDiff` from classifying the mapping, so a suspended mapping referencing a
@@ -195,6 +205,12 @@ export interface DownstreamArtifactTxReader {
   listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]>;
   /** SL-5.2 — a mapping's `SyncRule`s, whose pinned source `pollOperationRef` is re-validated. */
   listSyncRulesByMapping(approvedMappingId: string): Promise<SyncRule[]>;
+  /**
+   * AL-1.5 / XI-2.2 — the bindings an app **backs**, whose endpoints' cached entries the
+   * disable/enable transition drops (a `backend-disabled` binding must not keep serving a
+   * response cached while it was healthy).
+   */
+  listAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBinding[]>;
 }
 
 /**
