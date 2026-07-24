@@ -222,6 +222,8 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
       registeredApps: {
         create: unused("registeredApps"),
         getById: unused("registeredApps"),
+        markDisabled: unused("registeredApps"),
+        markActive: unused("registeredApps"),
       },
       resourceBindings: {
         createMany: unused("resourceBindings"),
@@ -243,6 +245,7 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
         markSuspended: unused("approvedMappings"),
         markActive: unused("approvedMappings"),
         listSuspendedBySpecId: unused("approvedMappings"),
+        listByAppId: unused("approvedMappings"),
       },
       mappingArtifacts: {
         listFieldMappings: unused("mappingArtifacts"),
@@ -251,6 +254,7 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
       downstreamArtifacts: {
         listAdapterBindingsByMapping: unused("downstreamArtifacts"),
         listSyncRulesByMapping: unused("downstreamArtifacts"),
+        listAdapterBindingsByBackendApp: unused("downstreamArtifacts"),
       },
       graph: {
         recomputeSyncEdge: unused("graph"),

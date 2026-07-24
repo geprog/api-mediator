@@ -115,6 +115,8 @@ class FakeUnitOfWork implements UnitOfWork {
         getById: (id: string): Promise<RegisteredApp | undefined> =>
           Promise.resolve(id === APP_ID ? app() : undefined),
         create: (a: RegisteredApp): Promise<RegisteredApp> => Promise.resolve(a),
+        markDisabled: (): Promise<undefined> => Promise.resolve(undefined),
+        markActive: (): Promise<undefined> => Promise.resolve(undefined),
       },
       credentialStore: { store: (): Promise<never> => Promise.reject(new Error("unused")) },
       approvedMappings: {
@@ -123,6 +125,7 @@ class FakeUnitOfWork implements UnitOfWork {
         markSuspended: (): Promise<undefined> => Promise.resolve(undefined),
         markActive: (): Promise<undefined> => Promise.resolve(undefined),
         listActiveBySpecId: (): Promise<never[]> => Promise.resolve([]),
+        listByAppId: (): Promise<never[]> => Promise.resolve([]),
         listSuspendedBySpecId: (): Promise<never[]> => Promise.resolve([]),
         repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
         markStale: (): Promise<undefined> => Promise.resolve(undefined),
@@ -141,6 +144,7 @@ class FakeUnitOfWork implements UnitOfWork {
       downstreamArtifacts: {
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
         listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
+        listAdapterBindingsByBackendApp: (): Promise<never[]> => Promise.resolve([]),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),

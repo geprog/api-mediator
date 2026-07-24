@@ -228,6 +228,27 @@ export class ApprovedMappingRepository {
   }
 
   /**
+   * **AL-1.5 — every `ApprovedMapping` the app participates in**, on either side and in
+   * **any** status, ordered by `id` so a cascade over them is deterministic. The
+   * app-lifecycle transition reads this to find the `(app pair)`s whose `GraphEdge`s its
+   * disable/enable affects — a mapping's `variant` says which edge type
+   * (`peer-peer` → the sync edge, `consumer-provider` → the adapter-dependency edge) and
+   * its `(sourceAppId, targetAppId)` is the edge's stable key (GR-1.4).
+   *
+   * Deliberately unfiltered by status: a `stale`/`suspended`/`superseded`/`archived`
+   * mapping still contributes members to its edge's aggregate, so its pair must be
+   * recomputed too or the edge would keep a status derived from a stale read.
+   */
+  public async listByAppId(appId: string): Promise<ApprovedMapping[]> {
+    const rows = await this.db
+      .select()
+      .from(approvedMapping)
+      .where(or(eq(approvedMapping.sourceAppId, appId), eq(approvedMapping.targetAppId, appId)))
+      .orderBy(approvedMapping.id);
+    return rows.map(mapApprovedMappingRow);
+  }
+
+  /**
    * **SL-7.1 — mark the stale predecessor `superseded` on successor adoption.** Sets
    * **only** `status = "superseded"`; every other column is left byte-identical — the
    * pinned `sourceSpecId`/`targetSpecId` (it describes the old shape), its

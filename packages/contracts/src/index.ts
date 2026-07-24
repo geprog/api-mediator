@@ -109,6 +109,7 @@ export {
 
 export {
   apiSpecMetadataDtoSchema,
+  appLifecycleTransitionResponseSchema,
   appListResponseSchema,
   appSpecsResponseSchema,
   openApiDocumentSchema,
@@ -117,6 +118,7 @@ export {
   registerSpecRequestSchema,
   registeredAppDtoSchema,
   type ApiSpecMetadataDto,
+  type AppLifecycleTransitionResponse,
   type AppListResponse,
   type AppSpecsResponse,
   type RegisterAppRequest,

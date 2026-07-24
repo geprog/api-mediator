@@ -258,6 +258,7 @@ suite("SL-3 scoped-delta analysis: record job → worker → proposal (requires 
       downstreamArtifacts: {
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
         listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
+        listAdapterBindingsByBackendApp: (): Promise<never[]> => Promise.resolve([]),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),

@@ -1,5 +1,6 @@
 import type {
   ApprovedMappingStatus,
+  RegisteredAppStatus,
   ScopePathBinding,
   SourceScopeRef,
   SyncRule,
@@ -460,6 +461,14 @@ export interface PollCandidateView {
   readonly sourceAppId: string;
   readonly sourceSupportsPolling: boolean;
   readonly sourceDefaultPollInterval: number;
+  /**
+   * AL-1.1 — the **source** app's live `RegisteredApp.status`, re-read by the candidate
+   * join every tick (never cached, never copied onto the rule).
+   */
+  readonly sourceAppStatus: RegisteredAppStatus;
+  readonly targetAppId: string;
+  /** AL-1.1 — the **target** app's live `RegisteredApp.status` (same live-read discipline). */
+  readonly targetAppStatus: RegisteredAppStatus;
 }
 
 /** Why the Scheduler is holding a rule back this tick (never mutates `SyncRule.status`). */
@@ -473,6 +482,10 @@ export type PollHoldReason =
   | "mapping-not-active"
   // SP-1.4: a source that declares `supportsPolling = false` cannot be a source (backstop).
   | "source-not-pollable"
+  // AL-1.1: the app the rule is source OR target of is `disabled` — a condition of the
+  // APP, derived here at execution time, touching neither the rule's status nor its
+  // cursor/snapshot. Lifted the moment the app is `active` again (AL-1.3).
+  | "app-disabled"
   // Defensive: a non-enabled row slipped into the candidate set.
   | "not-enabled";
 

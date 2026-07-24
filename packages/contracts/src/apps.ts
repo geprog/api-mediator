@@ -109,3 +109,14 @@ export const appSpecsResponseSchema = z.object({
   specs: z.array(apiSpecMetadataDtoSchema),
 });
 export type AppSpecsResponse = z.infer<typeof appSpecsResponseSchema>;
+
+/**
+ * `POST /api/apps/:id/disable` and `.../enable` (operator) — AL-1: the app in its new
+ * state. Both transitions return the same shape; the resulting `status`
+ * (`disabled` / `active`) is what distinguishes them. Disable is **reversible** and
+ * carries no cascade, so — unlike deregistration — it needs no confirmation payload.
+ */
+export const appLifecycleTransitionResponseSchema = z.object({
+  app: registeredAppDtoSchema,
+});
+export type AppLifecycleTransitionResponse = z.infer<typeof appLifecycleTransitionResponseSchema>;

@@ -260,6 +260,7 @@ suite(
         downstreamArtifacts: {
           listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
           listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
+          listAdapterBindingsByBackendApp: (): Promise<never[]> => Promise.resolve([]),
         },
         graph: {
           recomputeSyncEdge: (): Promise<void> => Promise.resolve(),

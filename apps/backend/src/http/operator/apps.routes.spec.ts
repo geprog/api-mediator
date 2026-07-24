@@ -1,7 +1,12 @@
-import type { RegisterAppResponse } from "@mediator/contracts";
+import type { AppLifecycleTransitionResponse, RegisterAppResponse } from "@mediator/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { injectAs, TEST_OPERATOR } from "../../testing/auth.testkit.js";
+import {
+  injectAs,
+  TEST_OPERATOR,
+  TEST_OPERATOR_ALICE,
+  TEST_VIEWER,
+} from "../../testing/auth.testkit.js";
 import { buildTestServer, type TestServer } from "../../testing/fake-persistence.testkit.js";
 import { malformedDocument, providerSpecDocument } from "../../testing/sample-specs.testkit.js";
 
@@ -256,5 +261,149 @@ describe("GET /api/apps and /api/apps/:id/specs (AR-2)", () => {
       error: "Not Found",
       message: "Route not found.",
     });
+  });
+});
+
+/**
+ * AL-1 route tests — the reversible disable/enable surface, driven with
+ * `fastify.inject()` through the **real** operator-auth path (OA-1/OA-2) and the real
+ * `AppLifecycleService` over the in-memory `TxStores`. They assert the HTTP contract (the
+ * role gate, the actor attribution, how the service's transition errors surface) together
+ * with the persistence effects the transition is supposed to have — and, just as
+ * important, the ones it must not have.
+ */
+describe("POST /api/apps/:id/disable | /enable — app lifecycle (AL-1)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  async function registerApp(name = "Gitea"): Promise<string> {
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps",
+      payload: {
+        name,
+        baseUrl: "https://gitea.example",
+        specs: [{ role: "PROVIDER", document: providerSpecDocument() }],
+      },
+    });
+    return response.json<RegisterAppResponse>().app.id;
+  }
+
+  it("AL-1.1: an operator disables an active app; the response carries its new status", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AppLifecycleTransitionResponse>().app).toMatchObject({
+      id: appId,
+      status: "disabled",
+    });
+    expect(server.store.apps.get(appId)?.status).toBe("disabled");
+    // No credential material, ever (AR-1 crit 10).
+    expect(response.body).not.toContain("encryptedPayload");
+  });
+
+  it("AL-1.3: re-enabling lifts the condition and returns the app active again", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/enable`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AppLifecycleTransitionResponse>().app.status).toBe("active");
+    expect(server.store.apps.get(appId)?.status).toBe("active");
+  });
+
+  it("AL-1.4: each transition is attributed to the AUTHENTICATED operator in the audit log", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    await injectAs(server.app, TEST_OPERATOR_ALICE, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/enable`,
+    });
+
+    const lifecycleRows = server.store.auditLog.filter((entry) => entry.originAppId === appId);
+    expect(lifecycleRows.map((entry) => entry.actor)).toEqual([
+      TEST_OPERATOR_ALICE.username,
+      TEST_OPERATOR.username,
+    ]);
+  });
+
+  it("AL-1.4: a viewer is rejected 403 on BOTH transitions and nothing is mutated", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const disable = await injectAs(server.app, TEST_VIEWER, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+    expect(disable.statusCode).toBe(403);
+    expect(server.store.apps.get(appId)?.status).toBe("active");
+    expect(server.store.auditLog.filter((entry) => entry.originAppId === appId)).toHaveLength(0);
+
+    // And the same for enable, from a genuinely disabled starting state.
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+    const enable = await injectAs(server.app, TEST_VIEWER, {
+      method: "POST",
+      url: `/api/apps/${appId}/enable`,
+    });
+    expect(enable.statusCode).toBe(403);
+    expect(server.store.apps.get(appId)?.status).toBe("disabled");
+  });
+
+  it("409s an illegal transition (disabling an already-disabled app)", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+    await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/disable`,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ message: string }>().message).toContain(
+      "only an active app can be disabled",
+    );
+  });
+
+  it("404s an unknown app and 400s a malformed id", async () => {
+    server = buildTestServer();
+
+    const unknown = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps/00000000-0000-0000-0000-000000000000/disable",
+    });
+    expect(unknown.statusCode).toBe(404);
+
+    const malformed = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps/not-a-uuid/disable",
+    });
+    expect(malformed.statusCode).toBe(400);
   });
 });

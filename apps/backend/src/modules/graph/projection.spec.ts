@@ -3,7 +3,7 @@ import type {
   GraphEdgeStatusUpdate,
   SyncEdgeMemberFact,
 } from "@mediator/db";
-import type { GraphEdge } from "@mediator/domain";
+import type { GraphEdge, RegisteredAppStatus } from "@mediator/domain";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { projectAdapterEdge, projectSyncEdge, type GraphProjectionOps } from "./projection.js";
@@ -20,7 +20,21 @@ class FakeGraphOps implements GraphProjectionOps {
   readonly edges = new Map<string, GraphEdge>();
   readonly syncFacts = new Map<string, SyncEdgeMemberFact[]>();
   readonly adapterFacts = new Map<string, AdapterEdgeMemberFact[]>();
+  /**
+   * AL-1.5 — the node app statuses the recompute reads. Mirrors
+   * `RegisteredAppRepository.getById(...)?.status`: an app that was never seeded reads
+   * back `undefined` (the row does not exist), exactly as the real point read does.
+   */
+  readonly appStatuses = new Map<string, RegisteredAppStatus>();
   readonly calls = { upsert: 0, update: 0, remove: 0 };
+
+  setAppStatus(appId: string, status: RegisteredAppStatus): void {
+    this.appStatuses.set(appId, status);
+  }
+
+  readAppStatus(appId: string): Promise<RegisteredAppStatus | undefined> {
+    return Promise.resolve(this.appStatuses.get(appId));
+  }
 
   #key(source: string, target: string, type: GraphEdge["type"]): string {
     return `${source}|${target}|${type}`;
@@ -302,5 +316,67 @@ describe("projectAdapterEdge (GR-3)", () => {
     const second = ops.edge(CONSUMER, BACKEND, "adapter-dependency");
     expect(ops.edges.size).toBe(1);
     expect(second?.id).toBe(first?.id);
+  });
+});
+
+describe("the app-lifecycle condition on a recompute (AL-1.5 / GR-5.4)", () => {
+  let ops: FakeGraphOps;
+  beforeEach(() => {
+    ops = new FakeGraphOps();
+  });
+
+  it("AL-1.5: disabling either app of a sync pair pauses the edge, and re-enabling restores it", async () => {
+    ops.setSyncMembers(APP_A, APP_B, [syncFact("enabled"), syncFact("enabled")]);
+    ops.setAppStatus(APP_A, "active");
+    ops.setAppStatus(APP_B, "active");
+    await projectSyncEdge(ops, newId, APP_A, APP_B);
+    const created = ops.edge(APP_A, APP_B, "sync");
+    expect(created?.status).toBe("active");
+
+    // Source disabled → every rule of the pair is paused, though no rule row moved.
+    ops.setAppStatus(APP_A, "disabled");
+    await projectSyncEdge(ops, newId, APP_A, APP_B);
+    expect(ops.edge(APP_A, APP_B, "sync")?.status).toBe("paused");
+
+    // Target disabled instead → same, a rule stops when EITHER of its apps is out.
+    ops.setAppStatus(APP_A, "active");
+    ops.setAppStatus(APP_B, "disabled");
+    await projectSyncEdge(ops, newId, APP_A, APP_B);
+    expect(ops.edge(APP_A, APP_B, "sync")?.status).toBe("paused");
+
+    // Re-enabled → the same edge row (never removed — the app stayed a node) goes active.
+    ops.setAppStatus(APP_B, "active");
+    await projectSyncEdge(ops, newId, APP_A, APP_B);
+    const restored = ops.edge(APP_A, APP_B, "sync");
+    expect(restored?.status).toBe("active");
+    expect(restored?.id).toBe(created?.id);
+    expect(ops.calls.remove).toBe(0);
+  });
+
+  it("AL-1.5: a disabled BACKEND app pauses the adapter edge (the backend-disabled condition)", async () => {
+    ops.setAdapterMembers(CONSUMER, BACKEND, [adapterFact("active")]);
+    ops.setAppStatus(CONSUMER, "active");
+    ops.setAppStatus(BACKEND, "disabled");
+    await projectAdapterEdge(ops, newId, CONSUMER, BACKEND);
+    expect(ops.edge(CONSUMER, BACKEND, "adapter-dependency")?.status).toBe("paused");
+
+    ops.setAppStatus(BACKEND, "active");
+    await projectAdapterEdge(ops, newId, CONSUMER, BACKEND);
+    expect(ops.edge(CONSUMER, BACKEND, "adapter-dependency")?.status).toBe("active");
+  });
+
+  it("AL-1.5: a disabled CONSUMER app leaves the adapter edge alone (its surface keeps serving)", async () => {
+    ops.setAdapterMembers(CONSUMER, BACKEND, [adapterFact("active")]);
+    ops.setAppStatus(CONSUMER, "disabled");
+    ops.setAppStatus(BACKEND, "active");
+    await projectAdapterEdge(ops, newId, CONSUMER, BACKEND);
+    expect(ops.edge(CONSUMER, BACKEND, "adapter-dependency")?.status).toBe("active");
+  });
+
+  it("an unresolvable app status is treated as active — never an invented pause", async () => {
+    // Neither app seeded: the point read returns undefined, exactly as for a missing row.
+    ops.setSyncMembers(APP_A, APP_B, [syncFact("enabled")]);
+    await projectSyncEdge(ops, newId, APP_A, APP_B);
+    expect(ops.edge(APP_A, APP_B, "sync")?.status).toBe("active");
   });
 });

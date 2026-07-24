@@ -220,7 +220,12 @@ export type {
 // queue runs on each enqueued change (RL/EP/CF/TX/OC) is a later slice.
 export { Poller, type PollerOptions } from "./poller/poller.js";
 // SP-1: the Scheduler + its pure eligibility gate.
-export { Scheduler, decidePoll, type SchedulerOptions } from "./poller/scheduler.js";
+export {
+  Scheduler,
+  decidePoll,
+  pollPauseConditions,
+  type SchedulerOptions,
+} from "./poller/scheduler.js";
 // SP-5: the Postgres-backed atomic cursor/snapshot advance store.
 export { DbPollStateStore } from "./poller/db-poll-state-store.js";
 // The record content hash the full-fetch snapshot keys on (SP-2).

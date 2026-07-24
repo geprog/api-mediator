@@ -1,4 +1,10 @@
-import type { AdapterBinding, AdapterEndpoint, ApprovedMapping, SyncRule } from "@mediator/domain";
+import type {
+  AdapterBinding,
+  AdapterEndpoint,
+  ApprovedMapping,
+  RegisteredApp,
+  SyncRule,
+} from "@mediator/domain";
 
 /**
  * The **pure** status-from-aggregate core of the incremental `GraphEdge` projection
@@ -78,17 +84,38 @@ function mappingContribution(
 }
 
 /**
+ * **AL-1.5 — the app-lifecycle condition on an edge, evaluated per edge, not per
+ * member.** An edge's two nodes are fixed, so "is an app of this pair disabled?" is a
+ * property of the whole aggregate. `disabled` on either side of a **sync** edge pauses
+ * every rule of that pair (a rule stops executing when the app it is source *or* target
+ * of is disabled — AL-1.1); on an **adapter-dependency** edge only the **backend** side
+ * counts, because that is exactly the condition the runtime reads (a binding whose
+ * backing app is disabled fails `backend-disabled` — RP-3.5), while the consumer app's
+ * own adapter surface keeps being served until it is deregistered (AL-2).
+ */
+export interface EdgeAppCondition {
+  readonly sourceAppStatus: RegisteredApp["status"];
+  readonly targetAppStatus: RegisteredApp["status"];
+}
+
+/**
  * GR-2.2 — the effective state of one `SyncRule` in its sync edge's aggregate: its
- * mapping's lifecycle wins (`stale`/`suspended` → stale/paused), else an `enabled`
+ * mapping's lifecycle wins (`stale`/`suspended` → stale/paused), then — AL-1.5 — a
+ * `disabled` app on either end of the pair pauses the rule whatever its own status
+ * (the rule is no longer polled, without its `status` having moved), else an `enabled`
  * rule is `healthy` and a `disabled` rule is `paused`.
  */
 export function syncRuleMemberState(
   ruleStatus: SyncRule["status"],
   mappingStatus: ApprovedMapping["status"],
+  apps: EdgeAppCondition,
 ): EdgeMemberState {
   const contribution = mappingContribution(mappingStatus);
   if (contribution !== "defer") {
     return contribution;
+  }
+  if (apps.sourceAppStatus === "disabled" || apps.targetAppStatus === "disabled") {
+    return "paused";
   }
   return ruleStatus === "enabled" ? "healthy" : "paused";
 }
@@ -96,10 +123,12 @@ export function syncRuleMemberState(
 /**
  * GR-3.2/GR-3.3 — the effective state of one `AdapterBinding` in its
  * adapter-dependency edge's aggregate. Precedence: its mapping's lifecycle wins
- * (`stale`/`suspended`); then a `disabled` **endpoint** pauses the binding whatever
- * its own status (the whole endpoint is switched off, RT-3.2 — so a disable makes the
- * edge reflect the paused dependency, GR-3.2/GR-5.4); otherwise an `active` binding is
- * `healthy` and a `proposed`/`disabled` binding is `paused` (neither is serving). A
+ * (`stale`/`suspended`); then — AL-1.5 — a `disabled` **backend app** pauses the
+ * binding, the same condition the request-time planner reports as `backend-disabled`
+ * (RP-3.5); then a `disabled` **endpoint** pauses the binding whatever its own status
+ * (the whole endpoint is switched off, RT-3.2 — so a disable makes the edge reflect the
+ * paused dependency, GR-3.2/GR-5.4); otherwise an `active` binding is `healthy` and a
+ * `proposed`/`disabled` binding is `paused` (neither is serving). A
  * `composition-required` endpoint defers to the binding's own status: its prior
  * `active` binding keeps serving while a human recomposes (RT-3.3).
  */
@@ -107,10 +136,16 @@ export function adapterBindingMemberState(
   bindingStatus: AdapterBinding["status"],
   endpointStatus: AdapterEndpoint["status"],
   mappingStatus: ApprovedMapping["status"],
+  apps: EdgeAppCondition,
 ): EdgeMemberState {
   const contribution = mappingContribution(mappingStatus);
   if (contribution !== "defer") {
     return contribution;
+  }
+  // Only the backend (target) side: a disabled consumer app does not stop its own
+  // adapter surface being served, so pausing on it would misreport a live dependency.
+  if (apps.targetAppStatus === "disabled") {
+    return "paused";
   }
   if (endpointStatus === "disabled") {
     return "paused";

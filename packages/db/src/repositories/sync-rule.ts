@@ -4,11 +4,13 @@ import type {
   BackfillStatus,
   DeletePropagation,
   PollScopeMode,
+  RegisteredAppStatus,
   SyncRule,
   SyncRuleStatus,
   TargetDriftCheck,
 } from "@mediator/domain";
 import { eq } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 import type { DbHandle } from "../client.js";
 import { mapSyncRuleRow } from "../mappers/sync-rule.js";
@@ -16,11 +18,17 @@ import { approvedMapping, registeredApp, syncRule } from "../schema.js";
 
 /**
  * The per-rule view the Scheduler's eligibility gate (SP-1) needs in one query: the
- * `SyncRule` plus the two things that gate polling but live off the rule — the
- * parent `ApprovedMapping`'s `status` (a `stale`/`suspended` mapping pauses its
- * rules) and the **source** app's polling capability + default interval (a source
- * that cannot poll is a runtime backstop; the interval falls back to the app's
- * `defaultPollInterval` when the rule sets no override).
+ * `SyncRule` plus the things that gate polling but live off the rule — the parent
+ * `ApprovedMapping`'s `status` (a `stale`/`suspended` mapping pauses its rules), the
+ * **source** app's polling capability + default interval (a source that cannot poll is
+ * a runtime backstop; the interval falls back to the app's `defaultPollInterval` when
+ * the rule sets no override), and — AL-1.1 — **both** apps' `RegisteredApp.status`.
+ *
+ * A rule stops executing when the app it is source **or** target of is `disabled`
+ * (`docs/architecture/extensibility.md` *App lifecycle: disable & deregister*), so both
+ * statuses are inputs to the gate. They are read **live on every tick** alongside the
+ * mapping status — never cached, never copied onto the rule — because being disabled is
+ * a derived, execution-time condition of the app.
  */
 export interface PollCandidate {
   readonly rule: SyncRule;
@@ -28,6 +36,11 @@ export interface PollCandidate {
   readonly sourceAppId: string;
   readonly sourceSupportsPolling: boolean;
   readonly sourceDefaultPollInterval: number;
+  /** AL-1.1 — the source app's live `RegisteredApp.status` (`disabled` pauses the rule). */
+  readonly sourceAppStatus: RegisteredAppStatus;
+  readonly targetAppId: string;
+  /** AL-1.1 — the target app's live `RegisteredApp.status` (`disabled` pauses the rule too). */
+  readonly targetAppStatus: RegisteredAppStatus;
 }
 
 /**
@@ -143,22 +156,35 @@ export class SyncRuleRepository {
 
   /**
    * The Scheduler's candidate scan (SP-1): every `enabled` rule joined to its
-   * mapping status and its source app's polling capability + default interval — the
-   * inputs the eligibility gate decides on. Disabled rules are excluded up front (the
-   * partial `sync_rule_enabled_idx` serves this); the finer gates (backfill done,
-   * mapping active) are applied in memory by `decidePoll`.
+   * mapping status, its source app's polling capability + default interval, and — AL-1.1
+   * — **both** apps' `RegisteredApp.status`: the inputs the eligibility gate decides on.
+   * Disabled rules are excluded up front (the partial `sync_rule_enabled_idx` serves
+   * this); the finer gates (backfill done, mapping active, neither app disabled) are
+   * applied in memory by `decidePoll`.
+   *
+   * Every one of those inputs is joined **live on each tick** — the app statuses exactly
+   * like the mapping status — so disabling an app takes effect on the very next tick and
+   * re-enabling lifts it again with no cached copy to invalidate and nothing written to
+   * the rule.
    */
   public async listPollCandidates(): Promise<PollCandidate[]> {
+    // The rule's two apps are two rows of the same table, so the target side joins
+    // through an alias (the source side keeps the base table and its capabilities).
+    const targetApp = alias(registeredApp, "target_app");
     const rows = await this.db
       .select({
         rule: syncRule,
         mappingStatus: approvedMapping.status,
         sourceAppId: approvedMapping.sourceAppId,
         capabilities: registeredApp.capabilities,
+        sourceAppStatus: registeredApp.status,
+        targetAppId: approvedMapping.targetAppId,
+        targetAppStatus: targetApp.status,
       })
       .from(syncRule)
       .innerJoin(approvedMapping, eq(approvedMapping.id, syncRule.approvedMappingId))
       .innerJoin(registeredApp, eq(registeredApp.id, approvedMapping.sourceAppId))
+      .innerJoin(targetApp, eq(targetApp.id, approvedMapping.targetAppId))
       .where(eq(syncRule.status, "enabled"));
     return rows.map((row) => ({
       rule: mapSyncRuleRow(row.rule),
@@ -166,6 +192,9 @@ export class SyncRuleRepository {
       sourceAppId: row.sourceAppId,
       sourceSupportsPolling: row.capabilities.supportsPolling,
       sourceDefaultPollInterval: row.capabilities.defaultPollInterval,
+      sourceAppStatus: row.sourceAppStatus,
+      targetAppId: row.targetAppId,
+      targetAppStatus: row.targetAppStatus,
     }));
   }
 

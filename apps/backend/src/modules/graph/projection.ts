@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   DownstreamArtifactRepository,
+  RegisteredAppRepository,
   tx,
   type AdapterEdgeMemberFact,
   type Database,
@@ -9,12 +10,18 @@ import {
   type GraphEdgeStatusUpdate,
   type SyncEdgeMemberFact,
 } from "@mediator/db";
-import { graphEdgeSchema, type GraphEdge, type GraphEdgeMetadata } from "@mediator/domain";
+import {
+  graphEdgeSchema,
+  type GraphEdge,
+  type GraphEdgeMetadata,
+  type RegisteredAppStatus,
+} from "@mediator/domain";
 
 import {
   adapterBindingMemberState,
   deriveEdgeStatus,
   syncRuleMemberState,
+  type EdgeAppCondition,
   type EdgeMemberState,
 } from "./status.js";
 
@@ -46,21 +53,17 @@ import {
  * is GR-4's job and moves through a disjoint updater; a status recompute here never
  * touches it (GR-2.4). There is deliberately no `SyncEvent` trigger.
  *
- * **Triggers wired today** (this slice): peer-peer `SyncRule` enable/disable (the
- * Phase-4 sync operator), and adapter recompose / endpoint enable-disable / successor
- * adoption (the Phase-5 composition service — resolving the two CO-6
- * `// TODO(Phase 6 graph)` markers). Edge **create** on approval/derivation stays
- * where GR-1 put it (`artifact-instantiation/instantiate.ts`, the ensure-exists
- * upsert at AI-1/CO-1.5).
+ * **Triggers wired today**: peer-peer `SyncRule` enable/disable (the Phase-4 sync
+ * operator); adapter recompose / endpoint enable-disable / successor adoption (the
+ * Phase-5 composition service — resolving the two CO-6 `// TODO(Phase 6 graph)`
+ * markers); mapping `stale`/`suspended` (SL-4/SL-10, the spec registry + the suspension
+ * service); and **AL-1** app disable/enable (the app-lifecycle service recomputes every
+ * edge incident to the app — the aggregate then sees the app-lifecycle condition folded
+ * into each member's effective state, and the app itself **stays a node**, GR-5.4). Edge
+ * **create** on approval/derivation stays where GR-1 put it
+ * (`artifact-instantiation/instantiate.ts`, the ensure-exists upsert at AI-1/CO-1.5).
  *
- * **Triggers exposed as a seam** for later slices to call — each is exactly one of
- * the two public recomputes with the relevant `(app pair)`:
- * - **SL-4 / SL-10** (mapping `stale`/`suspended`): recompute both the sync edge of
- *   the mapping's `(sourceApp → targetApp)` and any adapter edge of its
- *   `(consumerApp → backendApp)` — the aggregate now sees the paused/stale mapping.
- * - **SL-7** (mapping `superseded`): recompute the affected adapter edge (successor
- *   adoption re-points the bindings; see the composition service).
- * - **AL-1** (app disabled): recompute every edge incident to the app.
+ * **Triggers exposed as a seam** for later slices to call:
  * - **AL-2** (app deregistered): recompute the affected edges → their aggregate is
  *   now empty → the edge is removed.
  */
@@ -83,12 +86,7 @@ export class GraphProjection {
     sourceAppId: string,
     targetAppId: string,
   ): Promise<void> {
-    await projectSyncEdge(
-      new DownstreamArtifactRepository(handle),
-      this.#newId,
-      sourceAppId,
-      targetAppId,
-    );
+    await projectSyncEdge(dbGraphOps(handle), this.#newId, sourceAppId, targetAppId);
   }
 
   /**
@@ -102,12 +100,7 @@ export class GraphProjection {
     consumerAppId: string,
     backendAppId: string,
   ): Promise<void> {
-    await projectAdapterEdge(
-      new DownstreamArtifactRepository(handle),
-      this.#newId,
-      consumerAppId,
-      backendAppId,
-    );
+    await projectAdapterEdge(dbGraphOps(handle), this.#newId, consumerAppId, backendAppId);
   }
 
   /**
@@ -134,6 +127,28 @@ export class GraphProjection {
 }
 
 /**
+ * The real {@link GraphProjectionOps} over one handle: the `graph_edge` aggregate reads +
+ * writes from {@link DownstreamArtifactRepository}, plus the node's live app status from
+ * {@link RegisteredAppRepository} (AL-1.5). Both bound to the SAME handle, so an
+ * in-transaction recompute sees the transition it is reacting to.
+ */
+function dbGraphOps(handle: DbHandle): GraphProjectionOps {
+  const artifacts = new DownstreamArtifactRepository(handle);
+  const apps = new RegisteredAppRepository(handle);
+  return {
+    readSyncEdgeMembers: (sourceAppId, targetAppId) =>
+      artifacts.readSyncEdgeMembers(sourceAppId, targetAppId),
+    readAdapterEdgeMembers: (consumerAppId, backendAppId) =>
+      artifacts.readAdapterEdgeMembers(consumerAppId, backendAppId),
+    readAppStatus: async (appId) => (await apps.getById(appId))?.status,
+    upsertGraphEdge: (edge) => artifacts.upsertGraphEdge(edge),
+    updateGraphEdge: (update) => artifacts.updateGraphEdge(update),
+    removeGraphEdge: (sourceNodeId, targetNodeId, type) =>
+      artifacts.removeGraphEdge(sourceNodeId, targetNodeId, type),
+  };
+}
+
+/**
  * The narrow ops the recompute core drives, bound to one transaction handle
  * (structurally satisfied by {@link DownstreamArtifactRepository}). Split from the
  * {@link GraphProjection} class so the create/update/remove decision is unit-testable
@@ -145,6 +160,14 @@ export interface GraphProjectionOps {
     consumerAppId: string,
     backendAppId: string,
   ): Promise<AdapterEdgeMemberFact[]>;
+  /**
+   * AL-1.5 — one node's live `RegisteredApp.status`, so a recompute reflects the
+   * app-lifecycle condition (a disabled app's edges read `paused`, and the app stays a
+   * node — disable never removes it, GR-5.4). `undefined` for an app that no longer
+   * exists; the caller then treats the pair's condition as absent rather than inventing
+   * a status (an edge whose node is gone is removed by the aggregate being empty).
+   */
+  readAppStatus(appId: string): Promise<RegisteredAppStatus | undefined>;
   upsertGraphEdge(edge: GraphEdge): Promise<void>;
   updateGraphEdge(update: GraphEdgeStatusUpdate): Promise<void>;
   removeGraphEdge(
@@ -235,13 +258,34 @@ export async function projectSyncEdge(
   targetAppId: string,
 ): Promise<void> {
   const facts = await ops.readSyncEdgeMembers(sourceAppId, targetAppId);
+  const apps = await readEdgeAppCondition(ops, sourceAppId, targetAppId);
   await applyRecompute(ops, newId, {
     sourceNodeId: sourceAppId,
     targetNodeId: targetAppId,
     type: "sync",
-    members: facts.map((fact) => syncRuleMemberState(fact.ruleStatus, fact.mappingStatus)),
+    members: facts.map((fact) => syncRuleMemberState(fact.ruleStatus, fact.mappingStatus, apps)),
     facts,
   });
+}
+
+/**
+ * AL-1.5 — the pair's live app statuses, read once per recompute (the pair is fixed, so
+ * the condition is per edge, not per member). An app the read cannot resolve is treated
+ * as `active`: the condition is then simply absent, never an invented pause.
+ */
+async function readEdgeAppCondition(
+  ops: GraphProjectionOps,
+  sourceAppId: string,
+  targetAppId: string,
+): Promise<EdgeAppCondition> {
+  const [sourceAppStatus, targetAppStatus] = await Promise.all([
+    ops.readAppStatus(sourceAppId),
+    ops.readAppStatus(targetAppId),
+  ]);
+  return {
+    sourceAppStatus: sourceAppStatus ?? "active",
+    targetAppStatus: targetAppStatus ?? "active",
+  };
 }
 
 /**
@@ -257,12 +301,13 @@ export async function projectAdapterEdge(
   backendAppId: string,
 ): Promise<void> {
   const facts = await ops.readAdapterEdgeMembers(consumerAppId, backendAppId);
+  const apps = await readEdgeAppCondition(ops, consumerAppId, backendAppId);
   await applyRecompute(ops, newId, {
     sourceNodeId: consumerAppId,
     targetNodeId: backendAppId,
     type: "adapter-dependency",
     members: facts.map((fact) =>
-      adapterBindingMemberState(fact.bindingStatus, fact.endpointStatus, fact.mappingStatus),
+      adapterBindingMemberState(fact.bindingStatus, fact.endpointStatus, fact.mappingStatus, apps),
     ),
     facts,
   });

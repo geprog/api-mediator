@@ -524,6 +524,76 @@ describe("AdapterServeHandler — fanout-merge (AG-2)", () => {
   });
 });
 
+/**
+ * **AL-1.2 — a disabled backend app follows the endpoint's NORMAL role/strictness
+ * semantics.** The planner eliminates such a binding with the distinct
+ * `backend-disabled` cause (RP-3.5) and the aggregator then treats it exactly like any
+ * other contributor failure — no special-casing: a `supplement` supplying an optional
+ * consumer field degrades the response, a `supplement` supplying a REQUIRED one fails the
+ * request, `strict` fails on any of them, and a `primary` failure always fails.
+ */
+describe("AdapterServeHandler — a disabled backend under fanout-merge (AL-1.2)", () => {
+  /** The fanout context with one side's backing app `disabled` (nothing else changed). */
+  function disabledBackendContext(
+    planRequired: boolean,
+    disabled: "primary" | "supplement",
+  ): ServeContext {
+    const primary: LoadedBinding =
+      disabled === "primary" ? { ...loadedPrimary(), backendStatus: "disabled" } : loadedPrimary();
+    const supplement: LoadedBinding =
+      disabled === "supplement"
+        ? { ...loadedSupplement(false), backendStatus: "disabled" }
+        : loadedSupplement(false);
+    return { consumerOperation: consumerGetProfile(planRequired), bindings: [primary, supplement] };
+  }
+
+  const bothOk = new Map([
+    ["crm", userOk],
+    ["billing", entitlementOk],
+  ]);
+
+  it("a disabled SUPPLEMENT backend degrades the response under `degraded` — its optional field omitted, and it is never called", async () => {
+    const caller = new MultiBackendCaller(bothOk);
+    const outcome = await multiHandler(disabledBackendContext(false, "supplement"), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({
+      kind: "served",
+      body: { id: "u-9", name: "Ada" },
+      degraded: true,
+      contributingBackendAppIds: ["crm"],
+      degradedBackendAppIds: ["billing"],
+    });
+    // Eliminated before dispatch: the disabled backend is never called.
+    expect(caller.inputsByApp.has("billing")).toBe(false);
+  });
+
+  it("a disabled SUPPLEMENT backend supplying a REQUIRED field fails the request as backend-disabled", async () => {
+    const caller = new MultiBackendCaller(bothOk);
+    const outcome = await multiHandler(disabledBackendContext(true, "supplement"), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "backend-disabled" });
+  });
+
+  it("under `strict` a disabled supplement backend fails the whole request (optional field notwithstanding)", async () => {
+    const caller = new MultiBackendCaller(bothOk);
+    const outcome = await multiHandler(disabledBackendContext(false, "supplement"), caller).serve(
+      fanoutInput(false, "strict"),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "backend-disabled" });
+  });
+
+  it("a disabled PRIMARY backend fails the whole request (no degradation), with no call at all", async () => {
+    const caller = new MultiBackendCaller(bothOk);
+    const outcome = await multiHandler(disabledBackendContext(false, "primary"), caller).serve(
+      fanoutInput(false),
+    );
+    expect(outcome).toEqual({ kind: "failed", cause: "backend-disabled" });
+    expect(caller.inputsByApp.has("crm")).toBe(false);
+  });
+});
+
 describe("AdapterServeHandler — chained bindings (TE-3)", () => {
   it("TE-3.1/3.2: the chained supplement is called with a param filled from the upstream consumer shape", async () => {
     const caller = new MultiBackendCaller(

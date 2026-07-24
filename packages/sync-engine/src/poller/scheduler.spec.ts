@@ -1,16 +1,17 @@
-import type { ApprovedMappingStatus, SyncRule } from "@mediator/domain";
+import type { ApprovedMappingStatus, RegisteredAppStatus, SyncRule } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
 import { FakePollCandidateSource, FakeSchedulerMetrics } from "./fakes.js";
-import { decidePoll, Scheduler } from "./scheduler.js";
+import { decidePoll, pollPauseConditions, Scheduler } from "./scheduler.js";
 import type { PollCandidateView, PollRunOutcome, PollTrigger } from "./types.js";
 
 /**
  * Unit tests for the **Scheduler** eligibility gate (SP-1): the pure {@link decidePoll}
- * (poll only while enabled + backfill done + mapping active; running backfill polls
- * nothing; stale/suspended pauses without touching status; a non-polling source is a
- * backstop; interval override vs default) and the tick's poller-lag + stuck-poller
- * emission.
+ * (poll only while enabled + backfill done + mapping active + neither app disabled;
+ * running backfill polls nothing; stale/suspended pauses without touching status; a
+ * disabled app pauses without touching the rule at all — AL-1; a non-polling source is a
+ * backstop; interval override vs default), the AL-1.6 **composition** of those conditions
+ * via {@link pollPauseConditions}, and the tick's poller-lag + stuck-poller emission.
  */
 
 const NOW = new Date("2026-07-13T12:00:00.000Z");
@@ -32,6 +33,8 @@ function candidate(
     mappingStatus?: ApprovedMappingStatus;
     sourceSupportsPolling?: boolean;
     sourceDefaultPollInterval?: number;
+    sourceAppStatus?: RegisteredAppStatus;
+    targetAppStatus?: RegisteredAppStatus;
   } = {},
 ): PollCandidateView {
   return {
@@ -40,6 +43,9 @@ function candidate(
     sourceAppId: "app-source",
     sourceSupportsPolling: overrides.sourceSupportsPolling ?? true,
     sourceDefaultPollInterval: overrides.sourceDefaultPollInterval ?? 60_000,
+    sourceAppStatus: overrides.sourceAppStatus ?? "active",
+    targetAppId: "app-target",
+    targetAppStatus: overrides.targetAppStatus ?? "active",
   };
 }
 
@@ -126,6 +132,95 @@ describe("decidePoll — SP-1 eligibility gate", () => {
       kind: "hold",
       reason: "not-enabled",
     });
+  });
+
+  // ── AL-1.1/1.3 — the app-lifecycle condition ────────────────────────────────
+
+  it("AL-1.1 a disabled SOURCE app pauses the rule (its status/backfill untouched)", () => {
+    const held = candidate({ sourceAppStatus: "disabled" });
+    expect(decidePoll(held, NOW)).toStrictEqual({ kind: "hold", reason: "app-disabled" });
+    // The condition is read off the APP — the rule itself is still a healthy enabled row.
+    expect(held.rule.status).toBe("enabled");
+    expect(held.rule.backfillStatus).toBe("completed");
+  });
+
+  it("AL-1.1 a disabled TARGET app pauses the rule just as a disabled source does", () => {
+    expect(decidePoll(candidate({ targetAppStatus: "disabled" }), NOW)).toStrictEqual({
+      kind: "hold",
+      reason: "app-disabled",
+    });
+  });
+
+  it("AL-1.3 re-enabling the app lifts the condition — the same candidate polls again", () => {
+    // Same rule row, same stored cursor state: only the app's status differs, and that
+    // alone flips the decision back to `poll` (no re-backfill, nothing restored).
+    expect(decidePoll(candidate({ sourceAppStatus: "disabled" }), NOW).kind).toBe("hold");
+    expect(decidePoll(candidate({ sourceAppStatus: "active" }), NOW).kind).toBe("poll");
+  });
+});
+
+describe("pollPauseConditions — AL-1.6 composition of the pause conditions", () => {
+  it("reports no condition for a fully healthy candidate (the only case that polls)", () => {
+    expect(pollPauseConditions(candidate())).toEqual([]);
+  });
+
+  it("reports each condition alone", () => {
+    expect(pollPauseConditions(candidate({ mappingStatus: "stale" }))).toEqual(["mapping-stale"]);
+    expect(pollPauseConditions(candidate({ mappingStatus: "suspended" }))).toEqual([
+      "mapping-suspended",
+    ]);
+    expect(pollPauseConditions(candidate({ sourceAppStatus: "disabled" }))).toEqual([
+      "app-disabled",
+    ]);
+    expect(pollPauseConditions(candidate({ rule: { backfillStatus: "running" } }))).toEqual([
+      "backfill-not-done",
+    ]);
+  });
+
+  it("AL-1.6 reports an app disable AND a suspended mapping simultaneously", () => {
+    expect(
+      pollPauseConditions(candidate({ mappingStatus: "suspended", targetAppStatus: "disabled" })),
+    ).toEqual(["mapping-suspended", "app-disabled"]);
+  });
+
+  it("AL-1.6 a rule held by BOTH conditions resumes only when BOTH clear", () => {
+    const both = { mappingStatus: "suspended" as const, sourceAppStatus: "disabled" as const };
+    expect(decidePoll(candidate(both), NOW).kind).toBe("hold");
+
+    // Lift only the app disable: the suspended mapping still holds it.
+    expect(decidePoll(candidate({ ...both, sourceAppStatus: "active" }), NOW)).toStrictEqual({
+      kind: "hold",
+      reason: "mapping-suspended",
+    });
+    // Lift only the suspension: the app disable still holds it.
+    expect(decidePoll(candidate({ ...both, mappingStatus: "active" }), NOW)).toStrictEqual({
+      kind: "hold",
+      reason: "app-disabled",
+    });
+    // Both lifted → and only then does it poll.
+    expect(
+      decidePoll(candidate({ mappingStatus: "active", sourceAppStatus: "active" }), NOW).kind,
+    ).toBe("poll");
+  });
+
+  it("AL-1.6 accumulates every applicable condition, in the documented reporting order", () => {
+    const conditions = pollPauseConditions(
+      candidate({
+        rule: { status: "disabled", backfillStatus: "running" },
+        mappingStatus: "stale",
+        sourceSupportsPolling: false,
+        targetAppStatus: "disabled",
+      }),
+    );
+    expect(conditions).toEqual([
+      "not-enabled",
+      "source-not-pollable",
+      "backfill-not-done",
+      "mapping-stale",
+      "app-disabled",
+    ]);
+    // `decidePoll` surfaces the first, and holds while ANY of them stands.
+    expect(decidePoll(candidate({ rule: { status: "disabled" } }), NOW).kind).toBe("hold");
   });
 });
 
