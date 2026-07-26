@@ -120,3 +120,51 @@ export const appLifecycleTransitionResponseSchema = z.object({
   app: registeredAppDtoSchema,
 });
 export type AppLifecycleTransitionResponse = z.infer<typeof appLifecycleTransitionResponseSchema>;
+
+/**
+ * `POST /api/apps/:id/deregister` (operator) — AL-2.1: the **explicit confirmation** a
+ * destructive deregistration requires (README open question 5). `confirm` must repeat the
+ * target app's exact `name`; a bare `POST` (no body, or a body without `confirm`) fails
+ * validation before any cascade runs, so an app can never be deregistered by accident.
+ *
+ * The value is checked against the *resolved* app inside the transaction, so a stale or
+ * copy-pasted name from another app is rejected too.
+ */
+export const deregisterAppRequestSchema = z.object({
+  confirm: z.string().min(1),
+});
+export type DeregisterAppRequest = z.infer<typeof deregisterAppRequestSchema>;
+
+/**
+ * AL-2.8 — what the deregister cascade did, in **counts only** (no ids, no names): the
+ * same summary that is attributed to the operator in the audit log, returned so the
+ * operator surface can report the cascade it just ran.
+ */
+export const appDeregistrationSummaryDtoSchema = z.object({
+  syncRulesDeleted: z.number().int().nonnegative(),
+  adapterEndpointsTornDown: z.number().int().nonnegative(),
+  adapterBindingsDeleted: z.number().int().nonnegative(),
+  adapterEndpointsLeftWithoutBindings: z.number().int().nonnegative(),
+  adapterBindingsUnchained: z.number().int().nonnegative(),
+  approvedMappingsArchived: z.number().int().nonnegative(),
+  counterpartLinksCleared: z.number().int().nonnegative(),
+  apiSpecsArchived: z.number().int().nonnegative(),
+  recordLinksArchived: z.number().int().nonnegative(),
+  syncFieldStatesArchived: z.number().int().nonnegative(),
+  scopeLinksArchived: z.number().int().nonnegative(),
+  credentialsDeleted: z.number().int().nonnegative(),
+  graphEdgesRecomputed: z.number().int().nonnegative(),
+  endpointCachesDropped: z.number().int().nonnegative(),
+});
+export type AppDeregistrationSummaryDto = z.infer<typeof appDeregistrationSummaryDtoSchema>;
+
+/**
+ * `POST /api/apps/:id/deregister` response (AL-2): the app row as it stands after the
+ * cascade — **retained** as the audit anchor its archived specs/mappings still reference,
+ * and out of service (`status = disabled`) — plus the cascade summary.
+ */
+export const deregisterAppResponseSchema = z.object({
+  app: registeredAppDtoSchema,
+  cascade: appDeregistrationSummaryDtoSchema,
+});
+export type DeregisterAppResponse = z.infer<typeof deregisterAppResponseSchema>;

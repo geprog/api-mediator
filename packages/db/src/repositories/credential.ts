@@ -47,4 +47,26 @@ export class CredentialRepository {
       .where(eq(credential.appId, appId));
     return rows.map(mapCredentialMetadataRow);
   }
+
+  /**
+   * **AL-2.6 — delete an app's credentials outright on deregistration.** "Credentials are
+   * deleted from the Credential Store outright (not archived); the audit log retains all
+   * historical events" (`docs/architecture/extensibility.md` *App lifecycle*) — the one
+   * artifact of the cascade that leaves no row behind, because retained ciphertext for a
+   * departed app is pure risk with no audit value (`docs/architecture/security.md`).
+   *
+   * Deliberately **every** `type`, `adapterToken` included: that is exactly how a
+   * deregistered consumer's adapter token is revoked (AT-4.5) — the hash it validated
+   * against is gone, so the token can never resolve to an app again.
+   *
+   * Stays on the repository's write-only surface: it neither accepts nor returns any
+   * payload, and returns only the number of rows removed (for the cascade summary).
+   */
+  public async deleteByAppId(appId: string): Promise<number> {
+    const deleted = await this.db
+      .delete(credential)
+      .where(eq(credential.appId, appId))
+      .returning({ id: credential.id });
+    return deleted.length;
+  }
 }

@@ -194,4 +194,36 @@ export class ScopeCorrespondenceRepository {
         correspondence.resourcePairRef.split("|").some((side) => side === token),
       );
   }
+
+  /**
+   * **AL-2.5 — every scoped pair the app is a side of, whatever the resource.** The
+   * app-wide counterpart of {@link listByResourceSide}: the deregister cascade archives
+   * each returned correspondence's `ScopeLink`s through
+   * `ScopeLinkRepository.archiveByCorrespondence` (SS-10.5).
+   *
+   * A `resourcePairRef` side token is `"<appId>:<resourceRef>"`, so the app is a side
+   * exactly when a token **starts with** `"<appId>:"`. The SQL `LIKE` narrows to the two
+   * positional shapes at the database; the prefix is then re-checked exactly in memory,
+   * so a `%`/`_` inside an id can never widen the match. The correspondence **config row
+   * itself is retained** (it carries no status of its own and archived `ScopeLink`s /
+   * `RecordLink.scopeRef`s still resolve through it for audit).
+   */
+  public async listByApp(appId: string): Promise<ScopeCorrespondence[]> {
+    const prefix = `${appId}:`;
+    const rows = await this.db
+      .select()
+      .from(scopeCorrespondence)
+      .where(
+        or(
+          like(scopeCorrespondence.resourcePairRef, `${prefix}%`),
+          like(scopeCorrespondence.resourcePairRef, `%|${prefix}%`),
+        ),
+      )
+      .orderBy(scopeCorrespondence.id);
+    return rows
+      .map(mapScopeCorrespondenceRow)
+      .filter((correspondence) =>
+        correspondence.resourcePairRef.split("|").some((side) => side.startsWith(prefix)),
+      );
+  }
 }

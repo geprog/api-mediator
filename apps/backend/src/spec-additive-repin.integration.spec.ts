@@ -4,6 +4,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  CredentialRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
   RegisteredAppRepository,
@@ -37,6 +38,7 @@ import { buildIr, computeContentHash } from "@mediator/ir";
 import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { dbSyncStateArchival } from "./modules/persistence.js";
 import type { CredentialTxStore, TxStores } from "./modules/persistence.js";
 import { SpecRegistry } from "./modules/spec-registry.js";
 import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
@@ -225,6 +227,10 @@ suite("SL-2 additive re-pin + carry-forward (requires Postgres)", () => {
         scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
         scopeLinks: new ScopeLinkRepository(handle),
       }),
+      // AL-2 — the deregister cascade's seams; unused by this suite, wired so
+      // the hand-built `TxStores` stays complete.
+      syncStateArchival: dbSyncStateArchival(handle),
+      credentials: new CredentialRepository(handle),
       emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
     };
   }

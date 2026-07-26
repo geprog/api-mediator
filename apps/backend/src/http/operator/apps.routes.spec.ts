@@ -1,4 +1,8 @@
-import type { AppLifecycleTransitionResponse, RegisterAppResponse } from "@mediator/contracts";
+import type {
+  AppLifecycleTransitionResponse,
+  DeregisterAppResponse,
+  RegisterAppResponse,
+} from "@mediator/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -403,6 +407,128 @@ describe("POST /api/apps/:id/disable | /enable — app lifecycle (AL-1)", () => 
     const malformed = await injectAs(server.app, TEST_OPERATOR, {
       method: "POST",
       url: "/api/apps/not-a-uuid/disable",
+    });
+    expect(malformed.statusCode).toBe(400);
+  });
+});
+
+/**
+ * AL-2 route tests — the **destructive, confirmed** deregistration surface. The cascade
+ * itself is covered in `modules/app-deregistration.spec.ts`; these pin the HTTP contract:
+ * the `operator` gate (AL-2.8), the confirmation requirement (AL-2.1) — including that a
+ * **bare** `POST` cannot deregister anything — and that the response carries the cascade
+ * summary and no credential material.
+ */
+describe("POST /api/apps/:id/deregister — app lifecycle (AL-2)", () => {
+  let server: TestServer;
+  afterEach(async () => {
+    await server.app.close();
+  });
+
+  const APP_NAME = "Gitea";
+
+  async function registerApp(): Promise<string> {
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps",
+      payload: {
+        name: APP_NAME,
+        baseUrl: "https://gitea.example",
+        specs: [{ role: "PROVIDER", document: providerSpecDocument() }],
+        credential: { secret: { type: "apiKey", apiKey: "s3cr3t-value" } },
+      },
+    });
+    return response.json<RegisterAppResponse>().app.id;
+  }
+
+  it("AL-2.1: a BARE POST (no body) is rejected 400 and deregisters nothing", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/deregister`,
+    });
+
+    expect(response.statusCode).toBe(400);
+    // Not a single cascade effect: the credential is still stored, the spec still active.
+    expect(server.store.credentials).toHaveLength(1);
+    expect([...server.store.specs.values()][0]?.status).toBe("active");
+    expect(server.store.auditLog.filter((entry) => entry.originAppId === appId)).toHaveLength(0);
+  });
+
+  it("AL-2.1: a body with the WRONG confirmation is rejected 400 and deregisters nothing", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const response = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: `/api/apps/${appId}/deregister`,
+      payload: { confirm: "gitea" },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(server.store.credentials).toHaveLength(1);
+  });
+
+  it("AL-2.8: a viewer is rejected 403 BEFORE the handler runs — no cascade starts", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const response = await injectAs(server.app, TEST_VIEWER, {
+      method: "POST",
+      url: `/api/apps/${appId}/deregister`,
+      payload: { confirm: APP_NAME },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(server.store.apps.get(appId)?.status).toBe("active");
+    expect(server.store.credentials).toHaveLength(1);
+    expect(server.store.auditLog.filter((entry) => entry.originAppId === appId)).toHaveLength(0);
+  });
+
+  it("deregisters on a correct confirmation, returns the cascade summary, and audits the operator", async () => {
+    server = buildTestServer();
+    const appId = await registerApp();
+
+    const response = await injectAs(server.app, TEST_OPERATOR_ALICE, {
+      method: "POST",
+      url: `/api/apps/${appId}/deregister`,
+      payload: { confirm: APP_NAME },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<DeregisterAppResponse>();
+    // The row is RETAINED (archived specs still reference it) and out of service.
+    expect(body.app).toMatchObject({ id: appId, status: "disabled" });
+    expect(body.cascade).toMatchObject({ apiSpecsArchived: 1, credentialsDeleted: 1 });
+    expect(server.store.credentials).toHaveLength(0);
+    expect([...server.store.specs.values()][0]?.status).toBe("archived");
+
+    const rows = server.store.auditLog.filter((entry) => entry.originAppId === appId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.actor).toBe(TEST_OPERATOR_ALICE.username);
+    expect(rows[0]?.details).toContain("deregistered by operator");
+
+    // No credential material anywhere in the response (AR-1 crit 10).
+    expect(response.body).not.toContain("s3cr3t-value");
+    expect(response.body).not.toContain("encryptedPayload");
+  });
+
+  it("404s an unknown app and 400s a malformed id", async () => {
+    server = buildTestServer();
+
+    const unknown = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps/00000000-0000-0000-0000-000000000000/deregister",
+      payload: { confirm: "whatever" },
+    });
+    expect(unknown.statusCode).toBe(404);
+
+    const malformed = await injectAs(server.app, TEST_OPERATOR, {
+      method: "POST",
+      url: "/api/apps/not-a-uuid/deregister",
+      payload: { confirm: "whatever" },
     });
     expect(malformed.statusCode).toBe(400);
   });

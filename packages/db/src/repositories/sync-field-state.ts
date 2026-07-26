@@ -1,5 +1,5 @@
 import type { SyncFieldState } from "@mediator/domain";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapSyncFieldStateRow, toSyncFieldStateInsert } from "../mappers/sync-field-state.js";
@@ -97,5 +97,36 @@ export class SyncFieldStateRepository implements SyncFieldStateStore {
       .where(eq(syncFieldState.recordLinkId, recordLinkId))
       .orderBy(syncFieldState.side, syncFieldState.fieldPath);
     return rows.map(mapSyncFieldStateRow);
+  }
+
+  /**
+   * **AL-2.5 — archive the per-side baselines of a deregistered app's links.**
+   * "`RecordLink`s and `SyncFieldState` involving the app are archived with it (their own
+   * `status = archived`)" (`docs/architecture/extensibility.md` *App lifecycle*), i.e.
+   * "retained but never read or written again" (`docs/architecture/data-model.md`
+   * `SyncFieldState.status`). The baselines themselves (`lastSyncedHash`/`observedHash`/
+   * `lastWrittenByMappingId`) are left byte-identical — the row stays readable history,
+   * it just leaves the live set.
+   *
+   * Keyed by `recordLinkId` (the SD-3 owner) rather than by app, because a field-state
+   * row has no app column: the caller passes every link the app participates in, in any
+   * status. Only still-`active` rows move, so a re-run archives nothing. Returns the
+   * number of rows archived; an empty input archives nothing.
+   */
+  public async archiveByRecordLinks(recordLinkIds: readonly string[]): Promise<number> {
+    if (recordLinkIds.length === 0) {
+      return 0;
+    }
+    const archived = await this.db
+      .update(syncFieldState)
+      .set({ status: "archived" })
+      .where(
+        and(
+          inArray(syncFieldState.recordLinkId, [...recordLinkIds]),
+          eq(syncFieldState.status, "active"),
+        ),
+      )
+      .returning({ id: syncFieldState.id });
+    return archived.length;
   }
 }

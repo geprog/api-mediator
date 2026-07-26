@@ -4,6 +4,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  CredentialRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
   RegisteredAppRepository,
@@ -43,6 +44,7 @@ import { inArray, or } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { GraphProjection } from "./modules/graph/index.js";
+import { dbSyncStateArchival } from "./modules/persistence.js";
 import type {
   CredentialTxStore,
   EndpointCacheInvalidator,
@@ -314,6 +316,10 @@ suite(
           scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
           scopeLinks: new ScopeLinkRepository(handle),
         }),
+        // AL-2 — the deregister cascade's seams; unused by this suite, wired so
+        // the hand-built `TxStores` stays complete.
+        syncStateArchival: dbSyncStateArchival(handle),
+        credentials: new CredentialRepository(handle),
         emit: () => Promise.reject(new Error("ingestNewVersion must not emit on advance")),
       };
     }

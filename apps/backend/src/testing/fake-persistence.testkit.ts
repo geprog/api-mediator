@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { RESOURCE_BINDING_REF_KINDS } from "@mediator/contracts";
 import type { CredentialMaterial } from "@mediator/credentials";
 import type {
+  AdapterBindingBackendDeletion,
   CredentialMetadata,
   DetectionJobScope,
   ResourceBindingRefPatch,
@@ -12,6 +13,7 @@ import type {
 } from "@mediator/db";
 import type {
   AdapterBinding,
+  AdapterEndpoint,
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
@@ -21,10 +23,13 @@ import type {
   FieldMapping,
   Ir,
   OperationMapping,
+  RecordLink,
   RegisteredApp,
   ResourceBinding,
   ScopeCorrespondence,
+  ScopeLink,
   ScopePathBinding,
+  SyncFieldState,
   SyncRule,
 } from "@mediator/domain";
 import { revalidateResourceBinding, revalidateScopeCorrespondence } from "@mediator/ir";
@@ -45,8 +50,9 @@ import type {
   AuditTxRepo,
   BindingReader,
   BindingTxRepo,
+  CredentialTxRepo,
   CredentialTxStore,
-  DownstreamArtifactTxReader,
+  DownstreamArtifactTxRepo,
   EndpointCacheInvalidator,
   GraphEdgeRecompute,
   MappingArtifactsTxReader,
@@ -55,6 +61,7 @@ import type {
   DetectionJobTxRepo,
   SpecTxRepo,
   SyncRuleTxRepo,
+  SyncStateArchivalTxRepo,
   TxStores,
   UnitOfWork,
 } from "../modules/persistence.js";
@@ -98,6 +105,11 @@ export class InMemoryStore {
   public readonly apps = new Map<string, RegisteredApp>();
   public readonly specs = new Map<string, ApiSpec>();
   public readonly bindings = new Map<string, ResourceBinding>();
+  /**
+   * Stored credentials, metadata only (never a secret — CR-2). AL-2.6 **deletes** an
+   * app's entries from this array outright, so a test asserts they are really gone rather
+   * than merely flagged.
+   */
   public readonly credentials: RecordedCredential[] = [];
   public readonly events: DomainEventEnvelope[] = [];
   /**
@@ -135,6 +147,18 @@ export class InMemoryStore {
   public readonly operationMappings: OperationMapping[] = [];
   /** SL-4.6 — the adapter bindings a consumer-provider mapping derived, read to target the coupled cache drop. */
   public readonly adapterBindings: AdapterBinding[] = [];
+  /**
+   * AL-2.2/2.3 — the `AdapterEndpoint` rows the deregister cascade deletes (a consumer
+   * app's own surface) or returns to `composition-required` (another consumer's endpoint
+   * left with no bindings). Keyed by id, mirroring the table.
+   */
+  public readonly adapterEndpoints = new Map<string, AdapterEndpoint>();
+  /** AL-2.5 — `RecordLink`s keyed by id; the cascade archives the app's still-`active` ones. */
+  public readonly recordLinks = new Map<string, RecordLink>();
+  /** AL-2.5 — `SyncFieldState` rows keyed by id; archived per owning `RecordLink`. */
+  public readonly syncFieldStates = new Map<string, SyncFieldState>();
+  /** AL-2.5 — `ScopeLink`s keyed by id; archived per `ScopeCorrespondence` (SS-10.5). */
+  public readonly scopeLinks = new Map<string, ScopeLink>();
   /** SL-5.2 — `SyncRule`s keyed by id, so the breaking reaction can re-validate + clear their `pollOperationRef`. */
   public readonly syncRules = new Map<string, SyncRule>();
   /** SL-5.1 — the spec ids whose `ResourceBinding`s the breaking reaction re-validated (spy surface). */
@@ -175,6 +199,97 @@ class FakeScopeCorrespondenceRepo implements ScopeCorrespondenceSideReader {
         correspondence.resourcePairRef.split("|").some((side) => side === token),
       ),
     );
+  }
+  /**
+   * AL-2.5 — mirrors `ScopeCorrespondenceRepository.listByApp`: the app is a side of the
+   * pair exactly when a `"<appId>:<resourceRef>"` token **starts with** `"<appId>:"`,
+   * whatever the resource; ordered by `id` like the real query.
+   */
+  public listByApp(appId: string): Promise<ScopeCorrespondence[]> {
+    const prefix = `${appId}:`;
+    return Promise.resolve(
+      [...this.store.scopeCorrespondences.values()]
+        .filter((correspondence) =>
+          correspondence.resourcePairRef.split("|").some((side) => side.startsWith(prefix)),
+        )
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    );
+  }
+}
+
+/**
+ * AL-2.5 — mirrors the three archival repositories the deregister cascade drives, with
+ * their real guards: only still-`active` rows move, a `tombstoned` `RecordLink` keeps its
+ * tombstone (it is never re-flagged), the field-state archive is keyed by owning link id,
+ * and `archiveByCorrespondence` returns the number of links it actually archived (never a
+ * re-count of history) — so a re-run archives nothing, exactly as against Postgres.
+ */
+class FakeSyncStateArchivalRepo implements SyncStateArchivalTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+
+  public listRecordLinkIdsByApp(appId: string): Promise<string[]> {
+    return Promise.resolve(
+      [...this.store.recordLinks.values()]
+        .filter((link) => link.appAId === appId || link.appBId === appId)
+        .map((link) => link.id)
+        .sort((left, right) => left.localeCompare(right)),
+    );
+  }
+
+  public archiveRecordLinksByApp(appId: string): Promise<string[]> {
+    const archived: string[] = [];
+    for (const link of [...this.store.recordLinks.values()]) {
+      if ((link.appAId !== appId && link.appBId !== appId) || link.status !== "active") {
+        continue;
+      }
+      // Only `status` moves: `tombstoneReason`/`tombstonedAt` stay absent/NULL, which is
+      // what keeps "archived" distinguishable from "tombstoned" (AL-2.5).
+      this.store.recordLinks.set(link.id, { ...link, status: "archived" });
+      archived.push(link.id);
+    }
+    return Promise.resolve(archived);
+  }
+
+  public archiveSyncFieldStatesByRecordLinks(recordLinkIds: readonly string[]): Promise<number> {
+    const owners = new Set(recordLinkIds);
+    let archived = 0;
+    for (const state of [...this.store.syncFieldStates.values()]) {
+      if (!owners.has(state.recordLinkId) || state.status !== "active") {
+        continue;
+      }
+      this.store.syncFieldStates.set(state.id, { ...state, status: "archived" });
+      archived += 1;
+    }
+    return Promise.resolve(archived);
+  }
+
+  public archiveScopeLinksByCorrespondence(scopeCorrespondenceId: string): Promise<number> {
+    let archived = 0;
+    for (const link of [...this.store.scopeLinks.values()]) {
+      if (link.scopeCorrespondenceId !== scopeCorrespondenceId || link.status !== "active") {
+        continue;
+      }
+      this.store.scopeLinks.set(link.id, { ...link, status: "archived" });
+      archived += 1;
+    }
+    return Promise.resolve(archived);
+  }
+}
+
+/**
+ * AL-2.6 — mirrors `CredentialRepository.deleteByAppId`: the app's rows are **removed**
+ * from the store (never flagged), every `type` included, and the number removed is
+ * returned. Paired with {@link FakeCredentialStore}, which records only metadata, so a
+ * test can prove the credentials are gone without a secret ever existing in the fake.
+ */
+class FakeCredentialRepo implements CredentialTxRepo {
+  public constructor(private readonly store: InMemoryStore) {}
+  public deleteByAppId(appId: string): Promise<number> {
+    const surviving = this.store.credentials.filter((entry) => entry.appId !== appId);
+    const deleted = this.store.credentials.length - surviving.length;
+    this.store.credentials.length = 0;
+    this.store.credentials.push(...surviving);
+    return Promise.resolve(deleted);
   }
 }
 
@@ -225,6 +340,7 @@ class FakeSpecRepo implements SpecReader, SpecTxRepo {
   public getById(id: string): Promise<ApiSpec | undefined> {
     return Promise.resolve(this.store.specs.get(id));
   }
+  /** Every spec of the app in any status — the set AL-2.4 archives. */
   public listByAppId(appId: string): Promise<ApiSpec[]> {
     return Promise.resolve([...this.store.specs.values()].filter((spec) => spec.appId === appId));
   }
@@ -413,6 +529,24 @@ function uniqueViolation(constraint: string): Error & { code: string; constraint
 }
 
 /**
+ * A **pg-shaped** foreign-key violation (SQLSTATE `23503`) — what Postgres raises when a
+ * `DELETE` would leave a row referencing a removed one under a constraint with no delete
+ * action (the AD-6.3 `adapter_binding` self-FK). Same discipline as
+ * {@link uniqueViolation}: a real error shape, never a test-only sentinel.
+ */
+function foreignKeyViolation(
+  constraint: string,
+  table: string,
+): Error & { code: string; constraint: string } {
+  return Object.assign(
+    new Error(
+      `update or delete on table "${table}" violates foreign key constraint "${constraint}" on table "${table}"`,
+    ),
+    { code: "23503", constraint },
+  );
+}
+
+/**
  * Mirrors {@link ApprovedMappingRepository}'s SL-2 methods: the `active` mappings pinned
  * to a spec id (either side), the `suspended` ones the SL-10.5 breaking classification also
  * reads, a spec-ids-only re-pin that leaves every other column byte-identical, and the
@@ -520,6 +654,43 @@ class FakeApprovedMappingRepo implements ApprovedMappingTxRepo {
     this.store.approvedMappings.set(id, updated);
     return Promise.resolve(updated);
   }
+  /**
+   * AL-2.4 — mirrors the real `markArchived`: sets **only** `status`, from **any** status
+   * (no compare-and-set), leaving the pinned spec ids and the counterpart/predecessor
+   * links untouched — the archived row stays fully readable history.
+   */
+  public markArchived(id: string): Promise<ApprovedMapping | undefined> {
+    const existing = this.store.approvedMappings.get(id);
+    if (existing === undefined) return Promise.resolve(undefined);
+    const updated: ApprovedMapping = { ...existing, status: "archived" };
+    this.store.approvedMappings.set(id, updated);
+    return Promise.resolve(updated);
+  }
+  /**
+   * AL-2.4 — mirrors the real `clearCounterpartsPointingAt`: an UPDATE keyed by the
+   * **pointed-at** ids, so only rows whose `counterpartMappingId` is in the set are
+   * cleared (whatever app they belong to), and the archived rows keep their own column.
+   * The real repo writes SQL NULL, which `mapApprovedMappingRow` reads back as an
+   * **absent** domain key (`row.counterpartMappingId ?? undefined`) — so the fake deletes
+   * the key rather than storing `null`, or a test would assert a shape the database never
+   * produces ([[fakes-must-mirror-real-repos]]).
+   */
+  public clearCounterpartsPointingAt(mappingIds: readonly string[]): Promise<string[]> {
+    if (mappingIds.length === 0) return Promise.resolve([]);
+    const targets = new Set(mappingIds);
+    const cleared: string[] = [];
+    for (const mapping of [...this.store.approvedMappings.values()]) {
+      const counterpart = mapping.counterpartMappingId;
+      if (counterpart === undefined || counterpart === null || !targets.has(counterpart)) {
+        continue;
+      }
+      const updated: ApprovedMapping = { ...mapping };
+      delete updated.counterpartMappingId;
+      this.store.approvedMappings.set(mapping.id, updated);
+      cleared.push(mapping.id);
+    }
+    return Promise.resolve(cleared);
+  }
 }
 
 /** Mirrors {@link MappingArtifactsRepository}'s SL-4 reads: a mapping's approved field/operation children. */
@@ -537,7 +708,7 @@ class FakeMappingArtifactsRepo implements MappingArtifactsTxReader {
  * Mirrors {@link DownstreamArtifactRepository}'s by-mapping reads: adapter bindings (SL-4.6
  * coupled cache drop) and `SyncRule`s (SL-5.2 `pollOperationRef` re-validation).
  */
-class FakeDownstreamArtifactRepo implements DownstreamArtifactTxReader {
+class FakeDownstreamArtifactRepo implements DownstreamArtifactTxRepo {
   public constructor(private readonly store: InMemoryStore) {}
   public listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]> {
     return Promise.resolve(
@@ -557,6 +728,118 @@ class FakeDownstreamArtifactRepo implements DownstreamArtifactTxReader {
       this.store.adapterBindings.filter((b) => b.backendAppId === backendAppId),
     );
   }
+  /**
+   * AL-2.3 — mirrors the real delete **including its `ON DELETE CASCADE`**: removing a
+   * consumer app's endpoints removes their bindings with them. A fake that dropped only
+   * the endpoint rows would leave orphan bindings the database could never hold, and
+   * would mask exactly the double-count the cascade's ordering avoids.
+   */
+  public deleteAdapterEndpointsByConsumerApp(consumerAppId: string): Promise<string[]> {
+    const doomed = [...this.store.adapterEndpoints.values()].filter(
+      (endpoint) => endpoint.consumerAppId === consumerAppId,
+    );
+    const doomedIds = new Set(doomed.map((endpoint) => endpoint.id));
+    for (const id of doomedIds) {
+      this.store.adapterEndpoints.delete(id);
+    }
+    const survivingBindings = this.store.adapterBindings.filter(
+      (binding) => !doomedIds.has(binding.adapterEndpointId),
+    );
+    this.store.adapterBindings.length = 0;
+    this.store.adapterBindings.push(...survivingBindings);
+    return Promise.resolve([...doomedIds]);
+  }
+  /**
+   * AL-2.2 — mirrors the real delete **including the composite same-endpoint self-FK**
+   * `adapter_binding_depends_on_same_endpoint_fk`, which has **no delete action**
+   * (AD-6.3): a surviving binding may not be left pointing at a deleted one. The fake
+   * therefore does exactly what the repository does — unchain the surviving downstreams
+   * first, then delete — and then **enforces the constraint**, rejecting with a pg-shaped
+   * `23503` if any survivor still references a removed row. Without that enforcement a
+   * cross-backend `fanout-merge` chain aborts the real cascade while the unit suite stays
+   * green ([[fakes-must-mirror-real-repos]]).
+   *
+   * Clearing writes an **absent** key, not `null`: `mapAdapterBindingRow` collapses the
+   * NULL columns to absent (`row.dependsOnBindingId ?? undefined`), so storing `null`
+   * here would be a shape the database never produces.
+   */
+  public deleteAdapterBindingsByBackendApp(
+    backendAppId: string,
+  ): Promise<AdapterBindingBackendDeletion> {
+    const doomed = this.store.adapterBindings.filter(
+      (binding) => binding.backendAppId === backendAppId,
+    );
+    if (doomed.length === 0) {
+      return Promise.resolve({ endpointIds: [], unchained: [] });
+    }
+    const doomedIds = new Set(doomed.map((binding) => binding.id));
+
+    const unchained: { id: string; adapterEndpointId: string }[] = [];
+    const surviving = this.store.adapterBindings
+      .filter((binding) => !doomedIds.has(binding.id))
+      .map((binding) => {
+        if (
+          binding.dependsOnBindingId === undefined ||
+          !doomedIds.has(binding.dependsOnBindingId)
+        ) {
+          return binding;
+        }
+        const detached: AdapterBinding = { ...binding };
+        delete detached.dependsOnBindingId;
+        delete detached.chainInputs;
+        unchained.push({ id: binding.id, adapterEndpointId: binding.adapterEndpointId });
+        return detached;
+      });
+
+    // The constraint itself: after the delete, no surviving row may reference a removed
+    // one. Postgres raises this at the end of the DELETE statement. Unreachable while the
+    // detach above is correct — that is the point: it is the regression guard that fires
+    // the moment the detach is weakened, which is exactly the gap that let a green unit
+    // suite ship a cascade the database aborted.
+    const orphan = surviving.find(
+      (binding) =>
+        binding.dependsOnBindingId !== undefined && doomedIds.has(binding.dependsOnBindingId),
+    );
+    if (orphan !== undefined) {
+      return Promise.reject(
+        foreignKeyViolation("adapter_binding_depends_on_same_endpoint_fk", "adapter_binding"),
+      );
+    }
+
+    this.store.adapterBindings.length = 0;
+    this.store.adapterBindings.push(...surviving);
+    return Promise.resolve({
+      endpointIds: [...new Set(doomed.map((binding) => binding.adapterEndpointId))],
+      unchained,
+    });
+  }
+  /** The endpoint's remaining bindings, in any status (RT-3 decides from these). */
+  public listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]> {
+    return Promise.resolve(
+      this.store.adapterBindings.filter(
+        (binding) => binding.adapterEndpointId === adapterEndpointId,
+      ),
+    );
+  }
+  /**
+   * AL-2.2 — mirrors the real **guarded** CO-1.3 UPDATE: only an `active` endpoint moves
+   * to `composition-required`; a `disabled` or already-flagged one is left exactly as it
+   * is (idempotent). Throws on an unknown id, as the real repo does after its update.
+   */
+  public markAdapterEndpointCompositionRequired(
+    adapterEndpointId: string,
+  ): Promise<AdapterEndpoint> {
+    const existing = this.store.adapterEndpoints.get(adapterEndpointId);
+    if (existing === undefined) {
+      return Promise.reject(new Error("adapter_endpoint not found after a CO-1 status transition"));
+    }
+    if (existing.status !== "active") {
+      return Promise.resolve(existing);
+    }
+    const updated: AdapterEndpoint = { ...existing, status: "composition-required" };
+    this.store.adapterEndpoints.set(adapterEndpointId, updated);
+    return Promise.resolve(updated);
+  }
 }
 
 /**
@@ -575,6 +858,27 @@ class FakeSyncRuleRepo implements SyncRuleTxRepo {
       this.store.syncRules.set(id, next);
     }
     return Promise.resolve();
+  }
+  /**
+   * AL-2.2 — mirrors the real `deleteByApp`: a rule belongs to an app **through its
+   * `ApprovedMapping`** (it has no app column), so the deleted set is every rule whose
+   * mapping names the app on either side — in any rule status. Returns the deleted ids.
+   */
+  public deleteByApp(appId: string): Promise<string[]> {
+    const appMappingIds = new Set(
+      [...this.store.approvedMappings.values()]
+        .filter((mapping) => mapping.sourceAppId === appId || mapping.targetAppId === appId)
+        .map((mapping) => mapping.id),
+    );
+    const deleted: string[] = [];
+    for (const rule of [...this.store.syncRules.values()]) {
+      if (!appMappingIds.has(rule.approvedMappingId)) {
+        continue;
+      }
+      this.store.syncRules.delete(rule.id);
+      deleted.push(rule.id);
+    }
+    return Promise.resolve(deleted);
   }
 }
 
@@ -743,6 +1047,11 @@ export class FakeUnitOfWork implements UnitOfWork {
       scopeCorrespondences: new Map(this.store.scopeCorrespondences),
       bindingRevalidations: [...this.store.bindingRevalidations],
       correspondenceRevalidations: [...this.store.correspondenceRevalidations],
+      // AL-2 — the deregister cascade's tables, so a thrown cascade rolls back whole.
+      adapterEndpoints: new Map(this.store.adapterEndpoints),
+      recordLinks: new Map(this.store.recordLinks),
+      syncFieldStates: new Map(this.store.syncFieldStates),
+      scopeLinks: new Map(this.store.scopeLinks),
     };
     const stores: TxStores = {
       registeredApps: new FakeAppRepo(this.store),
@@ -759,6 +1068,8 @@ export class FakeUnitOfWork implements UnitOfWork {
       syncRules: new FakeSyncRuleRepo(this.store),
       scopeCorrespondences: new FakeScopeCorrespondenceRepo(this.store),
       scopeLifecycle: new FakeScopeLifecycle(this.store),
+      syncStateArchival: new FakeSyncStateArchivalRepo(this.store),
+      credentials: new FakeCredentialRepo(this.store),
       emit: (event) => {
         this.store.events.push(event);
         return Promise.resolve();
@@ -791,6 +1102,10 @@ export class FakeUnitOfWork implements UnitOfWork {
     scopeCorrespondences: Map<string, ScopeCorrespondence>;
     bindingRevalidations: string[];
     correspondenceRevalidations: InMemoryStore["correspondenceRevalidations"][number][];
+    adapterEndpoints: Map<string, AdapterEndpoint>;
+    recordLinks: Map<string, RecordLink>;
+    syncFieldStates: Map<string, SyncFieldState>;
+    scopeLinks: Map<string, ScopeLink>;
   }): void {
     replaceMap(this.store.apps, snapshot.apps);
     replaceMap(this.store.specs, snapshot.specs);
@@ -810,6 +1125,10 @@ export class FakeUnitOfWork implements UnitOfWork {
     replaceMap(this.store.scopeCorrespondences, snapshot.scopeCorrespondences);
     replaceArray(this.store.bindingRevalidations, snapshot.bindingRevalidations);
     replaceArray(this.store.correspondenceRevalidations, snapshot.correspondenceRevalidations);
+    replaceMap(this.store.adapterEndpoints, snapshot.adapterEndpoints);
+    replaceMap(this.store.recordLinks, snapshot.recordLinks);
+    replaceMap(this.store.syncFieldStates, snapshot.syncFieldStates);
+    replaceMap(this.store.scopeLinks, snapshot.scopeLinks);
   }
 }
 

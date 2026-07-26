@@ -4,6 +4,7 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  CredentialRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
   RegisteredAppRepository,
@@ -43,6 +44,7 @@ import { ConflictError } from "./app-errors.js";
 import { validateBindingHealth } from "./http/adapter-runtime/serve/planner.js";
 import { AppLifecycleService } from "./modules/app-lifecycle.js";
 import { GraphProjection } from "./modules/graph/index.js";
+import { dbSyncStateArchival } from "./modules/persistence.js";
 import type { CredentialTxStore, DetectionJobTxRepo, TxStores } from "./modules/persistence.js";
 import { ScopeLifecycleService } from "./modules/sync/scope-lifecycle.js";
 
@@ -182,6 +184,10 @@ suite("AL-1 disable / re-enable a RegisteredApp (requires Postgres)", () => {
         scopeCorrespondences: new ScopeCorrespondenceRepository(handle),
         scopeLinks: new ScopeLinkRepository(handle),
       }),
+      // AL-2 — the deregister cascade's seams; unused by this suite, wired so
+      // the hand-built `TxStores` stays complete.
+      syncStateArchival: dbSyncStateArchival(handle),
+      credentials: new CredentialRepository(handle),
       emit: () => Promise.reject(new Error("AL-1 must not emit")),
     };
   }

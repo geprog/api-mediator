@@ -1,7 +1,7 @@
 import { stripUndefined, type AuditLogEntry, type RegisteredApp } from "@mediator/domain";
 import { getActiveTraceContext, type ActiveTraceContext } from "@mediator/telemetry";
 
-import { ConflictError, NotFoundError } from "../app-errors.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../app-errors.js";
 import type { EndpointCacheInvalidator, TxStores, UnitOfWork } from "./persistence.js";
 
 /**
@@ -100,12 +100,148 @@ export class AppLifecycleService {
 
   /**
    * **AL-1.3 — re-enable a `disabled` app.** Throws `NotFoundError` (unknown app) or
-   * `ConflictError` (the app is already `active`). This **lifts the condition and
-   * restores nothing**: rules resume under their stored `status` and poll on from their
-   * stored cursors/snapshots, so no re-backfill is performed and no re-approval needed.
+   * `ConflictError` (the app is already `active`, or it was **deregistered** — see
+   * below). This **lifts the condition and restores nothing**: rules resume under their
+   * stored `status` and poll on from their stored cursors/snapshots, so no re-backfill is
+   * performed and no re-approval needed.
+   *
+   * ## Why a deregistered app cannot be re-enabled (AL-3)
+   *
+   * AL-2 retains the `RegisteredApp` row and leaves it `disabled` (there is no third
+   * status without a migration — see {@link deregister}), which would otherwise make a
+   * departed app indistinguishable from a temporarily-disabled one and let AL-4's UI
+   * offer "enable" on it. Re-enabling resurrects **nothing** (every mapping/spec/link is
+   * archived and nothing un-archives them; `listMountableConsumerApps` reads
+   * `ApiSpecRepository.listActive()`, so the consumer surface stays unmounted), but it is
+   * still a zombie the API should refuse.
+   *
+   * The guard uses the state the cascade already leaves behind rather than a new column:
+   * **an app that has `ApiSpec`s but none of them `active` was deregistered.** AL-2 is
+   * the only path that archives *every* spec of an app — a version advance supersedes the
+   * old version **and** writes a new `active` one (SL-1), and SL-4 staleness moves
+   * mappings, not specs — so an AL-1-disabled app always keeps at least one `active` spec.
+   *
+   * The `specs.length > 0` half matters: "no specs at all" is a *different* state (an app
+   * row that never got one) and must stay enableable, so the predicate says "its lineages
+   * were archived", never merely "I found nothing". When the durable marker lands (the
+   * preferred shape is a nullable `registered_app.deregistered_at`, which composes with
+   * the existing non-`active` gates rather than breaking every `status` comparison), this
+   * switches to reading it.
    */
   public enable(appId: string, actor: string): Promise<RegisteredApp> {
     return this.#transition(appId, actor, "enable");
+  }
+
+  /**
+   * **AL-2 — deregister an app (destructive, confirmed) and run the whole cascade.**
+   *
+   * `confirmation` must equal the app's own `name` (AL-2.1): deregister "requires
+   * explicit confirmation before it proceeds — deregister is destructive, unlike the
+   * reversible disable" (`docs/architecture/extensibility.md` *App lifecycle*). Typing
+   * the target's name is the mechanism (README open question 5 leaves it open), and it is
+   * enforced **here**, in the service that owns the invariant — not only in the route — so
+   * a bare/absent/wrong confirmation can never reach the cascade whatever calls it.
+   * Rejects with `BadRequestError`; nothing is written.
+   *
+   * ## The cascade, in one transaction (a partial cascade is far worse than a slow one)
+   *
+   * Ordered so every FK-referencing row goes before what it references, and so the graph
+   * recompute at the end sees the *post*-cascade aggregate:
+   *
+   * 1. **AL-2.3** the app's own `AdapterEndpoint`s (it registered a `CONSUMER` spec) are
+   *    **deleted**, their bindings + write outcomes cascading with them — its adapter
+   *    server is torn down and callers hit **nothing**, not `not-yet-mapped`;
+   * 2. **AL-2.2** every `AdapterBinding` the app **backs** on other consumers' endpoints
+   *    is **deleted**, and any endpoint left with **no** bindings reverts to serving
+   *    `not-yet-mapped` (RT-3.1) — additionally flagged `composition-required` so it reads
+   *    as awaiting a backend rather than as a live configuration backed by nothing;
+   * 3. **AL-2.2** every `SyncRule` of every mapping naming the app is **deleted** (its
+   *    snapshots/scope state cascade);
+   * 4. **AL-2.4** every `ApprovedMapping` naming the app is **archived** — retained for
+   *    audit, never executed again — and every `counterpartMappingId` *pointing at* one of
+   *    them is **cleared**; the app's `ApiSpec`s are **archived** the same way (the
+   *    archived mappings still pin them, so they stay resolvable for audit);
+   * 5. **AL-2.5** its `RecordLink`s and their `SyncFieldState` are **archived** —
+   *    deliberately **not** tombstoned, since no record was deleted (contrast `Tombstone`
+   *    in `docs/glossary.md`) — and each scoped pair's `ScopeLink`s are archived through
+   *    the existing SS-10.5 `archiveByCorrespondence` sweep;
+   * 6. **AL-2.6** its `Credential`s are **deleted outright** (never archived),
+   *    `adapterToken` included — which is exactly how the adapter token is revoked with
+   *    the app (AT-4.5) — while the audit log keeps every historical event;
+   * 7. the `RegisteredApp` row itself is **retained** and moved to `disabled` — see
+   *    {@link deregister} note below;
+   * 8. **AL-2.7** every `GraphEdge` incident to the app is recomputed: its aggregate is
+   *    now empty, so GR-1.2 **removes** it. Endpoint caches are dropped **after** commit.
+   *
+   * ## Why the `RegisteredApp` row is retained rather than deleted
+   *
+   * `extensibility.md`'s cascade enumerates what is deleted (rules, bindings, a consumer's
+   * endpoints, credentials) and what is archived; the app row is in neither list. It
+   * **cannot** be deleted: AL-2.4 requires the app's `ApiSpec`s and `ApprovedMapping`s to
+   * survive as archived audit records, and both carry `NOT NULL` foreign keys to
+   * `registered_app` with no cascade — deleting the app would have to delete exactly the
+   * history the criterion retains. `registered_app_status` carries no `archived` value and
+   * Phase 6 coins no new status, so the row is moved to the one non-`active` status the
+   * enum has: `disabled`. That is also the status every derived gate already reads — the
+   * poll-candidate join, `validateBindingHealth` (RP-3.5), `listMountableConsumerApps`
+   * (RT-4.2), and adapter-token validation, which rejects "a non-`active` app's tokens"
+   * (`docs/architecture/data-model.md` `Credential.validUntil`) — so the departed app
+   * fails **closed** on every path even if some artifact escaped the cascade.
+   *
+   * The residue is that this slice cannot make the app disappear from the *node* set
+   * AL-2.7/GR-5.4 also ask for: nodes are `RegisteredApp` rows and the row must survive.
+   * All of the app's **edges** are removed here; excluding a deregistered app from
+   * `GraphService.getGraph`'s nodes needs a durable marker this schema cannot express
+   * without a migration, and GR-5's read does not exist yet.
+   *
+   * Every effect is attributed to the authenticated operator with a **cascade summary**
+   * in the audit log (AL-2.8/OA-3); the route layer rejects a `viewer` with `403` before
+   * this service runs.
+   */
+  public async deregister(
+    appId: string,
+    actor: string,
+    confirmation: string,
+  ): Promise<AppDeregistration> {
+    const committed = await this.#unitOfWork.run(async (tx) => {
+      const app = await tx.registeredApps.getById(appId);
+      if (app === undefined) {
+        throw new NotFoundError(`RegisteredApp ${appId} not found.`);
+      }
+      // AL-2.1 — the destructive-action gate, before a single row is touched.
+      if (confirmation !== app.name) {
+        throw new BadRequestError(
+          `Deregistering RegisteredApp ${appId} requires confirmation: repeat the app's exact name in "confirm".`,
+        );
+      }
+
+      const cascade = await runDeregisterCascade(tx, appId);
+
+      // The row is retained (archived mappings/specs pin it) and moved out of service.
+      // `markDisabled` is the compare-and-set from `active`; an already-`disabled` app
+      // (disabled first, then deregistered — or a concurrent disable) is already in the
+      // target state, so the read-back is the committed row either way.
+      const updated =
+        app.status === "active" ? await tx.registeredApps.markDisabled(appId) : undefined;
+      const finalApp = updated ?? (await tx.registeredApps.getById(appId));
+      if (finalApp === undefined) {
+        throw new ConflictError(`RegisteredApp ${appId} disappeared during deregistration.`);
+      }
+
+      // AL-2.7 — every incident edge's aggregate is empty now that the rules/bindings are
+      // deleted, so each recompute REMOVES its edge (GR-1.2). Inside the transaction, so
+      // no edge survives a rolled-back cascade.
+      const graphEdgesRecomputed = await recomputeIncidentEdges(tx, appId);
+
+      const summary: AppDeregistrationSummary = { ...cascade.summary, graphEdgesRecomputed };
+      await tx.audit.insert(this.#deregistrationAttribution(actor, finalApp, summary));
+      return { app: finalApp, summary, endpointIds: cascade.endpointIds };
+    });
+
+    // XI-2 / CH-5.3 — after commit: the app's own (now deleted) endpoints and every
+    // endpoint it backed. Nothing cached while it was serving may outlive the cascade.
+    this.#dropCaches(committed.endpointIds);
+    return { app: committed.app, summary: committed.summary };
   }
 
   /** Both directions are the same transaction shape; only the compare-and-set differs. */
@@ -122,6 +258,15 @@ export class AppLifecycleService {
       }
       if (existing.status !== expectedFrom) {
         throw new ConflictError(conflictMessage(appId, existing.status, action));
+      }
+      // AL-3 — a `disabled` app whose specs exist but NONE is `active` was DEREGISTERED,
+      // not disabled: refuse to bring it back. See `enable`'s note for why this predicate
+      // identifies a departed app exactly, and why the state carries no marker yet.
+      if (action === "enable") {
+        const specs = await tx.apiSpecs.listByAppId(appId);
+        if (specs.length > 0 && !specs.some((spec) => spec.status === "active")) {
+          throw new ConflictError(deregisteredMessage(appId));
+        }
       }
 
       const updated =
@@ -179,10 +324,94 @@ export class AppLifecycleService {
       spanId: trace?.spanId,
     });
   }
+
+  /**
+   * AL-2.8 / OA-3 — the audit row for one deregistration, attributed to the authenticated
+   * operator and carrying the **cascade summary** the criterion asks for. Same shape and
+   * same reasoning as {@link #attribution}: a `mapping-decision` entry with the app on
+   * `originAppId` (no dedicated app-lifecycle type is coined here — retrofitting one
+   * across all five call sites is its own slice), `decision` unset, `details` opening with
+   * {@link APP_LIFECYCLE_AUDIT_PREFIX}.
+   *
+   * The summary is **counts only** — no app name, no base URL, no credential id, no
+   * record id — so the durable row can never leak landscape detail (the audit log is
+   * metadata-only, `docs/architecture/security.md`). Every historical row for this app,
+   * including this one, is retained: deregistration deletes credentials, never audit.
+   */
+  #deregistrationAttribution(
+    actor: string,
+    app: RegisteredApp,
+    summary: AppDeregistrationSummary,
+  ): AuditLogEntry {
+    const trace = this.#readTraceContext();
+    return stripUndefined({
+      id: this.#newId(),
+      type: "mapping-decision" as const,
+      actor,
+      originAppId: app.id,
+      details: deregistrationDetails(summary),
+      timestamp: this.#clock(),
+      traceId: trace?.traceId,
+      spanId: trace?.spanId,
+    });
+  }
 }
 
 /** The two directions of the reversible AL-1 transition. */
 type AppLifecycleAction = "disable" | "enable";
+
+/**
+ * **AL-2 — what the deregister cascade did**, in counts only. Returned to the operator
+ * (so AL-4's UI can report the cascade it just ran) and folded into the audit row. It
+ * deliberately carries no ids or names: it is metadata that crosses the API and the
+ * durable audit log alike.
+ */
+export interface AppDeregistrationSummary {
+  /** AL-2.2 — `SyncRule`s deleted (of every mapping naming the app on either side). */
+  readonly syncRulesDeleted: number;
+  /** AL-2.3 — the app's own `AdapterEndpoint`s deleted (its adapter server torn down). */
+  readonly adapterEndpointsTornDown: number;
+  /** AL-2.2 — bindings deleted on *other* consumers' endpoints (the app backed them). */
+  readonly adapterBindingsDeleted: number;
+  /**
+   * AL-2.2 — surviving endpoints left with **no** bindings. Each now answers
+   * `not-yet-mapped` (RT-3.1) — except one an operator had already `disabled`, which
+   * keeps answering `endpoint-disabled` (RT-3.2 is checked first, and the cascade
+   * deliberately does not overwrite that deliberate state). So this counts the *cascade
+   * effect* — "lost its last backend" — not a claim about the answer each one gives.
+   */
+  readonly adapterEndpointsLeftWithoutBindings: number;
+  /**
+   * AL-2.2 — **surviving** bindings whose `dependsOnBindingId`/`chainInputs` were cleared
+   * because the deregistered app backed their chain's upstream (a cross-backend
+   * `fanout-merge` chain). Their endpoints are flagged `composition-required`.
+   */
+  readonly adapterBindingsUnchained: number;
+  /** AL-2.4 — `ApprovedMapping`s archived (retained for audit, never executed again). */
+  readonly approvedMappingsArchived: number;
+  /** AL-2.4 — `counterpartMappingId` links **pointing at** those archived rows, cleared. */
+  readonly counterpartLinksCleared: number;
+  /** AL-2.4 — the app's `ApiSpec`s archived (archived mappings still pin them). */
+  readonly apiSpecsArchived: number;
+  /** AL-2.5 — `RecordLink`s archived — deliberately **not** tombstoned. */
+  readonly recordLinksArchived: number;
+  /** AL-2.5 — `SyncFieldState` rows archived (the per-side baselines of those links). */
+  readonly syncFieldStatesArchived: number;
+  /** AL-2.5 — `ScopeLink`s archived through the SS-10.5 by-correspondence sweep. */
+  readonly scopeLinksArchived: number;
+  /** AL-2.6 — `Credential`s deleted outright, `adapterToken` included (AT-4.5). */
+  readonly credentialsDeleted: number;
+  /** AL-2.7 — incident `GraphEdge`s recomputed; each aggregate is empty, so each is removed. */
+  readonly graphEdgesRecomputed: number;
+  /** AL-2.7 / XI-2 — distinct `AdapterEndpoint`s whose cached entries were dropped. */
+  readonly endpointCachesDropped: number;
+}
+
+/** AL-2 — the committed outcome: the retained (now out-of-service) app + what it cost. */
+export interface AppDeregistration {
+  readonly app: RegisteredApp;
+  readonly summary: AppDeregistrationSummary;
+}
 
 /** The stable marker every AL-1 audit row's `details` opens with (countable by prefix). */
 export const APP_LIFECYCLE_AUDIT_PREFIX = "app lifecycle:";
@@ -208,6 +437,25 @@ export const APP_LIFECYCLE_AUDIT_PREFIX = "app lifecycle:";
  * audited by its own row.
  */
 async function reactWithin(tx: TxStores, appId: string): Promise<readonly string[]> {
+  await recomputeIncidentEdges(tx, appId);
+  const backedBindings = await tx.downstreamArtifacts.listAdapterBindingsByBackendApp(appId);
+  return [...new Set(backedBindings.map((binding) => binding.adapterEndpointId))];
+}
+
+/**
+ * Recompute **every** `GraphEdge` incident to the app, once per distinct `(pair, type)`,
+ * from its **current** aggregate — the shared half of AL-1.5 and AL-2.7.
+ *
+ * The pairs come from the app's mappings in **any** status (`listByAppId`), so an AL-2
+ * cascade that has just archived them still finds every edge to repaint. What differs is
+ * only what the recompute *finds*: after a disable the rules/bindings still exist and the
+ * edge is rewritten `paused`; after a deregister they are deleted, the aggregate is empty,
+ * and GR-1.2 **removes** the edge instead.
+ *
+ * Writes only `graph_edge` rows and no audit row (GR-3.6) — the operator action is
+ * audited by its own row. Returns how many distinct edges were recomputed.
+ */
+async function recomputeIncidentEdges(tx: TxStores, appId: string): Promise<number> {
   const mappings = await tx.approvedMappings.listByAppId(appId);
   const recomputed = new Set<string>();
   for (const mapping of mappings) {
@@ -225,9 +473,149 @@ async function reactWithin(tx: TxStores, appId: string): Promise<readonly string
       await tx.graph.recomputeAdapterEdge(mapping.sourceAppId, mapping.targetAppId);
     }
   }
+  return recomputed.size;
+}
 
-  const backedBindings = await tx.downstreamArtifacts.listAdapterBindingsByBackendApp(appId);
-  return [...new Set(backedBindings.map((binding) => binding.adapterEndpointId))];
+/**
+ * **AL-2.2 … AL-2.6 — the destructive half of the cascade, inside the caller's
+ * transaction.** Split out of {@link AppLifecycleService.deregister} so the ordering is
+ * readable in one place and unit-testable step by step.
+ *
+ * **Ordering is load-bearing** — every step removes rows that reference what a later step
+ * touches, and the graph recompute the caller runs afterwards must see the *post*-cascade
+ * aggregate:
+ *
+ * 1. the app's own endpoints go **first**, so the bindings they own cascade away before
+ *    the by-backend delete counts what is left (nothing is deleted or counted twice);
+ * 2. rules go before their mappings are archived — the mapping rows are **archived, never
+ *    deleted**, so the rules cannot ride on a mapping cascade;
+ * 3. counterpart links are cleared **after** the archive, keyed by the ids just archived;
+ * 4. the record-link ids are read **before** they are archived (the read is by app and
+ *    status-agnostic, so ordering is not strictly required — but the field-state archive
+ *    is keyed by those ids, and reading first keeps the two steps independent).
+ *
+ * Returns the counts plus the distinct `AdapterEndpoint` ids whose caches the caller drops
+ * after commit: the app's own (now deleted) endpoints **and** every endpoint it backed.
+ */
+async function runDeregisterCascade(
+  tx: TxStores,
+  appId: string,
+): Promise<{
+  readonly summary: Omit<AppDeregistrationSummary, "graphEdgesRecomputed">;
+  readonly endpointIds: readonly string[];
+}> {
+  // ── AL-2.3 — tear down the app's own adapter surface (a CONSUMER spec's server). ──
+  // The delete returns the ids it removed, which are exactly the endpoints whose cached
+  // entries must be dropped after commit — no separate read needed.
+  const tornDown = await tx.downstreamArtifacts.deleteAdapterEndpointsByConsumerApp(appId);
+
+  // ── AL-2.2 — delete the bindings the app BACKS on other consumers' endpoints. ──
+  // Read first: the rows give both the count and the endpoints to re-inspect/invalidate.
+  // The delete itself unchains any surviving cross-backend downstream before removing
+  // the rows (AD-6.3's self-FK has no delete action), and reports what it detached.
+  const backed = await tx.downstreamArtifacts.listAdapterBindingsByBackendApp(appId);
+  const deletion = await tx.downstreamArtifacts.deleteAdapterBindingsByBackendApp(appId);
+  let leftWithoutBindings = 0;
+  for (const endpointId of deletion.endpointIds) {
+    const remaining = await tx.downstreamArtifacts.listAdapterBindingsByEndpoint(endpointId);
+    if (remaining.length > 0) {
+      continue;
+    }
+    // No bindings at all → RT-3.1 answers `not-yet-mapped` (unless the endpoint is
+    // `disabled`, which keeps answering `endpoint-disabled` — RT-3.2 is checked first).
+    // Flag it `composition-required` too (the guarded CO-1.3 transition, a no-op on a
+    // `disabled` or already-flagged endpoint) so the endpoint reads as awaiting a backend
+    // and a later single-binding attach can auto-activate it again (CO-1.2).
+    await tx.downstreamArtifacts.markAdapterEndpointCompositionRequired(endpointId);
+    leftWithoutBindings += 1;
+  }
+  // A survivor that lost its upstream keeps serving, but its composition lost a step:
+  // flag its endpoint `composition-required` so the operator re-composes rather than the
+  // endpoint serving a chain wired to a response nobody produces. Disjoint from the loop
+  // above by construction — an endpoint with an unchained survivor still has bindings.
+  const unchainedEndpointIds = [
+    ...new Set(deletion.unchained.map((binding) => binding.adapterEndpointId)),
+  ];
+  for (const endpointId of unchainedEndpointIds) {
+    await tx.downstreamArtifacts.markAdapterEndpointCompositionRequired(endpointId);
+  }
+
+  // ── AL-2.2 — delete every SyncRule of every mapping naming the app. ──
+  const deletedRules = await tx.syncRules.deleteByApp(appId);
+
+  // ── AL-2.4 — archive the mappings, clear counterparts pointing at them, archive specs. ──
+  const mappings = await tx.approvedMappings.listByAppId(appId);
+  const archivedMappingIds: string[] = [];
+  for (const mapping of mappings) {
+    const archived = await tx.approvedMappings.markArchived(mapping.id);
+    if (archived !== undefined) {
+      archivedMappingIds.push(archived.id);
+    }
+  }
+  const clearedCounterparts =
+    await tx.approvedMappings.clearCounterpartsPointingAt(archivedMappingIds);
+
+  const specs = await tx.apiSpecs.listByAppId(appId);
+  let archivedSpecs = 0;
+  for (const spec of specs) {
+    if (spec.status === "archived") {
+      continue;
+    }
+    await tx.apiSpecs.updateStatus(spec.id, "archived");
+    archivedSpecs += 1;
+  }
+
+  // ── AL-2.5 — archive the linked sync state (never a tombstone: no record was deleted). ──
+  const recordLinkIds = await tx.syncStateArchival.listRecordLinkIdsByApp(appId);
+  const archivedLinks = await tx.syncStateArchival.archiveRecordLinksByApp(appId);
+  const archivedFieldStates =
+    await tx.syncStateArchival.archiveSyncFieldStatesByRecordLinks(recordLinkIds);
+  const correspondences = await tx.scopeCorrespondences.listByApp(appId);
+  let archivedScopeLinks = 0;
+  for (const correspondence of correspondences) {
+    archivedScopeLinks += await tx.syncStateArchival.archiveScopeLinksByCorrespondence(
+      correspondence.id,
+    );
+  }
+
+  // ── AL-2.6 — delete the credentials outright (adapterToken included → AT-4.5). ──
+  const credentialsDeleted = await tx.credentials.deleteByAppId(appId);
+
+  const endpointIds = [
+    ...new Set([...tornDown, ...backed.map((binding) => binding.adapterEndpointId)]),
+  ];
+  return {
+    summary: {
+      syncRulesDeleted: deletedRules.length,
+      adapterEndpointsTornDown: tornDown.length,
+      adapterBindingsDeleted: backed.length,
+      adapterEndpointsLeftWithoutBindings: leftWithoutBindings,
+      adapterBindingsUnchained: deletion.unchained.length,
+      approvedMappingsArchived: archivedMappingIds.length,
+      counterpartLinksCleared: clearedCounterparts.length,
+      apiSpecsArchived: archivedSpecs,
+      recordLinksArchived: archivedLinks.length,
+      syncFieldStatesArchived: archivedFieldStates,
+      scopeLinksArchived: archivedScopeLinks,
+      credentialsDeleted,
+      endpointCachesDropped: endpointIds.length,
+    },
+    endpointIds,
+  };
+}
+
+/**
+ * AL-2.8 — the audit `details` for one deregistration: the cascade summary rendered as
+ * `key=count` pairs. **Counts only** — no name, no base URL, no ids — so the durable row
+ * stays metadata (`docs/architecture/security.md`). Prefixed with the same stable
+ * {@link APP_LIFECYCLE_AUDIT_PREFIX} as the AL-1 rows, and additionally self-describing
+ * ("app deregistered by operator"), so the two are distinguishable by prefix scan.
+ */
+function deregistrationDetails(summary: AppDeregistrationSummary): string {
+  const counts = Object.entries(summary)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+  return `${APP_LIFECYCLE_AUDIT_PREFIX} app deregistered by operator (cascade committed; credentials deleted, mappings/specs/links archived, rules/bindings deleted); ${counts}`;
 }
 
 /** The audit `details` for one transition — metadata only. */
@@ -246,6 +634,15 @@ function conflictMessage(
   return action === "disable"
     ? `RegisteredApp ${appId} is ${status}; only an active app can be disabled.`
     : `RegisteredApp ${appId} is ${status}; only a disabled app can be re-enabled.`;
+}
+
+/**
+ * AL-3 — the 409 for re-enabling a **deregistered** app. It names the remedy (register
+ * the system afresh), because the whole point of AL-3 is that a returning system becomes
+ * a **new** `RegisteredApp` rather than the old one waking up.
+ */
+function deregisteredMessage(appId: string): string {
+  return `RegisteredApp ${appId} was deregistered (all of its ApiSpecs are archived) and cannot be re-enabled; register the system again as a new app.`;
 }
 
 /** The 409 message when the compare-and-set found the row already moved on. */

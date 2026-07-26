@@ -215,4 +215,48 @@ export class RecordLinkRepository implements RecordLinkStore {
     const [row] = await this.db.select().from(recordLink).where(eq(recordLink.id, id)).limit(1);
     return row === undefined ? undefined : mapRecordLinkRow(row);
   }
+
+  /**
+   * **AL-2.5 — every link id the app participates in, in ANY status.** The set whose
+   * per-side `SyncFieldState` the deregister cascade archives: a link that was already
+   * `tombstoned` before the app left can still carry `active` field state, and that state
+   * must be archived too.
+   */
+  public async listIdsByApp(appId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: recordLink.id })
+      .from(recordLink)
+      .where(or(eq(recordLink.appAId, appId), eq(recordLink.appBId, appId)))
+      .orderBy(recordLink.id);
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * **AL-2.5 — archive the app's still-`active` links on deregistration.** Deliberately
+   * **not** a tombstone: "their own `status = archived` — deliberately not a tombstone,
+   * since no record was deleted; the app left the landscape"
+   * (`docs/architecture/extensibility.md` *App lifecycle*; contrast `Tombstone` in
+   * `docs/glossary.md`). So `tombstone_reason`/`tombstoned_at` stay untouched and NULL —
+   * a reader can always tell "severed by a deletion" from "its app went away".
+   *
+   * Only `active` rows move (the guard), so an already-`tombstoned` link keeps its
+   * tombstone (its severing fact is the older, more specific one) and a re-run archives
+   * nothing. Archiving also drops the row out of the partial unique-active indexes, which
+   * is what lets a *re-registered* app establish fresh links over the same records
+   * without colliding with the prior registration's history (AL-3.1). Returns the ids
+   * actually archived.
+   */
+  public async archiveByApp(appId: string): Promise<string[]> {
+    const archived = await this.db
+      .update(recordLink)
+      .set({ status: "archived" })
+      .where(
+        and(
+          or(eq(recordLink.appAId, appId), eq(recordLink.appBId, appId)),
+          eq(recordLink.status, "active"),
+        ),
+      )
+      .returning({ id: recordLink.id });
+    return archived.map((row) => row.id);
+  }
 }

@@ -110,6 +110,7 @@ class FakeUnitOfWork implements UnitOfWork {
         findActiveByAppAndRole: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
         updateStatus: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
         updateAnalysisExclusions: (): Promise<ApiSpec | undefined> => Promise.resolve(undefined),
+        listByAppId: () => Promise.reject(new Error("unused")),
       },
       registeredApps: {
         getById: (id: string): Promise<RegisteredApp | undefined> =>
@@ -128,6 +129,8 @@ class FakeUnitOfWork implements UnitOfWork {
         listByAppId: (): Promise<never[]> => Promise.resolve([]),
         listSuspendedBySpecId: (): Promise<never[]> => Promise.resolve([]),
         repinSpecs: (): Promise<undefined> => Promise.resolve(undefined),
+        markArchived: () => Promise.reject(new Error("unused")),
+        clearCounterpartsPointingAt: () => Promise.reject(new Error("unused")),
         markStale: (): Promise<undefined> => Promise.resolve(undefined),
       },
       audit: { insert: (): Promise<void> => Promise.resolve() },
@@ -145,6 +148,11 @@ class FakeUnitOfWork implements UnitOfWork {
         listAdapterBindingsByMapping: (): Promise<never[]> => Promise.resolve([]),
         listSyncRulesByMapping: (): Promise<never[]> => Promise.resolve([]),
         listAdapterBindingsByBackendApp: (): Promise<never[]> => Promise.resolve([]),
+        // AL-2 deregister-cascade ports — unused here; every call rejects loudly.
+        deleteAdapterEndpointsByConsumerApp: () => Promise.reject(new Error("unused")),
+        deleteAdapterBindingsByBackendApp: () => Promise.reject(new Error("unused")),
+        listAdapterBindingsByEndpoint: () => Promise.reject(new Error("unused")),
+        markAdapterEndpointCompositionRequired: () => Promise.reject(new Error("unused")),
       },
       graph: {
         recomputeSyncEdge: (): Promise<void> => Promise.resolve(),
@@ -152,12 +160,26 @@ class FakeUnitOfWork implements UnitOfWork {
       },
       cacheInvalidator: { invalidateEndpoint: (): void => {} },
       // SL-5 operational-ref re-validation ports — unused by the SS-19 confirm path here.
-      syncRules: { clearPollOperationRef: (): Promise<void> => Promise.resolve() },
-      scopeCorrespondences: { listByResourceSide: (): Promise<never[]> => Promise.resolve([]) },
+      syncRules: {
+        clearPollOperationRef: (): Promise<void> => Promise.resolve(),
+        deleteByApp: () => Promise.reject(new Error("unused")),
+      },
+      scopeCorrespondences: {
+        listByResourceSide: (): Promise<never[]> => Promise.resolve([]),
+        listByApp: () => Promise.reject(new Error("unused")),
+      },
       scopeLifecycle: {
         revalidateSpecBindings: () => Promise.reject(new Error("unused")),
         revalidateCorrespondence: () => Promise.reject(new Error("unused")),
       },
+      // AL-2 deregister-cascade ports — unused here; every call rejects loudly.
+      syncStateArchival: {
+        listRecordLinkIdsByApp: () => Promise.reject(new Error("unused")),
+        archiveRecordLinksByApp: () => Promise.reject(new Error("unused")),
+        archiveSyncFieldStatesByRecordLinks: () => Promise.reject(new Error("unused")),
+        archiveScopeLinksByCorrespondence: () => Promise.reject(new Error("unused")),
+      },
+      credentials: { deleteByAppId: () => Promise.reject(new Error("unused")) },
       emit: (): Promise<void> => Promise.resolve(),
     } satisfies TxStores;
     return work(stores);

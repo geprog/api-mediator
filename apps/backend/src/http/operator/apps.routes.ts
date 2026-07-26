@@ -2,11 +2,15 @@ import {
   appLifecycleTransitionResponseSchema,
   appListResponseSchema,
   appSpecsResponseSchema,
+  deregisterAppRequestSchema,
+  deregisterAppResponseSchema,
   registerAppRequestSchema,
   registerAppResponseSchema,
+  type AppDeregistrationSummaryDto,
   type AppLifecycleTransitionResponse,
   type AppListResponse,
   type AppSpecsResponse,
+  type DeregisterAppResponse,
   type RegisterAppResponse,
 } from "@mediator/contracts";
 import type { RegisteredApp } from "@mediator/domain";
@@ -19,13 +23,23 @@ import { parseInput } from "../validation.js";
 import { idParamSchema, type OperatorApiDeps } from "./deps.js";
 
 /**
- * The AL-1 transition port the routes drive, structurally satisfied by
+ * The AL-1/AL-2 transition port the routes drive, structurally satisfied by
  * `AppLifecycleService`. Narrow by design (the routes own no persistence), so the route
  * tests can drive the whole surface with an in-memory double.
  */
 export interface AppLifecycleMutator {
   disable(appId: string, actor: string): Promise<RegisteredApp>;
   enable(appId: string, actor: string): Promise<RegisteredApp>;
+  /**
+   * AL-2 — the destructive, confirmed deregistration. `confirmation` is the operator's
+   * explicit confirmation token (the app's exact name); the **service** validates it, so
+   * this route never decides whether a cascade may run.
+   */
+  deregister(
+    appId: string,
+    actor: string,
+    confirmation: string,
+  ): Promise<{ readonly app: RegisteredApp; readonly summary: AppDeregistrationSummaryDto }>;
 }
 
 /**
@@ -37,20 +51,26 @@ export interface AppLifecycleMutator {
  *   `viewer`.
  * - `POST /api/apps/:id/disable` — AL-1.1 `active → disabled`; `operator` only.
  * - `POST /api/apps/:id/enable` — AL-1.3 `disabled → active`; `operator` only.
+ * - `POST /api/apps/:id/deregister` — AL-2, destructive + **confirmed**; `operator` only.
  *
- * The two transition handlers are **thin**: authenticate/authorize (OA-1/OA-2), validate
- * the path parameter, and delegate every invariant to {@link AppLifecycleMutator} — the
- * legal-transition guard, the operator attribution (AL-1.4/OA-3), the coupled `GraphEdge`
- * recompute (GR-2/GR-3) and the by-endpoint cache drop (XI-2). Both require an
- * `operator`; a `viewer` is rejected `403` by the pre-handler **before** the handler runs,
- * so nothing is mutated (AL-1.4). Disabling an already-`disabled` app (or enabling an
- * `active` one) surfaces as the service's `409`.
+ * The transition handlers are **thin**: authenticate/authorize (OA-1/OA-2), validate the
+ * path parameter (and, for deregister, the confirmation body), and delegate every
+ * invariant to {@link AppLifecycleMutator} — the legal-transition guard, the confirmation
+ * check itself, the whole deregister cascade, the operator attribution (AL-1.4/AL-2.8 /
+ * OA-3), the coupled `GraphEdge` recompute (GR-2/GR-3) and the by-endpoint cache drop
+ * (XI-2). All three require an `operator`; a `viewer` is rejected `403` by the pre-handler
+ * **before** the handler runs, so nothing is mutated and no cascade starts (AL-1.4 /
+ * AL-2.8). Disabling an already-`disabled` app (or enabling an `active` one) surfaces as
+ * the service's `409`.
  *
  * Disable carries **no** destructive-confirmation step: it is reversible and touches no
- * rule/binding state (AL-4.3). The confirmed, destructive **deregister** is AL-2/AL-4 and
- * is deliberately not part of this surface.
+ * rule/binding state (AL-4.3). Deregister does (AL-2.1): its body must carry
+ * `confirm = <the app's exact name>`, so a bare `POST` fails validation with `400` before
+ * anything is touched — an app cannot be deregistered by accident. The UI over these
+ * routes is AL-4.
  *
- * No response carries credential material (AR-1 crit 10, AR-2 crit 5).
+ * No response carries credential material (AR-1 crit 10, AR-2 crit 5); the deregister
+ * response's cascade summary is counts only.
  */
 export function registerAppRoutes(app: FastifyInstance, deps: OperatorApiDeps): void {
   app.post(
@@ -111,6 +131,24 @@ export function registerAppRoutes(app: FastifyInstance, deps: OperatorApiDeps): 
     "/api/apps/:id/enable",
     { preHandler: requireOperator },
     (request): Promise<AppLifecycleTransitionResponse> => transition(request, lifecycle, "enable"),
+  );
+
+  // AL-2 — the destructive, confirmed deregistration. The body's `confirm` must repeat the
+  // app's exact name; a bare POST fails `400` here, and a wrong name fails `400` in the
+  // service, both before a single row is touched.
+  app.post(
+    "/api/apps/:id/deregister",
+    { preHandler: requireOperator },
+    async (request): Promise<DeregisterAppResponse> => {
+      const { id } = parseInput(idParamSchema, request.params, "path parameters");
+      const body = parseInput(deregisterAppRequestSchema, request.body, "deregistration request");
+      const actor = getPrincipal(request).identity;
+      const result = await lifecycle.deregister(id, actor, body.confirm);
+      return deregisterAppResponseSchema.parse({
+        app: toRegisteredAppDto(result.app),
+        cascade: result.summary,
+      });
+    },
   );
 }
 

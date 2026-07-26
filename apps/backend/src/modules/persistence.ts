@@ -1,8 +1,10 @@
 import type { CredentialMaterial } from "@mediator/credentials";
 import { CredentialStore, DbCredentialPersistence } from "@mediator/credentials";
 import type {
+  AdapterBindingBackendDeletion,
   CredentialMetadata,
   Database,
+  DbHandle,
   DetectionJobScope,
   ResourceBindingRefPatch,
   ScopePathBindingPatch,
@@ -13,13 +15,16 @@ import {
   ApiSpecRepository,
   ApprovedMappingRepository,
   AuditLogRepository,
+  CredentialRepository,
   DetectionJobRepository,
   DownstreamArtifactRepository,
   MappingArtifactsRepository,
+  RecordLinkRepository,
   RegisteredAppRepository,
   ResourceBindingRepository,
   ScopeCorrespondenceRepository,
   ScopeLinkRepository,
+  SyncFieldStateRepository,
   SyncRuleRepository,
   tx,
 } from "@mediator/db";
@@ -28,6 +33,7 @@ import type { CredentialStoreLogger } from "@mediator/credentials";
 import type { EventBus } from "@mediator/event-bus";
 import type {
   AdapterBinding,
+  AdapterEndpoint,
   ApiSpec,
   ApiSpecRole,
   ApiSpecStatus,
@@ -101,6 +107,8 @@ export interface AppTxRepo {
 export interface SpecTxRepo {
   create(spec: ApiSpec): Promise<ApiSpec>;
   getById(id: string): Promise<ApiSpec | undefined>;
+  /** AL-2.4 — the app's specs, in every status: the set the deregister cascade archives. */
+  listByAppId(appId: string): Promise<ApiSpec[]>;
   /** SL-1.1 — the single `active` spec of a `(app, role)` lineage (the version a re-ingest advances from). */
   findActiveByAppAndRole(appId: string, role: ApiSpecRole): Promise<ApiSpec | undefined>;
   /** SL-1.1 — advance a spec's lifecycle status (used to supersede the prior active version). */
@@ -181,6 +189,18 @@ export interface ApprovedMappingTxRepo {
    * from `active` and — SL-10.5 — from `suspended` (the more-blocking condition wins).
    */
   markStale(id: string): Promise<ApprovedMapping | undefined>;
+  /**
+   * AL-2.4 — set **only** `status = "archived"` from **any** status: the app left the
+   * landscape, so the mapping is retained for audit and never executed again. No
+   * compare-and-set guard (unlike the SL-10 transitions) and no other column moves.
+   */
+  markArchived(id: string): Promise<ApprovedMapping | undefined>;
+  /**
+   * AL-2.4 — clear every `counterpartMappingId` **pointing at** one of `mappingIds` (the
+   * rows just archived), keyed by the pointed-at id so the surviving other side of a
+   * bidirectional peer pair is found whatever app it belongs to. Returns the cleared ids.
+   */
+  clearCounterpartsPointingAt(mappingIds: readonly string[]): Promise<string[]>;
 }
 
 /**
@@ -201,7 +221,7 @@ export interface MappingArtifactsTxReader {
  * `status` is its own — SL-4.2). SL-5.2 additionally reads a mapping's `SyncRule`s to
  * re-validate their `pollOperationRef` against the new IR.
  */
-export interface DownstreamArtifactTxReader {
+export interface DownstreamArtifactTxRepo {
   listAdapterBindingsByMapping(mappingId: string): Promise<AdapterBinding[]>;
   /** SL-5.2 — a mapping's `SyncRule`s, whose pinned source `pollOperationRef` is re-validated. */
   listSyncRulesByMapping(approvedMappingId: string): Promise<SyncRule[]>;
@@ -211,6 +231,34 @@ export interface DownstreamArtifactTxReader {
    * response cached while it was healthy).
    */
   listAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBinding[]>;
+  // ── AL-2 deregister cascade: the destructive adapter-artifact half ──────────
+  /**
+   * AL-2.3 — tear the app's adapter surface down: delete its `AdapterEndpoint`s (their
+   * bindings and write outcomes cascade). Callers then hit **nothing**, not
+   * `not-yet-mapped`. Returns the deleted endpoint ids — also the endpoints whose cached
+   * entries are dropped after commit.
+   */
+  deleteAdapterEndpointsByConsumerApp(consumerAppId: string): Promise<string[]>;
+  /**
+   * AL-2.2 — delete every binding the app **backs** on *other* consumers' endpoints,
+   * first **unchaining** any surviving binding that depended on one of them (the
+   * composite same-endpoint self-FK has no delete action, and a cross-backend
+   * `fanout-merge` chain would otherwise abort the whole cascade — AD-6.3).
+   *
+   * Returns the endpoints left behind (re-inspected for the `not-yet-mapped` revert) and
+   * the survivors it unchained (whose endpoints are flagged `composition-required`).
+   */
+  deleteAdapterBindingsByBackendApp(backendAppId: string): Promise<AdapterBindingBackendDeletion>;
+  /** AL-2.2 — an endpoint's remaining bindings; **none** means it serves `not-yet-mapped`. */
+  listAdapterBindingsByEndpoint(adapterEndpointId: string): Promise<AdapterBinding[]>;
+  /**
+   * AL-2.2 — return an `active` endpoint that just lost its last binding to
+   * `composition-required` (the guarded CO-1.3 transition; a no-op on a
+   * `disabled`/already-`composition-required` one), so the surviving consumer surface
+   * reads as "awaiting a new backend" rather than as a live configuration backed by
+   * nothing. It serves `not-yet-mapped` either way (RT-3.1 keys on *no active binding*).
+   */
+  markAdapterEndpointCompositionRequired(adapterEndpointId: string): Promise<AdapterEndpoint>;
 }
 
 /**
@@ -222,6 +270,13 @@ export interface DownstreamArtifactTxReader {
  */
 export interface SyncRuleTxRepo {
   clearPollOperationRef(id: string): Promise<void>;
+  /**
+   * AL-2.2 — **delete** every rule of every `ApprovedMapping` naming the app on either
+   * side (a rule has no app column of its own). Its `poll_snapshot`/`poll_scope_state`
+   * follow by cascade; the mapping rows are archived, never deleted, so this cannot ride
+   * on their cascade. Returns the deleted rule ids.
+   */
+  deleteByApp(appId: string): Promise<string[]>;
 }
 
 /**
@@ -232,6 +287,47 @@ export interface SyncRuleTxRepo {
  */
 export interface ScopeCorrespondenceSideTxReader {
   listByResourceSide(appId: string, resourceRef: string): Promise<ScopeCorrespondence[]>;
+  /**
+   * **AL-2.5 — every scoped pair the app is a side of, whatever the resource.** The
+   * deregister cascade archives each one's `ScopeLink`s through
+   * {@link SyncStateArchivalTxRepo.archiveScopeLinksByCorrespondence} (SS-10.5).
+   */
+  listByApp(appId: string): Promise<ScopeCorrespondence[]>;
+}
+
+/**
+ * **AL-2.5 — the per-app sync-state archival the deregister cascade drives.** One port
+ * over three tables because they archive as one fact ("this app's linked state leaves the
+ * live set"): a `RecordLink` is archived, its per-side `SyncFieldState` with it, and a
+ * scoped pair's `ScopeLink`s through the existing SS-10.5 sweep.
+ *
+ * Everything here **archives, never deletes and never tombstones**: no record was
+ * deleted, the app left the landscape (`docs/architecture/extensibility.md` *App
+ * lifecycle*; contrast `Tombstone` in `docs/glossary.md`). Satisfied in production by
+ * `RecordLinkRepository` + `SyncFieldStateRepository` + `ScopeLinkRepository` bound to the
+ * open transaction.
+ */
+export interface SyncStateArchivalTxRepo {
+  /** Every link id the app participates in, in **any** status (the field-state owner set). */
+  listRecordLinkIdsByApp(appId: string): Promise<string[]>;
+  /** Archive the app's still-`active` links (a `tombstoned` one keeps its tombstone). */
+  archiveRecordLinksByApp(appId: string): Promise<string[]>;
+  /** Archive the still-`active` per-side baselines of those links. Returns the row count. */
+  archiveSyncFieldStatesByRecordLinks(recordLinkIds: readonly string[]): Promise<number>;
+  /** SS-10.5 — archive a scoped pair's still-`active` `ScopeLink`s. Returns the count. */
+  archiveScopeLinksByCorrespondence(scopeCorrespondenceId: string): Promise<number>;
+}
+
+/**
+ * **AL-2.6 — credential deletion, the one artifact the cascade removes outright.**
+ * Deliberately separate from the write-only {@link CredentialTxStore}: storing needs the
+ * `CredentialStore`'s encryption, deleting needs none — and keeping them apart preserves
+ * "no code path returns credential material" (`docs/architecture/security.md`). Neither
+ * method accepts or returns a payload; the count is for the cascade summary.
+ */
+export interface CredentialTxRepo {
+  /** Delete **every** credential of the app, `adapterToken` included (AT-4.5 revocation). */
+  deleteByAppId(appId: string): Promise<number>;
 }
 
 /**
@@ -324,13 +420,16 @@ export interface TxStores {
   readonly detectionJobs: DetectionJobTxRepo;
   // ── SL-4 breaking reaction: match refs, drop caches, recompute graph edges ──
   readonly mappingArtifacts: MappingArtifactsTxReader;
-  readonly downstreamArtifacts: DownstreamArtifactTxReader;
+  readonly downstreamArtifacts: DownstreamArtifactTxRepo;
   readonly graph: GraphEdgeRecompute;
   readonly cacheInvalidator: EndpointCacheInvalidator;
   // ── SL-5 breaking reaction: re-validate the spec's operational refs to unconfirmed ──
   readonly syncRules: SyncRuleTxRepo;
   readonly scopeCorrespondences: ScopeCorrespondenceSideTxReader;
   readonly scopeLifecycle: ScopeRevalidationTxService;
+  // ── AL-2 deregister cascade: archive the app's linked sync state, delete its secrets ──
+  readonly syncStateArchival: SyncStateArchivalTxRepo;
+  readonly credentials: CredentialTxRepo;
   emit(event: DomainEventEnvelope): Promise<void>;
 }
 
@@ -413,8 +512,34 @@ export class DbUnitOfWork implements UnitOfWork {
           scopeCorrespondences: new ScopeCorrespondenceRepository(txn),
           scopeLinks: new ScopeLinkRepository(txn),
         }),
+        // AL-2.5 — the three archival repositories behind one port, all on this handle.
+        syncStateArchival: dbSyncStateArchival(txn),
+        // AL-2.6 — the write-only credential repository's delete (no payload crosses it).
+        credentials: new CredentialRepository(txn),
         emit: (event) => this.#eventBus.emit(event, txn),
       }),
     );
   }
+}
+
+/**
+ * AL-2.5 — the real {@link SyncStateArchivalTxRepo}: the three archival repositories
+ * behind one port, all bound to the SAME transaction handle so the link/field-state/
+ * scope-link archival commits atomically with the rest of the deregister cascade.
+ */
+export function dbSyncStateArchival(txn: DbHandle): SyncStateArchivalTxRepo {
+  const recordLinks = new RecordLinkRepository(txn);
+  const syncFieldStates = new SyncFieldStateRepository(txn);
+  const scopeLinks = new ScopeLinkRepository(txn);
+  return {
+    listRecordLinkIdsByApp: (appId) => recordLinks.listIdsByApp(appId),
+    archiveRecordLinksByApp: (appId) => recordLinks.archiveByApp(appId),
+    archiveSyncFieldStatesByRecordLinks: (recordLinkIds) =>
+      syncFieldStates.archiveByRecordLinks(recordLinkIds),
+    // SS-10.5 — reused verbatim, with no `establishedBy` narrowing: a deregistered app
+    // takes *every* still-active link of the pair with it, not only the identity-matched
+    // ones a re-validation would archive.
+    archiveScopeLinksByCorrespondence: (scopeCorrespondenceId) =>
+      scopeLinks.archiveByCorrespondence(scopeCorrespondenceId),
+  };
 }

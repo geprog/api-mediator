@@ -246,6 +246,8 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
         markActive: unused("approvedMappings"),
         listSuspendedBySpecId: unused("approvedMappings"),
         listByAppId: unused("approvedMappings"),
+        markArchived: unused("approvedMappings"),
+        clearCounterpartsPointingAt: unused("approvedMappings"),
       },
       mappingArtifacts: {
         listFieldMappings: unused("mappingArtifacts"),
@@ -255,6 +257,12 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
         listAdapterBindingsByMapping: unused("downstreamArtifacts"),
         listSyncRulesByMapping: unused("downstreamArtifacts"),
         listAdapterBindingsByBackendApp: unused("downstreamArtifacts"),
+        // AL-2 deregister-cascade ports — re-inclusion is analysis-only, so touching
+        // any of them fails the transaction.
+        deleteAdapterEndpointsByConsumerApp: unused("downstreamArtifacts"),
+        deleteAdapterBindingsByBackendApp: unused("downstreamArtifacts"),
+        listAdapterBindingsByEndpoint: unused("downstreamArtifacts"),
+        markAdapterEndpointCompositionRequired: unused("downstreamArtifacts"),
       },
       graph: {
         recomputeSyncEdge: unused("graph"),
@@ -265,12 +273,26 @@ suite("SL-9 re-inclusion: replace → scoped job → worker → proposal (requir
           throw new Error("SL-9 replace must not drop caches");
         },
       },
-      syncRules: { clearPollOperationRef: unused("syncRules") },
-      scopeCorrespondences: { listByResourceSide: unused("scopeCorrespondences") },
+      syncRules: {
+        clearPollOperationRef: unused("syncRules"),
+        deleteByApp: unused("syncRules"),
+      },
+      scopeCorrespondences: {
+        listByResourceSide: unused("scopeCorrespondences"),
+        listByApp: unused("scopeCorrespondences"),
+      },
       scopeLifecycle: {
         revalidateSpecBindings: unused("scopeLifecycle"),
         revalidateCorrespondence: unused("scopeLifecycle"),
       },
+      // AL-2 deregister-cascade ports — unused here; every call rejects loudly.
+      syncStateArchival: {
+        listRecordLinkIdsByApp: () => Promise.reject(new Error("unused")),
+        archiveRecordLinksByApp: () => Promise.reject(new Error("unused")),
+        archiveSyncFieldStatesByRecordLinks: () => Promise.reject(new Error("unused")),
+        archiveScopeLinksByCorrespondence: () => Promise.reject(new Error("unused")),
+      },
+      credentials: { deleteByAppId: () => Promise.reject(new Error("unused")) },
       emit: unused("the event bus"),
     };
   }
