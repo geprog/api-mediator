@@ -46,6 +46,21 @@ export interface SyncEventOutbox {
 }
 
 /**
+ * **GR-4 — an arm's-length reactor invoked with each recorded audit entry, in the record
+ * transaction.** A narrow injected port (like {@link SyncEventOutbox}) so `@mediator/outbound`
+ * stays free of any graph dependency: the composition root wires an implementation that
+ * advances the projected `GraphEdge`'s `metadata.lastActivityAt` from the just-recorded
+ * `SyncEvent` (`docs/requirements/phase-6-graph.md` GR-4). It runs **inside** the same
+ * transaction as the audit-row write, so the activity advance commits or rolls back
+ * atomically with it; the advance is a single cheap monotonic DB write (dispatcher-tx-safe)
+ * and self-filters (it advances only a `sync-execution` row attributable to a rule), so a
+ * `poll-run`/`backfill-run` row passed here is a clean no-op.
+ */
+export interface RecordedAuditReactor {
+  onRecorded(entry: AuditLogEntry, tx: DbHandle): Promise<void>;
+}
+
+/**
  * **XI-1 — the `sync-execution` outbox event.** The CH-3 cache-invalidation consumer
  * (`apps/backend/src/http/adapter-runtime/cache-invalidation.ts`) reacts to a
  * `sync-execution`-typed bus event and reads exactly `status` + `originAppId` +
@@ -113,6 +128,7 @@ export class DbSyncEventStore implements SyncEventStore {
   public constructor(
     private readonly db: Database,
     private readonly outbox: SyncEventOutbox,
+    private readonly activityReactor?: RecordedAuditReactor,
   ) {}
 
   public async record(entry: AuditLogEntry): Promise<void> {
@@ -121,6 +137,12 @@ export class DbSyncEventStore implements SyncEventStore {
       const event = syncExecutionOutboxEvent(entry);
       if (event !== undefined) {
         await this.outbox.emit(event, tx);
+      }
+      // GR-4 — advance the edge's lastActivityAt from this durable SyncEvent, in the
+      // SAME transaction (atomic, monotonic, dispatcher-tx-safe). The reactor self-filters
+      // to sync-execution rows, so a poll-run/backfill-run is a no-op here.
+      if (this.activityReactor !== undefined) {
+        await this.activityReactor.onRecorded(entry, tx);
       }
     });
   }

@@ -1,6 +1,7 @@
 import {
   RESOURCE_BINDING_REF_KINDS,
   type ApiSpecMetadataDto,
+  type GraphEdgeDto,
   type RegisteredAppDto,
   type ResourceBindingDto,
   type ResourceBindingScopeDto,
@@ -9,6 +10,7 @@ import {
 import type {
   ApiSpec,
   AppCapabilities,
+  GraphEdge,
   Ir,
   RegisteredApp,
   ResourceBinding,
@@ -33,6 +35,29 @@ export function toRegisteredAppDto(app: RegisteredApp): RegisteredAppDto {
     capabilities: app.capabilities,
     createdAt: app.createdAt.toISOString(),
     ...(app.baseUrl !== undefined ? { baseUrl: app.baseUrl } : {}),
+  };
+}
+
+/**
+ * `GraphEdge` → wire DTO (GR-5.3): full `type`/`status`/`metadata` so the UI needs no
+ * second call for edge detail. `metadata.lastActivityAt` (a domain `Date | null`) becomes
+ * an ISO string or stays `null` (GR-4.3, an edge whose rules/bindings never executed).
+ */
+export function toGraphEdgeDto(edge: GraphEdge): GraphEdgeDto {
+  return {
+    id: edge.id,
+    sourceNodeId: edge.sourceNodeId,
+    targetNodeId: edge.targetNodeId,
+    type: edge.type,
+    status: edge.status,
+    metadata: {
+      direction: {
+        sourceSpecId: edge.metadata.direction.sourceSpecId,
+        targetSpecId: edge.metadata.direction.targetSpecId,
+      },
+      lastActivityAt:
+        edge.metadata.lastActivityAt === null ? null : edge.metadata.lastActivityAt.toISOString(),
+    },
   };
 }
 

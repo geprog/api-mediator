@@ -1,7 +1,7 @@
-import type { AppCapabilities, ResourceBinding } from "@mediator/domain";
+import type { AppCapabilities, GraphEdge, ResourceBinding } from "@mediator/domain";
 import { describe, expect, it } from "vitest";
 
-import { toResourceBindingDto } from "./dto-mappers.js";
+import { toGraphEdgeDto, toResourceBindingDto } from "./dto-mappers.js";
 
 /**
  * Unit tests for the `ResourceBinding` → wire DTO mapper's **scope-binding** serialization,
@@ -121,5 +121,41 @@ describe("toResourceBindingDto — scope-link serialization (SS-12 hazard A)", (
       "owner:record-derived",
       "id:scope-link",
     ]);
+  });
+});
+
+describe("toGraphEdgeDto (GR-5.3)", () => {
+  function edge(lastActivityAt: Date | null): GraphEdge {
+    return {
+      id: "edge-1",
+      sourceNodeId: "app-a",
+      targetNodeId: "app-b",
+      type: "sync",
+      status: "degraded",
+      metadata: {
+        direction: { sourceSpecId: "spec-a", targetSpecId: "spec-b" },
+        lastActivityAt,
+      },
+    };
+  }
+
+  it("carries the full type/status/metadata, with lastActivityAt as an ISO string", () => {
+    const activityAt = new Date("2026-07-21T08:15:00.000Z");
+    const dto = toGraphEdgeDto(edge(activityAt));
+    expect(dto).toStrictEqual({
+      id: "edge-1",
+      sourceNodeId: "app-a",
+      targetNodeId: "app-b",
+      type: "sync",
+      status: "degraded",
+      metadata: {
+        direction: { sourceSpecId: "spec-a", targetSpecId: "spec-b" },
+        lastActivityAt: activityAt.toISOString(),
+      },
+    });
+  });
+
+  it("serializes a never-executed edge's lastActivityAt as null (GR-4.3)", () => {
+    expect(toGraphEdgeDto(edge(null)).metadata.lastActivityAt).toBeNull();
   });
 });

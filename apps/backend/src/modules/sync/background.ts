@@ -69,6 +69,7 @@ import { getActiveTraceContext } from "@mediator/telemetry";
 import { applyFieldMappings } from "@mediator/transform";
 import type { FastifyBaseLogger } from "fastify";
 
+import { GraphActivity } from "../graph/index.js";
 import { RepoCounterpartBackfillModeLookup } from "./counterpart-backfill-mode.js";
 import { createCredentialApplier } from "./credential-applier.js";
 import { resolveAddedFieldSeedBackfill, resolveEnableRuleInput } from "./enable-resolver.js";
@@ -351,7 +352,14 @@ export function buildSyncBackground(deps: SyncBackgroundDeps): SyncBackground {
   // protocol client, load governor, credential store); it writes the SAME `event_outbox`
   // table the shared `OutboxDispatcher` (wired in `index.ts`) claims from, so producer and
   // consumer are two ends of one outbox.
-  const syncEventStore = new DbSyncEventStore(db, new PostgresEventBus());
+  // GR-4 — advance the projected `GraphEdge`'s `metadata.lastActivityAt` from each durable
+  // `sync-execution` `SyncEvent`, in the record's own transaction. Self-constructed here
+  // like the rest of this background's infra (the event bus, load governor, credential
+  // store); the advance is a cheap monotonic write and self-filters to sync-execution rows.
+  const graphActivity = new GraphActivity({ db });
+  const syncEventStore = new DbSyncEventStore(db, new PostgresEventBus(), {
+    onRecorded: (entry, handle) => graphActivity.recordFromAuditEntryWithin(handle, entry),
+  });
   const executor = new OutboundCallExecutor(protocol, credentialStore, syncEventStore, governor, {
     applyCredential,
   });

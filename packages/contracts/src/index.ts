@@ -308,3 +308,16 @@ export {
   type RecordProposalItemDecisionRequest,
   type RecordProposalItemDecisionResponse,
 } from "./mapping-proposals.js";
+
+export {
+  graphEdgeDirectionDtoSchema,
+  graphEdgeDtoSchema,
+  graphEdgeMetadataDtoSchema,
+  graphQuerySchema,
+  graphResponseSchema,
+  type GraphEdgeDirectionDto,
+  type GraphEdgeDto,
+  type GraphEdgeMetadataDto,
+  type GraphQuery,
+  type GraphResponse,
+} from "./graph.js";
