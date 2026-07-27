@@ -53,6 +53,9 @@ export {
   type AdapterBindingBackendDeletion,
   type AdapterEdgeMemberFact,
   type DownstreamArtifactOps,
+  type GraphEdgeActivityAdvance,
+  type GraphEdgeAppPair,
+  type GraphEdgeQuery,
   type GraphEdgeStatusUpdate,
   type SyncEdgeMemberFact,
 } from "./downstream-artifacts.js";

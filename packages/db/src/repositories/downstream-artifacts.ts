@@ -6,7 +6,7 @@ import type {
   GraphEdgeMetadata,
   SyncRule,
 } from "@mediator/domain";
-import { and, eq, exists, inArray, notExists, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, notExists, notInArray, or, sql, type SQL } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapAdapterBindingRow, toAdapterBindingInsert } from "../mappers/adapter-binding.js";
@@ -61,6 +61,48 @@ export interface GraphEdgeStatusUpdate {
   readonly type: GraphEdge["type"];
   readonly status: string;
   readonly direction: GraphEdgeMetadata["direction"];
+}
+
+/**
+ * **GR-4 — the activity advance patch** {@link DownstreamArtifactRepository.advanceGraphEdgeActivity}
+ * applies to an existing `graph_edge`, addressed by the same stable
+ * `(sourceNodeId, targetNodeId, type)` app-pair+type key (GR-1.4). It carries **only**
+ * `metadata.lastActivityAt` — the exact **disjoint** counterpart of
+ * {@link GraphEdgeStatusUpdate} (GR-1.5): the activity updater never rewrites `status`
+ * or `direction`, and the status recompute never rewrites `lastActivityAt`. The write
+ * is **monotonic** (GR-4.2): it only advances a strictly-newer `activityAt`, so a slow
+ * redelivery or an out-of-order event with an older timestamp can never move a live
+ * edge backwards.
+ */
+export interface GraphEdgeActivityAdvance {
+  readonly sourceNodeId: string;
+  readonly targetNodeId: string;
+  readonly type: GraphEdge["type"];
+  readonly activityAt: Date;
+}
+
+/**
+ * The `(source → target)` app pair a `SyncEvent`/`adapter-request` audit row resolves
+ * to, so GR-4 can key the activity advance by the stable node pair (GR-1.4) rather than
+ * the rule/binding id the audit row carries. For a sync edge the pair is the rule's
+ * `ApprovedMapping` `(sourceAppId → targetAppId)`; for an adapter-dependency edge it is
+ * the binding's `(consumer app → backend app)`.
+ */
+export interface GraphEdgeAppPair {
+  readonly sourceNodeId: string;
+  readonly targetNodeId: string;
+}
+
+/**
+ * The optional filter for {@link DownstreamArtifactRepository.listGraphEdges} (GR-5.2).
+ * Each field narrows the returned edge set (AND-combined): `appId` to edges **incident**
+ * to that node (source or target), `status` to a single edge status, `type` to one
+ * connection type (`sync` / `adapter-dependency`).
+ */
+export interface GraphEdgeQuery {
+  readonly appId?: string;
+  readonly status?: string;
+  readonly type?: GraphEdge["type"];
 }
 
 /**
@@ -352,6 +394,92 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
           eq(graphEdge.type, type),
         ),
       );
+  }
+
+  /**
+   * **GR-4 — advance an edge's `metadata.lastActivityAt` from the durable Audit/Event
+   * Log.** Stamp the edge addressed by `(sourceNodeId, targetNodeId, type)` with the
+   * recorded `SyncEvent`/`adapter-request` timestamp, touching **only**
+   * `metadata.lastActivityAt` via `jsonb_set` — exactly as {@link updateGraphEdge}
+   * isolates `metadata.direction` — so `status` and `direction` (GR-1's disjoint fields,
+   * GR-1.5) are left byte-identical. Keyed by the app-pair+type triple, **never** by a
+   * rule/binding id, since one edge aggregates many of those (GR-1.4).
+   *
+   * **Monotonic (GR-4.2), atomic under concurrency.** The `WHERE` advances only when the
+   * stored `lastActivityAt` is NULL (never stamped) or strictly older than `activityAt`,
+   * evaluated inside the same UPDATE — so an out-of-order or redelivered event with an
+   * older timestamp matches no row and **no-ops** (it can never move a live edge
+   * backwards), and two concurrent advances converge on the newest without a
+   * read-then-write race. A no-such-edge advance (the edge was removed, GR-1.2, or never
+   * created) likewise matches no row and is a safe no-op — the nullable `lastActivityAt`
+   * simply stays absent (GR-4.3). The timestamp is stored as an ISO string in the jsonb
+   * (the mapper reconstructs it to a `Date`), and compared as `timestamptz` so the order
+   * is chronological, not lexical.
+   */
+  public async advanceGraphEdgeActivity(advance: GraphEdgeActivityAdvance): Promise<void> {
+    const activityAt = advance.activityAt.toISOString();
+    await this.db
+      .update(graphEdge)
+      .set({
+        // Replace ONLY metadata.lastActivityAt; jsonb_set leaves metadata.direction and
+        // the row's `status` untouched — GR-1.5's disjoint-field guarantee, mirrored from
+        // updateGraphEdge's direction isolation. `to_jsonb(text)` stores it as a JSON
+        // string (jsonb has no Date), which the graph-edge mapper reconstructs to a Date.
+        metadata: sql`jsonb_set(${graphEdge.metadata}, '{lastActivityAt}', to_jsonb(${activityAt}::text))`,
+      })
+      .where(
+        and(
+          eq(graphEdge.sourceNodeId, advance.sourceNodeId),
+          eq(graphEdge.targetNodeId, advance.targetNodeId),
+          eq(graphEdge.type, advance.type),
+          // Monotonic guard: advance only past a NULL or strictly-older stamp.
+          sql`((${graphEdge.metadata} ->> 'lastActivityAt') IS NULL OR (${graphEdge.metadata} ->> 'lastActivityAt')::timestamptz < ${activityAt}::timestamptz)`,
+        ),
+      );
+  }
+
+  /**
+   * **GR-4 — resolve a `SyncEvent`'s sync edge key.** A `sync-execution` row references
+   * a `SyncRule` (`relatedRuleId`); its edge is that rule's `ApprovedMapping`
+   * `(sourceAppId → targetAppId)` sync edge. Returns the node pair, or `undefined` when
+   * the rule no longer resolves (a redelivery after the rule/mapping was deleted) — the
+   * caller then advances nothing.
+   */
+  public async resolveSyncEdgeKeyForRule(ruleId: string): Promise<GraphEdgeAppPair | undefined> {
+    const [row] = await this.db
+      .select({
+        sourceAppId: approvedMapping.sourceAppId,
+        targetAppId: approvedMapping.targetAppId,
+      })
+      .from(syncRule)
+      .innerJoin(approvedMapping, eq(syncRule.approvedMappingId, approvedMapping.id))
+      .where(eq(syncRule.id, ruleId));
+    return row === undefined
+      ? undefined
+      : { sourceNodeId: row.sourceAppId, targetNodeId: row.targetAppId };
+  }
+
+  /**
+   * **GR-4 — resolve an `adapter-request`'s adapter-dependency edge key.** An
+   * `adapter-request` row references an `AdapterBinding` (`relatedBindingId`); its edge
+   * is that binding's `(consumer app → backend app)` adapter-dependency edge — the
+   * consumer from the binding's `AdapterEndpoint`, the backend from the binding itself.
+   * Returns the node pair, or `undefined` when the binding no longer resolves.
+   */
+  public async resolveAdapterEdgeKeyForBinding(
+    bindingId: string,
+  ): Promise<GraphEdgeAppPair | undefined> {
+    const [row] = await this.db
+      .select({
+        consumerAppId: adapterEndpoint.consumerAppId,
+        backendAppId: adapterBinding.backendAppId,
+      })
+      .from(adapterBinding)
+      .innerJoin(adapterEndpoint, eq(adapterBinding.adapterEndpointId, adapterEndpoint.id))
+      .where(eq(adapterBinding.id, bindingId));
+    return row === undefined
+      ? undefined
+      : { sourceNodeId: row.consumerAppId, targetNodeId: row.backendAppId };
   }
 
   // ── Reconciliation sweep query ─────────────────────────────────────────────
@@ -736,5 +864,37 @@ export class DownstreamArtifactRepository implements DownstreamArtifactOps {
         ),
       );
     return row === undefined ? undefined : mapGraphEdgeRow(row);
+  }
+
+  /**
+   * **GR-5.1/GR-5.2 — the materialized edge set, optionally filtered.** Every
+   * `graph_edge` row (the projection **as materialized** — never recomputed here),
+   * assembled by {@link GraphService.getGraph} into `{ nodes, edges }`. Each row carries
+   * its full `type`/`status`/`metadata`, so the read needs no second query for edge
+   * detail (GR-5.3). The optional {@link GraphEdgeQuery} narrows the set (AND-combined):
+   * `appId` to edges incident to that node, `status`/`type` to that value. Returned
+   * **unpaginated** (GR-5.6 — small-landscape scale).
+   */
+  public async listGraphEdges(filter: GraphEdgeQuery = {}): Promise<GraphEdge[]> {
+    const conditions: (SQL | undefined)[] = [];
+    if (filter.appId !== undefined) {
+      conditions.push(
+        or(eq(graphEdge.sourceNodeId, filter.appId), eq(graphEdge.targetNodeId, filter.appId)),
+      );
+    }
+    if (filter.status !== undefined) {
+      conditions.push(eq(graphEdge.status, filter.status));
+    }
+    if (filter.type !== undefined) {
+      conditions.push(eq(graphEdge.type, filter.type));
+    }
+    const rows =
+      conditions.length === 0
+        ? await this.db.select().from(graphEdge)
+        : await this.db
+            .select()
+            .from(graphEdge)
+            .where(and(...conditions));
+    return rows.map(mapGraphEdgeRow);
   }
 }

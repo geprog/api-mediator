@@ -70,6 +70,7 @@ export {
   DbSyncEventStore,
   FakeSyncEventStore,
   syncExecutionOutboxEvent,
+  type RecordedAuditReactor,
   type SyncEventOutbox,
   type SyncEventStore,
   type SyncExecutionOutboxEvent,

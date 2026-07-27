@@ -8,6 +8,7 @@ import { registerApprovedMappingRoutes } from "./approved-mappings.routes.js";
 import { registerAppRoutes } from "./apps.routes.js";
 import { registerDeadLetterRoutes } from "./dead-letter.routes.js";
 import type { OperatorApiDeps } from "./deps.js";
+import { registerGraphRoutes } from "./graph.routes.js";
 import { registerMappingProposalRoutes } from "./mapping-proposals.routes.js";
 import { registerParkedConflictRoutes } from "./parked-conflicts.routes.js";
 import { registerPollTriggerRoutes } from "./poll-trigger.routes.js";
@@ -56,6 +57,12 @@ export function registerOperatorApi(app: FastifyInstance, deps: OperatorApiDeps)
   registerSpecRoutes(app, deps);
   registerResourceBindingRoutes(app, deps);
   registerMappingProposalRoutes(app, deps);
+  // Phase-6 GR-5 — the landscape graph read (`GET /api/graph`, viewer-readable). Mounted
+  // whenever the reader is wired (the real composition root always provides it); the
+  // in-memory unit harness omits it and the route is simply not registered.
+  if (deps.graphReader !== undefined) {
+    registerGraphRoutes(app, deps.graphReader);
+  }
   // Phase-6 SL-10 — manual suspend/resume of an `ApprovedMapping` + the read surface the
   // control needs. Mounted whenever both the suspension service (mutations) and the reader
   // (list) are wired; the in-memory unit harness omits them, exactly like the adapter surface.

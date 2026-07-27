@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import { MountManager, type ServeHandler } from "@mediator/adapter-engine";
-import { AuditLogRepository, type Database } from "@mediator/db";
+import { AuditLogRepository, tx, type Database } from "@mediator/db";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import Fastify from "fastify";
 
+import { GraphActivity } from "../../modules/graph/index.js";
 import { AdapterTelemetry } from "./adapter-telemetry.js";
 import { DbAdapterStore } from "./db-adapter-store.js";
 import type { ConsumerAppResolver } from "./consumer-app-resolver.js";
@@ -81,9 +82,17 @@ export function buildAdapterRuntime(deps: AdapterRuntimeDeps): AdapterRuntime {
   const protocolServer = new RestProtocolServer();
   const store = new DbAdapterStore(deps.db);
   const telemetry = deps.telemetry ?? new AdapterTelemetry();
+  // GR-4 — advance the adapter-dependency edge's lastActivityAt from each durable
+  // `adapter-request` audit row, in the SAME transaction as the row's insert (atomic +
+  // monotonic). Best-effort at the call site: the request handler already swallows a
+  // `record()` failure, so a graph hiccup never harms the live response.
+  const graphActivity = new GraphActivity({ db: deps.db });
   const auditWriter = {
-    record: (entry: Parameters<AuditLogRepository["insert"]>[0]) =>
-      new AuditLogRepository(deps.db).insert(entry),
+    record: (entry: Parameters<AuditLogRepository["insert"]>[0]): Promise<void> =>
+      tx(deps.db, async (handle) => {
+        await new AuditLogRepository(handle).insert(entry);
+        await graphActivity.recordFromAuditEntryWithin(handle, entry);
+      }),
   };
   const handler = new AdapterRequestHandler({
     protocolServer,

@@ -37,7 +37,7 @@ import {
 } from "./modules/approval/index.js";
 import { createDetectionMetricsSink } from "./modules/detection/telemetry.js";
 import { createMappingProvider } from "./modules/detection/provider.js";
-import { GraphProjection } from "./modules/graph/index.js";
+import { GraphProjection, GraphService } from "./modules/graph/index.js";
 import { DbUnitOfWork } from "./modules/persistence.js";
 import { RegistrationService } from "./modules/registration.js";
 import { ResourceBindingService } from "./modules/resource-bindings.js";
@@ -267,6 +267,10 @@ function buildOperatorApiDeps(deps: ServerDependencies): OperatorApiDeps {
     // metadata only. `DbAdapterStateReader` composes the composition/mapping/app/spec repos
     // behind the AP-1/AP-5.3 derivation; `DbAdapterRequestHistoryReader` reads the
     // `adapter-request` audit log for AP-5.1 (no payload, no token).
+    // Phase-6 GR-5 — the landscape graph read (`GET /api/graph`, viewer-readable). Pooled,
+    // read-only; assembles `{ nodes, edges }` from the materialized projection (the
+    // `active`-spec node predicate + the materialized `GraphEdge` set), never recomputed.
+    graphReader: new GraphService({ db }),
     adapterState: new DbAdapterStateReader(db),
     adapterRequestHistory: new DbAdapterRequestHistoryReader(db),
     // Phase-4 Sync HTTP API (SA-1..SA-3): built over the Sync Engine runtime's

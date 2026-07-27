@@ -1,9 +1,9 @@
 import type { RegisteredApp } from "@mediator/domain";
-import { and, eq } from "drizzle-orm";
+import { and, eq, exists, sql } from "drizzle-orm";
 
 import type { DbHandle } from "../client.js";
 import { mapRegisteredAppRow, toRegisteredAppInsert } from "../mappers/registered-app.js";
-import { registeredApp } from "../schema.js";
+import { apiSpec, registeredApp } from "../schema.js";
 
 /**
  * Persistence for `RegisteredApp`. Accepts and returns `@mediator/domain` types;
@@ -31,6 +31,38 @@ export class RegisteredAppRepository {
 
   public async list(): Promise<RegisteredApp[]> {
     const rows = await this.db.select().from(registeredApp);
+    return rows.map(mapRegisteredAppRow);
+  }
+
+  /**
+   * **GR-5.1/GR-5.4 — the landscape graph's nodes: every app that has ≥1 `active`
+   * `ApiSpec`.** This single predicate satisfies both the include- and the
+   * exclude-side of node membership at once (`docs/requirements/phase-6-graph.md`
+   * GR-5.4):
+   *
+   * - a **consumer-only** app is an ordinary node — it keeps its `active` CONSUMER spec;
+   * - a **disabled** app (AL-1) stays a node — AL-1 moves only `RegisteredApp.status`
+   *   and archives no spec, so it keeps ≥1 `active` spec (its edges just render paused);
+   * - a **deregistered** app (AL-2) is **gone** — AL-2 archives *every* spec of the app,
+   *   so it has zero `active` specs (and its edges were already removed by the cascade).
+   *
+   * So node membership can **not** be "every `registered_app` row": AL-2 deliberately
+   * *retains* the deregistered app's row (moved to `disabled`) because its `NOT NULL`
+   * FKs anchor the archived specs/mappings kept for audit. The `active`-spec `EXISTS`
+   * probe is what distinguishes a still-present disabled app from a deregistered one.
+   */
+  public async listGraphNodeApps(): Promise<RegisteredApp[]> {
+    const rows = await this.db
+      .select()
+      .from(registeredApp)
+      .where(
+        exists(
+          this.db
+            .select({ one: sql`1` })
+            .from(apiSpec)
+            .where(and(eq(apiSpec.appId, registeredApp.id), eq(apiSpec.status, "active"))),
+        ),
+      );
     return rows.map(mapRegisteredAppRow);
   }
 

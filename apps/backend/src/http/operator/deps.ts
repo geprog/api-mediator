@@ -17,6 +17,7 @@ import type {
   ApprovedMappingSuspensionMutator,
 } from "./approved-mappings.routes.js";
 import type { AppLifecycleMutator } from "./apps.routes.js";
+import type { GraphReader } from "./graph.routes.js";
 import type { AppReader, BindingReader, SpecReader } from "../../modules/persistence.js";
 import type { Registrar } from "../../modules/registration.js";
 import type { BindingConfirmer } from "../../modules/resource-bindings.js";
@@ -81,6 +82,13 @@ export interface OperatorApiDeps {
    * real db/transaction — legitimately omits it and the routes are simply not registered.
    */
   readonly appLifecycle?: AppLifecycleMutator;
+  /**
+   * Phase-6 GR-5 — the landscape graph read (`GET /api/graph`, viewer-readable). Optional
+   * for the same reason as the other db-backed surfaces: the real composition root always
+   * provides it (so the route is mounted in production), while the in-memory unit harness —
+   * which has no real db — legitimately omits it and the route is simply not registered.
+   */
+  readonly graphReader?: GraphReader;
   /**
    * Phase-5 adapter **read** surface (AP-1 state, AP-5 health): the pooled reader over
    * `AdapterEndpoint`/`AdapterBinding` + the per-binding mapping/backend status the
